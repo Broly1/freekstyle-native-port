@@ -18,6 +18,8 @@ pub enum Origin {
     Call,
     TailJump,
     CodePointer,
+    DataPointer,
+    Seed,
     AfterReturn,
     Prologue,
 }
@@ -286,13 +288,16 @@ fn written_gpr(i: &Insn) -> Option<u8> {
     }
 }
 
-pub fn analyze(elf: &Elf) -> Analysis {
+/// Discover functions. `seeds` are extra known function starts, e.g. ones
+/// found at runtime that no static heuristic reaches.
+pub fn analyze(elf: &Elf, seeds: &[u32]) -> Analysis {
     let seg = elf.segments.iter().find(|s| s.executable).expect("no executable segment");
     let w = Walker { elf, code_lo: seg.vaddr, code_hi: seg.vaddr + seg.file_len as u32 };
 
     let mut functions: BTreeMap<u32, Function> = BTreeMap::new();
     let mut covered = HashSet::new();
     let mut queue = vec![(elf.entry, Origin::Entry)];
+    queue.extend(seeds.iter().map(|&a| (a, Origin::Seed)));
     let mut pointers: BTreeSet<u32> = BTreeSet::new();
 
     loop {
@@ -315,28 +320,54 @@ pub fn analyze(elf: &Elf) -> Analysis {
 
         // Pointer-only functions: accept a code address that nothing has
         // explored yet when it looks like a function start.
+        let prologue = |a: u32| {
+            let i = w.insn(a);
+            i.m == Mnemonic::Addiu && i.rt() == SP && i.rs() == SP && i.imm() < 0
+        };
+        // True when the nearest non-padding word before `a` ends a function
+        // (`jr $ra` and its delay slot). Functions are 16-byte aligned, so
+        // zero words may sit in between.
+        let after_return = |a: u32| {
+            let mut p = a.wrapping_sub(4);
+            while p > w.code_lo && w.elf.read_u32(p) == Some(0) {
+                p -= 4;
+            }
+            w.elf.read_u32(p) == Some(JR_RA) || w.elf.read_u32(p.wrapping_sub(4)) == Some(JR_RA)
+        };
         let looks_like_start = |a: u32| {
             let i = w.insn(a);
-            let prologue = i.m == Mnemonic::Addiu && i.rt() == SP && i.rs() == SP && i.imm() < 0;
-            prologue || w.elf.read_u32(a.wrapping_sub(8)) == Some(JR_RA)
+            i.raw != 0 && i.is_canonical() && (prologue(a) || after_return(a))
         };
         for &p in &pointers {
             if !covered.contains(&p) && looks_like_start(p) {
                 queue.push((p, Origin::CodePointer));
             }
         }
-        // Unexplored code directly after a known function's return, or
-        // starting with a stack-frame prologue.
+        if queue.is_empty() {
+            let text_end = covered.iter().max().copied().unwrap_or(w.code_lo) + 4;
+            // Words anywhere in the image that point at unexplored code:
+            // vtables and callback tables.
+            let mut a = w.code_lo;
+            while a < w.code_hi {
+                if let Some(v) = w.elf.read_u32(a) {
+                    if v % 4 == 0 && (w.code_lo..text_end).contains(&v) && !covered.contains(&v) && looks_like_start(v) {
+                        queue.push((v, Origin::DataPointer));
+                    }
+                }
+                a += 4;
+            }
+        }
+        // Unexplored code after a function's return, or starting with a
+        // stack-frame prologue.
         if queue.is_empty() {
             let mut a = w.code_lo;
             while a < w.code_hi {
-                if !covered.contains(&a) {
-                    if covered.contains(&a.wrapping_sub(4)) && w.elf.read_u32(a - 8) == Some(JR_RA) {
-                        if w.insn(a).is_canonical() && w.insn(a).raw != 0 {
-                            queue.push((a, Origin::AfterReturn));
-                        }
-                    } else if looks_like_start(a) && w.elf.read_u32(a.wrapping_sub(8)) != Some(JR_RA) {
-                        queue.push((a, Origin::Prologue));
+                if !covered.contains(&a) && looks_like_start(a) {
+                    let origin = if after_return(a) { Origin::AfterReturn } else { Origin::Prologue };
+                    queue.push((a, origin));
+                    // One candidate per gap; the rest is found next round.
+                    while a < w.code_hi && !covered.contains(&a) {
+                        a += 4;
                     }
                 }
                 a += 4;

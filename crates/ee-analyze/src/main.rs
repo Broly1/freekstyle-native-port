@@ -3,14 +3,12 @@
 //!
 //! Usage: ee-analyze <SLUS_203.67> [out-dir]
 
-mod discover;
-mod elf;
-
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::{env, fs, process};
 
-use discover::Origin;
+use ee_analyze::discover::{self, Origin};
+use ee_analyze::elf;
 use r5900::{decode, Mnemonic};
 
 fn main() {
@@ -29,7 +27,7 @@ fn main() {
         eprintln!("{path}: {e}");
         process::exit(1);
     });
-    let a = discover::analyze(&elf);
+    let a = discover::analyze(&elf, &[]);
 
     // Summary
     let code_words = (a.code_hi - a.code_lo) / 4;

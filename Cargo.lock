@@ -10,5 +10,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ee-recomp"
+version = "0.1.0"
+dependencies = [
+ "ee-analyze",
+ "r5900",
+]
+
+[[package]]
+name = "ee-runtime"
+version = "0.1.0"
+dependencies = [
+ "r5900",
+]
+
+[[package]]
+name = "freekstyle"
+version = "0.1.0"
+dependencies = [
+ "ee-runtime",
+]
+
+[[package]]
 name = "r5900"
 version = "0.1.0"

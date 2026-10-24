@@ -98,6 +98,7 @@ impl fmt::Display for Disasm {
             RtVi => write!(f, "{rt}, {vis}"),
             FdFsFt => write!(f, "$f{}, $f{}, $f{}", i.fd(), i.fs(), i.ft()),
             FdFs => write!(f, "$f{}, $f{}", i.fd(), i.fs()),
+            FdFt => write!(f, "$f{}, $f{}", i.fd(), i.ft()),
             FsFt => write!(f, "$f{}, $f{}", i.fs(), i.ft()),
             VFdFsFt => write!(f, "{vfd}, {vfs}, {vft}"),
             VFdFsFtBc => write!(f, "{vfd}, {vfs}, {vft}{bc}"),

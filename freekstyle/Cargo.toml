@@ -1,0 +1,9 @@
+[package]
+name = "freekstyle"
+description = "Freekstyle, natively: recompiled game code plus the runtime"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+ee-runtime = { path = "../crates/ee-runtime" }

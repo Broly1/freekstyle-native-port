@@ -1,0 +1,11 @@
+# Guest functions replaced by native code in ee_runtime::hle.
+# Format: <address> <function name>. Regenerate with ee-recomp after editing.
+
+# DECI2 debug console write (printf backend); the devkit host never answers.
+0010aa60 tty_write
+
+# SIF: requests to the I/O processor are served natively (ee_runtime::iop).
+0010b730 sif_init        # sceSifInitCmd
+0010be00 sif_init        # sceSifInitRpc
+0010c470 sif_bind_rpc    # sceSifBindRpc
+0010c640 sif_call_rpc    # sceSifCallRpc

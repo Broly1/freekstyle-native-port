@@ -69,6 +69,7 @@ pub enum Format {
     RtVi,
     FdFsFt,
     FdFs,
+    FdFt,
     FsFt,
     VFdFsFt,
     VFdFsFtBc,
@@ -358,7 +359,7 @@ mnemonics! {
     SubS = "sub.s", FdFsFt;
     MulS = "mul.s", FdFsFt;
     DivS = "div.s", FdFsFt;
-    SqrtS = "sqrt.s", FdFs;
+    SqrtS = "sqrt.s", FdFt;
     AbsS = "abs.s", FdFs;
     MovS = "mov.s", FdFs;
     NegS = "neg.s", FdFs;

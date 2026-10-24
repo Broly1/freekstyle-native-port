@@ -1,0 +1,9 @@
+[package]
+name = "ee-runtime"
+description = "Runtime for recompiled EE code: CPU state, memory map, hardware and HLE kernel"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+r5900 = { path = "../r5900" }

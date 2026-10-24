@@ -1,8 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "freekstyle"]
+# `freekstyle` needs generated code from ee-recomp; build it explicitly with -p.
+default-members = ["crates/*"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 publish = false
+
+# The generated code is huge; keep debug builds usable.
+[profile.dev.package.freekstyle]
+opt-level = 1

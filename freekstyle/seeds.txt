@@ -1,0 +1,2 @@
+# Function starts found at runtime that static discovery misses.
+# One hex address per line. Regenerate with ee-recomp after editing.

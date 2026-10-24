@@ -13,25 +13,60 @@ go in `game/`, which git ignores.
 
 ## Crates
 
-| Crate        | Status | Purpose |
-|--------------|--------|---------|
-| `r5900`      | done   | Instruction decoder: MIPS III, EE extensions, MMI, COP0, COP1 FPU, VU0 macro mode |
-| `ee-analyze` | done   | Loads the ELF, finds every function, resolves jump tables, reports coverage |
-| `ee-recomp`  | next   | Emits Rust from the analyzed functions |
-| `ee-runtime` | todo   | CPU state, 32 MB RAM, syscalls, DMA, timers, threads, file I/O from extracted disc files |
-| `gs-vulkan`  | todo   | Graphics Synthesizer (GS) / GIF / VIF1 / VU1 implemented on Vulkan, with resolution scaling |
-| `iop-hle`    | todo   | High-level replacements for the I/O processor (IOP) modules (pad, memory card, CD, EA `AUDIO.IRX`) |
+| Crate        | Status  | Purpose |
+|--------------|---------|---------|
+| `r5900`      | done    | Instruction decoder: MIPS III, EE extensions, MMI, COP0, COP1 FPU, VU0 macro mode |
+| `ee-analyze` | done    | Loads the ELF, finds every function, resolves jump tables, reports coverage |
+| `ee-recomp`  | working | Emits one Rust function per guest function; HLE overrides via `freekstyle/hle.txt` |
+| `ee-runtime` | partial | CPU state, memory map, MMI/FPU/VU0 helpers, HLE kernel, vblank + interrupt delivery, SPR DMA, SIF RPC layer |
+| `freekstyle` | boots   | The game binary: generated code + runtime, with a hang watchdog |
+| IOP services | todo    | Native CD/file I/O, module loader, pad, memory card, EA audio (`ee_runtime::iop`) |
+| GS / Vulkan  | todo    | GIF/VIF1/VU1 paths and a Vulkan renderer with resolution scaling |
 
-## Usage
+## Building and running
 
 ```sh
-cargo run --release -p ee-analyze -- game/SLUS_203.67 out
+# 1. Copy SLUS_203.67 from your own disc into game/.
+# 2. Generate Rust from it, then build and run.
+cargo run --release -p ee-recomp -- game/SLUS_203.67 freekstyle/src/gen freekstyle/hle.txt freekstyle/seeds.txt
+cargo run --release -p freekstyle -- game/SLUS_203.67
 ```
+
+Generation takes under a second. The release build of about 460k generated
+lines takes about a minute on 12 cores.
+
+Debugging switches (environment variables):
+
+| Variable             | Effect |
+|----------------------|--------|
+| `FREEK_SYSCALL_LOG`  | Log every syscall and SIF RPC |
+| `FREEK_IO_LOG`       | Log every hardware register access |
+| `FREEK_HEARTBEAT`    | Every 2 s, print the current guest function and call rate |
+| `FREEK_QUIET`        | Hide routine kernel messages |
+
+When guest code calls an address the analyzer missed, the runtime says so.
+Add the address to `freekstyle/seeds.txt` and regenerate.
+
+## Current state
+
+The recompiled game boots natively. It runs the startup code, kernel and
+library init, resets the GS, waits for vblank, sends its first GIF packet,
+binds IOP services (module loader, CD/DVD, pad, memory card), starts VU0, and
+enters its frame loop. It then waits on CD file searches, because the CD
+service is still a stub. Nothing is drawn yet.
+
+Next steps, in order:
+1. CD/DVD and file I/O served from the disc image (search, read, stream).
+2. Thread scheduling (the game creates threads and blocks on semaphores).
+3. GIF/VIF1 packet processing and a Vulkan GS renderer.
+4. VU0/VU1 microprogram execution (99 `vcallms` sites, plus VU1 rendering).
+5. Pad input (SDL/evdev), memory card saves, EA audio.
 
 ## Analysis results (SLUS_203.67, sha256 debcb4b0…6d80a)
 
-- 3,873 functions. 95.5% of the text section (0x100000–0x2279c8) is reached,
-  with zero undecodable instructions.
+- 3,964 functions. 96.1% of the text section is reached. No instruction in
+  call-reachable code is undecodable; 3 heuristic starts land on data and
+  become runtime traps that never execute.
 - 59 jump tables resolved. The one remaining indirect `jr` (fn 0x2206c0)
   dispatches through a gp-relative table of 2 known functions. There are
   171 `jalr` call sites.
