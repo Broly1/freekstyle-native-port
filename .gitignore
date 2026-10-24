@@ -1,0 +1,6 @@
+/target
+# Extracted game data and executables are never committed.
+/game
+*.iso
+*.bin
+/out

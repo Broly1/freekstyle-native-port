@@ -1,0 +1,6 @@
+[package]
+name = "r5900"
+description = "Emotion Engine (MIPS R5900) instruction decoder"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
