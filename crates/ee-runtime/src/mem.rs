@@ -11,6 +11,7 @@
 //! RAM is also visible through the kseg0/kseg1 windows (0x8000_0000 and
 //! 0xa000_0000) and the uncached user mirrors (0x2000_0000, 0x3000_0000).
 
+use crate::dma::{self, Vif, CH_GIF, CH_VIF0, CH_VIF1};
 use crate::io::{DmaStart, Io, CH_FROM_SPR, CH_TO_SPR};
 
 pub const RAM_SIZE: usize = 32 << 20;
@@ -25,6 +26,7 @@ pub struct Memory {
     pub vu1_code: Box<[u8]>,
     pub vu1_data: Box<[u8]>,
     pub io: Io,
+    pub vif: [Vif; 2],
 }
 
 fn zeroed(n: usize) -> Box<[u8]> {
@@ -66,6 +68,7 @@ impl Memory {
             vu1_code: zeroed(16 << 10),
             vu1_data: zeroed(16 << 10),
             io: Io::new(),
+            vif: Default::default(),
         }
     }
 
@@ -119,8 +122,8 @@ impl Memory {
         }
     }
 
-    /// Perform a DMA transfer. Scratchpad transfers are plain copies; the
-    /// GS, VIF and SIF paths are not emulated yet and complete with no effect.
+    /// Perform a DMA transfer. Scratchpad transfers are plain copies, GIF
+    /// and VIF go through `dma`; IPU and SIF are not emulated yet.
     fn run_dma(&mut self, d: &DmaStart) {
         // MADR bit 31 selects the scratchpad instead of RAM.
         let mem_addr = |a: u32| if a & 0x8000_0000 != 0 { SPR_BASE | (a & 0x3ff0) } else { a & 0x01ff_fff0 };
@@ -136,6 +139,8 @@ impl Memory {
                     self.w128(dst, v);
                 }
             }
+            CH_GIF => dma::gif(self, d),
+            CH_VIF0 | CH_VIF1 => dma::vif(self, d),
             _ => self.io.dma_note(d, "not emulated yet; completed with no effect"),
         }
         self.io.dma_finish(d);

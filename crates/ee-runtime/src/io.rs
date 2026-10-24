@@ -3,6 +3,7 @@
 //! transfers complete instantly, and vblank is driven by the host clock.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 /// NTSC field rate.
@@ -60,6 +61,10 @@ pub struct Io {
     last_read: (u32, u64),
     start: Instant,
     pub vblanks: u64,
+    /// Channel to the GS on the render thread; None runs headless.
+    pub gs: Option<Sender<gs::Msg>>,
+    pub gif_packets: u64,
+    warned: HashSet<String>,
 }
 
 impl Io {
@@ -71,6 +76,22 @@ impl Io {
             last_read: (0, 0),
             start: Instant::now(),
             vblanks: 0,
+            gs: None,
+            gif_packets: 0,
+            warned: HashSet::new(),
+        }
+    }
+
+    pub fn send_gif(&mut self, data: Vec<u128>) {
+        self.gif_packets += 1;
+        if let Some(tx) = &self.gs {
+            let _ = tx.send(gs::Msg::Gif(data));
+        }
+    }
+
+    pub fn warn_once(&mut self, msg: &str) {
+        if self.warned.insert(msg.to_string()) {
+            eprintln!("[warn] {msg}");
         }
     }
 
@@ -93,6 +114,9 @@ impl Io {
             let csr = self.regs.get(&GS_CSR).copied().unwrap_or(0) | GS_CSR_VSINT;
             let csr = if n % 2 == 1 { csr | GS_CSR_FIELD } else { csr & !GS_CSR_FIELD };
             self.regs.insert(GS_CSR, csr);
+            if let Some(tx) = &self.gs {
+                let _ = tx.send(gs::Msg::Vsync);
+            }
         }
     }
 
@@ -185,6 +209,12 @@ impl Io {
             INTC_MASK => {
                 let old = self.regs.get(&addr).copied().unwrap_or(0);
                 self.regs.insert(addr, old ^ v);
+            }
+            0x1200_0000..=0x1200_00ff => {
+                self.regs.insert(addr, v);
+                if let Some(tx) = &self.gs {
+                    let _ = tx.send(gs::Msg::Priv(addr - 0x1200_0000, v as u64));
+                }
             }
             GS_CSR => {
                 // Event bits (0-4) are write-1-to-clear; keep FIELD.

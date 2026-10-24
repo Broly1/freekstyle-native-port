@@ -5,6 +5,7 @@
 
 pub mod cpu;
 pub mod disc;
+pub mod dma;
 pub mod fpu;
 pub mod hle;
 pub mod io;

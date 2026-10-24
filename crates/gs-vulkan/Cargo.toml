@@ -1,0 +1,13 @@
+[package]
+name = "gs-vulkan"
+description = "Vulkan renderer for the GS: upscaled hardware rendering and display output"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gs = { path = "../gs" }
+ash = "=0.38.0"
+ash-window = "=0.13.0"
+raw-window-handle = "=0.6.2"
+gpu-allocator = { version = "=0.27.0", default-features = false, features = ["vulkan"] }

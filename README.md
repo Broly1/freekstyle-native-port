@@ -21,7 +21,9 @@ go in `game/`, which git ignores.
 | `ee-runtime` | partial | CPU state, memory map, MMI/FPU/VU0 helpers, HLE kernel, vblank + interrupt delivery, SPR DMA, SIF RPC layer |
 | `freekstyle` | boots   | The game binary: generated code + runtime, with a hang watchdog |
 | IOP services | partial | CD/DVD: init, disk type/ready, file search and sector reads from the disc image. Todo: module loader, pad, memory card, EA audio |
-| GS / Vulkan  | todo    | GIF/VIF1/VU1 paths and a Vulkan renderer with resolution scaling |
+| `gs`         | working | GS core: registers, GIF PACKED/REGLIST/IMAGE, 4 MB VRAM with all swizzled formats (verified against hardware tables), transfers, CLUT, primitive assembly |
+| `gs-vulkan`  | working | Vulkan renderer: render targets at N x resolution (3x 1080p, 5x 4K), GS blend modes, texture cache, display output, screenshots |
+| VU0/VU1, IPU | todo    | Microprogram execution (3D) and MPEG decoding (splash/movies) |
 
 ## Building and running
 
@@ -29,8 +31,12 @@ go in `game/`, which git ignores.
 # 1. Copy SLUS_203.67 from your own disc into game/.
 # 2. Generate Rust from it, then build and run.
 cargo run --release -p ee-recomp -- game/SLUS_203.67 freekstyle/src/gen freekstyle/hle.txt freekstyle/seeds.txt
-cargo run --release -p freekstyle -- game/SLUS_203.67 [disc image]
+cargo run --release -p freekstyle -- [--res 1080|1440|4k] [--scale N] [--fullscreen] [--stretch]
 ```
+
+`--res` picks the window size and a matching internal resolution (3x, 4x
+or 5x the PS2's 512x448). `--scale` overrides the multiplier. F11 toggles
+fullscreen and Esc quits.
 
 The disc image (raw `.bin` or `.iso`) defaults to `game/Freekstyle.bin`.
 
@@ -46,31 +52,33 @@ Debugging switches (environment variables):
 | `FREEK_HEARTBEAT`    | Every 2 s, print the current guest function and call rate |
 | `FREEK_QUIET`        | Hide routine kernel messages |
 | `FREEK_RPC_DUMP`     | Hex-dump every IOP request |
+| `FREEK_GS_LOG`       | Renderer state every 2 s, privileged register writes |
+| `FREEK_SHOT=f.png:N` | Save the displayed frame N at internal resolution |
 
 When guest code calls an address the analyzer missed, the runtime says so.
 Add the address to `freekstyle/seeds.txt` and regenerate.
 
 ## Current state
 
-The recompiled game boots natively and reaches its frame loop.
+The game runs natively and draws through Vulkan. The first screen it shows
+is its own memory card check ("NO MEMORY CARD (8MB) ... IN MEMORY CARD
+SLOT 1."), rendered at up to 5x resolution. This is correct behaviour for
+now, because the memory card service is still a stub and there is no
+controller input to dismiss the screen.
 
-1. Startup, kernel and library init, GS reset, then the first GIF packet.
-2. IOP services bind. The CD service finds and reads files from the disc
-   image: `ENGLISH.DAT`, palettes, font glyphs, then
-   `\SXDATA\OPENING\SPLASH1.LSC`.
-3. Threads run under an EE-accurate priority scheduler. The CD callback
-   thread wakes when a read completes, and `sceCdSync` returns.
-4. The splash image is sent to the IPU (MPEG decoder), and the render loop
-   runs once per vblank at 60 Hz.
-
-Nothing is visible yet: the GIF, VIF1 and IPU DMA paths complete without
-effect.
+The path a frame takes: recompiled game code → VIF1/GIF DMA (tag chains,
+VIF commands) → GS packets over a channel → the `gs` core on the render
+thread → batched Vulkan draws into upscaled targets → displayed buffer
+blitted to the window at 4:3.
 
 Next steps, in order:
-1. GIF/VIF1 packet processing and a Vulkan GS renderer, so frames appear.
-2. IPU (MPEG-2 intra/inter decode) for the splash screen and movies.
-3. VU0/VU1 microprogram execution (99 `vcallms` sites, plus VU1 rendering).
-4. Pad input (libpad expects padman 4.0), memory card saves, EA audio.
+1. Controller input (libpad/padman over SIF) and memory card saves
+   (libmc/mcserv).
+2. VU1 microprogram execution, which the game uses for 3D (MSCAL is
+   currently skipped).
+3. VU0 microprograms (99 `vcallms` sites) and the IPU (MPEG splash and
+   movies).
+4. EA audio (`AUDIO.IRX` over SIF), then 60 fps and widescreen patches.
 
 ## Analysis results (SLUS_203.67, sha256 debcb4b0…6d80a)
 

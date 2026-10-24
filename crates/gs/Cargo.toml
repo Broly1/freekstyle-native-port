@@ -1,0 +1,6 @@
+[package]
+name = "gs"
+description = "PS2 Graphics Synthesizer: registers, GIF parsing, local memory, primitive assembly"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
