@@ -4,6 +4,7 @@
 //! is re-exported from [`prelude`].
 
 pub mod cpu;
+pub mod disc;
 pub mod fpu;
 pub mod hle;
 pub mod io;

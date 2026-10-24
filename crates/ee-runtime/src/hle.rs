@@ -79,11 +79,11 @@ pub fn sif_call_rpc(c: &mut Cpu) {
     if c.kernel.trace {
         eprintln!("[sif] call {server:#x} fno={fno:#x} mode={mode} send={ssize}B recv={rsize}B end={end_func:#x}");
     }
-    if end_func != 0 {
-        let saved = c.gpr;
-        c.w(A0, end_param as i32 as i64 as u64);
-        c.call(end_func);
-        c.gpr = saved;
-    }
     c.ws(V0, 0);
+    if end_func != 0 {
+        // On hardware the end function runs in the SIF DMA interrupt, and
+        // the kernel reschedules when the interrupt returns.
+        c.run_handler(end_param, end_func, (0, 0));
+        crate::kernel::reschedule(c);
+    }
 }

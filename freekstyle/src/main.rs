@@ -3,7 +3,9 @@
 //! Generate the code first:
 //!   cargo run --release -p ee-recomp -- game/SLUS_203.67 freekstyle/src/gen freekstyle/hle.txt
 //! then:
-//!   cargo run --release -p freekstyle -- game/SLUS_203.67
+//!   cargo run --release -p freekstyle -- game/SLUS_203.67 [disc image]
+//!
+//! The disc image (raw .bin or .iso) defaults to game/Freekstyle.bin.
 
 #[allow(clippy::all)]
 mod gen;
@@ -19,6 +21,11 @@ const STACK_SIZE: usize = 512 << 20;
 
 fn main() {
     let path = env::args().nth(1).unwrap_or_else(|| "game/SLUS_203.67".into());
+    let disc_path = env::args().nth(2).unwrap_or_else(|| "game/Freekstyle.bin".into());
+    let disc = ee_runtime::disc::Disc::open(disc_path.as_ref()).unwrap_or_else(|e| {
+        eprintln!("disc image: {e}");
+        process::exit(1);
+    });
     let bytes = fs::read(&path).unwrap_or_else(|e| {
         eprintln!("{path}: {e}");
         process::exit(1);
@@ -33,10 +40,13 @@ fn main() {
         .stack_size(STACK_SIZE)
         .spawn(move || {
             let mut c = Cpu::new(&gen::FUNCS);
+            c.iop.disc = Some(disc);
             let entry = ee_runtime::load_elf(&mut c, &bytes).expect("load ELF");
             eprintln!("[boot] {} functions, entry {entry:#x}", gen::FUNCS.len());
-            c.call(entry);
-            eprintln!("[boot] entry function returned");
+            ee_runtime::kernel::run_thread_body(&mut c, entry);
+            eprintln!("[boot] main thread returned");
+            // Other guest threads may still hold references to `c`.
+            process::exit(0);
         })
         .expect("spawn EE thread");
     thread::spawn(watchdog);

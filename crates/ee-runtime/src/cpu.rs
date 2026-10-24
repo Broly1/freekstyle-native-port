@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
+use crate::iop::Iop;
 use crate::kernel::Kernel;
 use crate::mem::Memory;
 use crate::vu::Vu0;
@@ -14,6 +15,19 @@ const FCC: u32 = 1 << 23;
 /// watchdog thread in the frontend.
 pub static LAST_ENTERED: AtomicU32 = AtomicU32::new(0);
 pub static ENTER_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Registers saved across a thread switch. VU0 is shared, as on hardware
+/// (the kernel does not save COP2 state).
+#[derive(Clone)]
+pub struct Context {
+    pub gpr: [[u64; 2]; 32],
+    pub hi: [u64; 2],
+    pub lo: [u64; 2],
+    pub sa: u32,
+    pub fpr: [f32; 32],
+    pub acc: f32,
+    pub fcr31: u32,
+}
 
 pub struct Cpu {
     /// 128-bit GPRs as [low 64, high 64]. Ordinary instructions only touch
@@ -31,6 +45,7 @@ pub struct Cpu {
     pub vu0: Vu0,
     pub mem: Memory,
     pub kernel: Kernel,
+    pub iop: Iop,
     funcs: &'static [(u32, Func)],
     /// Recently entered functions, newest last, for crash reports.
     recent: [u32; 32],
@@ -55,6 +70,7 @@ impl Cpu {
             vu0: Vu0::new(),
             mem: Memory::new(),
             kernel: Kernel::new(),
+            iop: Iop::default(),
             funcs,
             recent: [0; 32],
             recent_pos: 0,
@@ -115,23 +131,41 @@ impl Cpu {
         self.calls += 1;
         LAST_ENTERED.store(addr, Relaxed);
         ENTER_COUNT.store(self.calls, Relaxed);
-        if self.calls & 0xfff == 0 {
-            self.poll_interrupts();
+        if self.calls & 0xfff == 0 && (self.poll_interrupts() || self.kernel.need_resched) && !self.in_interrupt {
+            crate::kernel::reschedule(self);
         }
     }
 
-    /// Deliver pending, unmasked INTC interrupts to the handlers the game
-    /// registered with AddIntcHandler/AddDmacHandler. Called at function
-    /// entries and syscalls, which are safe points for recompiled code.
-    pub fn poll_interrupts(&mut self) {
+    pub fn save_context(&self) -> Context {
+        Context { gpr: self.gpr, hi: self.hi, lo: self.lo, sa: self.sa, fpr: self.fpr, acc: self.acc, fcr31: self.fcr31 }
+    }
+
+    pub fn load_context(&mut self, x: &Context) {
+        (self.gpr, self.hi, self.lo, self.sa) = (x.gpr, x.hi, x.lo, x.sa);
+        (self.fpr, self.acc, self.fcr31) = (x.fpr, x.acc, x.fcr31);
+    }
+
+    /// Deliver due alarms and pending, unmasked INTC interrupts to the
+    /// handlers the game registered. Called at function entries and
+    /// syscalls, which are safe points for recompiled code. Returns whether
+    /// any handler ran (it may have readied a thread).
+    pub fn poll_interrupts(&mut self) -> bool {
         use crate::io::{D_STAT, INTC_MASK, INTC_STAT, INT_DMAC};
         if self.in_interrupt || self.cop0[12] & (1 << 16) == 0 {
-            return;
+            return false;
+        }
+        let mut ran = false;
+        for a in crate::kernel::due_alarms(&mut self.kernel) {
+            // Alarm handlers take (alarm id, time, arg).
+            self.run_handler(a.id, a.func, (a.ticks as u32, a.arg));
+            ran = true;
         }
         self.mem.io.tick();
-        let pending = self.mem.io.reg(INTC_STAT) & self.mem.io.reg(INTC_MASK);
+        // The kernel keeps the DMAC line enabled and dispatches per channel
+        // through D_STAT's own mask, so it is never masked at the INTC.
+        let pending = self.mem.io.reg(INTC_STAT) & (self.mem.io.reg(INTC_MASK) | 1 << INT_DMAC);
         if pending == 0 {
-            return;
+            return ran;
         }
         // Acknowledge, as the kernel's dispatcher does before running handlers.
         let stat = self.mem.io.reg(INTC_STAT) & !pending;
@@ -146,30 +180,32 @@ impl Cpu {
                 let d = self.mem.io.reg(D_STAT);
                 let channels = d & (d >> 16) & 0x3ff;
                 self.mem.io.set_reg(D_STAT, d & !channels);
-                for h in self.kernel.handlers.iter().filter(|h| h.dmac && channels & (1 << h.cause) != 0) {
+                for h in self.kernel.handlers.iter().filter(|h| h.enabled && h.dmac && channels & (1 << h.cause) != 0) {
                     calls.push((h.cause, h.func, h.arg));
                 }
             } else {
-                for h in self.kernel.handlers.iter().filter(|h| !h.dmac && h.cause == cause) {
+                for h in self.kernel.handlers.iter().filter(|h| h.enabled && !h.dmac && h.cause == cause) {
                     calls.push((h.cause, h.func, h.arg));
                 }
             }
         }
         for (cause, func, arg) in calls {
-            self.run_handler(cause, func, arg);
+            self.run_handler(cause, func, (arg, 0));
         }
+        true
     }
 
     /// Run a guest interrupt handler with the interrupted state preserved.
-    fn run_handler(&mut self, cause: u32, func: u32, arg: u32) {
+    /// Handlers are called as `func(a0, a1, a2)`.
+    pub fn run_handler(&mut self, a0: u32, func: u32, (a1, a2): (u32, u32)) {
         let saved = (self.gpr, self.hi, self.lo, self.sa, self.fpr, self.acc, self.fcr31);
         self.in_interrupt = true;
         // Run below the interrupted code's stack; MIPS has no red zone.
         let sp = (self.r32(29) - 0x400) & !15;
         self.w(29, sp as i32 as i64 as u64);
-        self.w(4, cause as u64);
-        self.w(5, arg as i32 as i64 as u64);
-        self.w(6, 0);
+        self.w(4, a0 as u64);
+        self.w(5, a1 as i32 as i64 as u64);
+        self.w(6, a2 as i32 as i64 as u64);
         self.call(func);
         self.in_interrupt = false;
         (self.gpr, self.hi, self.lo, self.sa, self.fpr, self.acc, self.fcr31) = saved;
@@ -446,7 +482,9 @@ impl Cpu {
 
     pub fn syscall(&mut self, pc: u32) {
         crate::kernel::syscall(self, pc);
-        self.poll_interrupts();
+        if (self.poll_interrupts() || self.kernel.need_resched) && !self.in_interrupt {
+            crate::kernel::reschedule(self);
+        }
     }
 
     pub fn brk(&mut self, pc: u32) {

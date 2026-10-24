@@ -143,6 +143,11 @@ impl Memory {
 
     /// Copy bytes into guest memory (used by the ELF loader and HLE code).
     pub fn write_bytes(&mut self, addr: u32, bytes: &[u8]) {
+        let phys = (addr & 0x1fff_ffff) as usize;
+        if !(SPR_BASE..SPR_BASE + SPR_SIZE as u32).contains(&addr) && phys + bytes.len() <= RAM_SIZE {
+            self.ram[phys..phys + bytes.len()].copy_from_slice(bytes);
+            return;
+        }
         for (n, b) in bytes.iter().enumerate() {
             self.w8(addr + n as u32, *b);
         }
