@@ -27,6 +27,7 @@ pub struct Memory {
     pub vu1_data: Box<[u8]>,
     pub io: Io,
     pub vif: [Vif; 2],
+    pub pad: crate::pad::Pad,
 }
 
 fn zeroed(n: usize) -> Box<[u8]> {
@@ -69,6 +70,7 @@ impl Memory {
             vu1_data: zeroed(16 << 10),
             io: Io::new(),
             vif: Default::default(),
+            pad: Default::default(),
         }
     }
 
@@ -108,7 +110,19 @@ impl Memory {
             v[..n].copy_from_slice(b);
             return u128::from_le_bytes(v);
         }
-        self.io.read(addr & 0x1fff_ffff, n)
+        let v = self.io.read(addr & 0x1fff_ffff, n);
+        self.service_vblank();
+        v
+    }
+
+    /// Work that happens once per field: controller frames.
+    pub fn service_vblank(&mut self) {
+        if !std::mem::take(&mut self.io.new_vblank) {
+            return;
+        }
+        let mut pad = std::mem::take(&mut self.pad);
+        pad.vblank(&mut |addr, bytes| self.write_bytes(addr, bytes));
+        self.pad = pad;
     }
 
     #[cold]

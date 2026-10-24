@@ -32,6 +32,8 @@ pub const D_STAT: u32 = 0x1000_e010;
 pub const INTC_STAT: u32 = 0x1000_f000;
 pub const INTC_MASK: u32 = 0x1000_f010;
 const GS_CSR: u32 = 0x1200_1000;
+const IPU_CMD: u32 = 0x1000_2000;
+const IPU_CTRL: u32 = 0x1000_2010;
 
 pub const CH_FROM_SPR: usize = 8;
 pub const CH_TO_SPR: usize = 9;
@@ -65,6 +67,8 @@ pub struct Io {
     pub gs: Option<Sender<gs::Msg>>,
     pub gif_packets: u64,
     warned: HashSet<String>,
+    /// Set on each new vblank; cleared by `Memory::service_vblank`.
+    pub new_vblank: bool,
 }
 
 impl Io {
@@ -79,6 +83,7 @@ impl Io {
             gs: None,
             gif_packets: 0,
             warned: HashSet::new(),
+            new_vblank: false,
         }
     }
 
@@ -109,6 +114,7 @@ impl Io {
         let n = (self.start.elapsed().as_secs_f64() * VBLANK_HZ) as u64;
         if n > self.vblanks {
             self.vblanks = n;
+            self.new_vblank = true;
             let stat = self.reg(INTC_STAT) | 1 << INT_VBLANK_START | 1 << INT_VBLANK_END;
             self.set_reg(INTC_STAT, stat);
             let csr = self.regs.get(&GS_CSR).copied().unwrap_or(0) | GS_CSR_VSINT;
@@ -175,6 +181,9 @@ impl Io {
                 *c = (*c + 64) & 0xffff;
                 *c
             }
+            // IPU: no decoder yet, so never busy (BUSY bit 31, command
+            // result busy bit 63 of IPU_CMD).
+            IPU_CMD | IPU_CTRL => self.regs.get(&addr).copied().unwrap_or(0) & !(1u128 << 31) & !(1u128 << 63),
             _ => self.regs.get(&addr).copied().unwrap_or(0),
         };
         if self.last_read.0 == addr {

@@ -11,8 +11,11 @@ pub mod hle;
 pub mod io;
 pub mod iop;
 pub mod kernel;
+pub mod mc;
 pub mod mem;
 pub mod mmi;
+pub mod pad;
+pub mod text;
 pub mod vu;
 
 pub use cpu::{Cpu, Func};

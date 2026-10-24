@@ -10,3 +10,4 @@ ee-runtime = { path = "../crates/ee-runtime" }
 gs = { path = "../crates/gs" }
 gs-vulkan = { path = "../crates/gs-vulkan" }
 winit = "=0.30.5"
+gilrs = "=0.11.0"

@@ -161,6 +161,7 @@ impl Cpu {
             ran = true;
         }
         self.mem.io.tick();
+        self.mem.service_vblank();
         // The kernel keeps the DMAC line enabled and dispatches per channel
         // through D_STAT's own mask, so it is never masked at the INTC.
         let pending = self.mem.io.reg(INTC_STAT) & (self.mem.io.reg(INTC_MASK) | 1 << INT_DMAC);

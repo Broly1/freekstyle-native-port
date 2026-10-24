@@ -9,3 +9,31 @@
 0010be00 sif_init        # sceSifInitRpc
 0010c470 sif_bind_rpc    # sceSifBindRpc
 0010c640 sif_call_rpc    # sceSifCallRpc
+
+# libmc: saves go to a host folder instead of a memory card (ee_runtime::mc).
+# sceMcInit (0x114a90) runs natively against the mcserv version reply.
+00114e30 mc_open
+00114f68 mc_mkdir
+00114fa0 mc_close
+00115058 mc_seek
+001151c0 mc_read
+001152e0 mc_write
+001154d0 mc_sync
+00115608 mc_get_info
+00115800 mc_get_dir
+001159e0 mc_chdir
+00115b30 mc_format
+00115bf8 mc_delete
+00115d20 mc_flush
+00115dd8 mc_set_file_info
+00115fb0 mc_set_file_info
+00116118 mc_unformat
+001161e0 mc_get_ent_space
+
+# EA audio driver: complete the per-frame IOP handshake silently.
+00192d20 ea_audio_sync
+
+# Movie open / play / close: skip until the IPU is emulated.
+001ac580 movie_play
+001ab670 movie_play
+001ab620 movie_play

@@ -7,6 +7,7 @@
 
 mod blend;
 mod hw;
+mod icons;
 mod png;
 mod vk;
 

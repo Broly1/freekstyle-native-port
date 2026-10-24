@@ -20,7 +20,7 @@ go in `game/`, which git ignores.
 | `ee-recomp`  | working | Emits one Rust function per guest function; HLE overrides via `freekstyle/hle.txt` |
 | `ee-runtime` | partial | CPU state, memory map, MMI/FPU/VU0 helpers, HLE kernel, vblank + interrupt delivery, SPR DMA, SIF RPC layer |
 | `freekstyle` | boots   | The game binary: generated code + runtime, with a hang watchdog |
-| IOP services | partial | CD/DVD: init, disk type/ready, file search and sector reads from the disc image. Todo: module loader, pad, memory card, EA audio |
+| IOP services | partial | CD/DVD from the disc image; padman (controller frames each vblank); saves as files instead of memory cards. Todo: EA audio |
 | `gs`         | working | GS core: registers, GIF PACKED/REGLIST/IMAGE, 4 MB VRAM with all swizzled formats (verified against hardware tables), transfers, CLUT, primitive assembly |
 | `gs-vulkan`  | working | Vulkan renderer: render targets at N x resolution (3x 1080p, 5x 4K), GS blend modes, texture cache, display output, screenshots |
 | VU0/VU1, IPU | todo    | Microprogram execution (3D) and MPEG decoding (splash/movies) |
@@ -35,8 +35,23 @@ cargo run --release -p freekstyle -- [--res 1080|1440|4k] [--scale N] [--fullscr
 ```
 
 `--res` picks the window size and a matching internal resolution (3x, 4x
-or 5x the PS2's 512x448). `--scale` overrides the multiplier. F11 toggles
-fullscreen and Esc quits.
+or 5x the PS2's 512x448; vertical scale is doubled again in interlaced
+field mode). `--scale` overrides the multiplier. F11 toggles fullscreen
+and Esc quits.
+
+## PC conveniences
+
+- **Controllers**: any gamepad (SDL-style mapping through gilrs). Buttons
+  map by position, so Xbox A/B/X/Y act as Cross/Circle/Square/Triangle.
+  Keyboard: arrows = D-pad, Z/Space = A, X = B, A = X, S = Y, Q/E = LB/RB,
+  1/3 = LT/RT, Enter = Start, Backspace = Back.
+- **Xbox button prompts**: the game's PlayStation button icons are
+  recognised by content and redrawn as high-resolution Xbox A/B/X/Y
+  buttons (`--ps2-icons` keeps the originals).
+- **Saves without memory cards**: the game's libmc calls are served from
+  `$XDG_DATA_HOME/freekstyle/saves/` (default `~/.local/share/...`), always
+  available. The 70 memory card messages in `ENGLISH.DAT` are reworded
+  ("Saving.", "No saved game found.", ...) when the file is read.
 
 The disc image (raw `.bin` or `.iso`) defaults to `game/Freekstyle.bin`.
 
@@ -54,31 +69,31 @@ Debugging switches (environment variables):
 | `FREEK_RPC_DUMP`     | Hex-dump every IOP request |
 | `FREEK_GS_LOG`       | Renderer state every 2 s, privileged register writes |
 | `FREEK_SHOT=f.png:N` | Save the displayed frame N at internal resolution |
+| `FREEK_SHOT_EVERY=K` | With `FREEK_SHOT`, save every K frames from N on |
+| `FREEK_PAD_SCRIPT`   | Scripted taps, e.g. `300:start,600:a+down` (Xbox names) |
+| `FREEK_DUMP_TEXTURES=dir` | Write every decoded texture as PNG |
 
 When guest code calls an address the analyzer missed, the runtime says so.
 Add the address to `freekstyle/seeds.txt` and regenerate.
 
 ## Current state
 
-The game runs natively and draws through Vulkan. The first screen it shows
-is its own memory card check ("NO MEMORY CARD (8MB) ... IN MEMORY CARD
-SLOT 1."), rendered at up to 5x resolution. This is correct behaviour for
-now, because the memory card service is still a stub and there is no
-controller input to dismiss the screen.
+The game reaches its main menu natively and is controllable: profile name
+entry, main menu (Circuit, Single Race, Freestyle, Freeride, Record Book,
+Options), at up to 5x resolution with Xbox prompts.
 
-The path a frame takes: recompiled game code → VIF1/GIF DMA (tag chains,
-VIF commands) → GS packets over a channel → the `gs` core on the render
-thread → batched Vulkan draws into upscaled targets → displayed buffer
-blitted to the window at 4:3.
+Temporarily skipped:
+- Intro movies (`.FLM`) and IPU-compressed backgrounds. The IPU (MPEG
+  decoder) is not emulated, so movie open/play/close are no-ops and some
+  backgrounds (e.g. the title screen) show undecoded data.
+- Sound: EA's IOP audio driver is acknowledged silently each frame.
 
 Next steps, in order:
-1. Controller input (libpad/padman over SIF) and memory card saves
-   (libmc/mcserv).
-2. VU1 microprogram execution, which the game uses for 3D (MSCAL is
-   currently skipped).
-3. VU0 microprograms (99 `vcallms` sites) and the IPU (MPEG splash and
-   movies).
-4. EA audio (`AUDIO.IRX` over SIF), then 60 fps and widescreen patches.
+1. VU1 microprogram execution (the game's 3D renderer) and VU0 macro
+   microprograms, to get into races.
+2. The IPU decoder, for backgrounds and movies.
+3. EA audio (`AUDIO.IRX` protocol) through the host audio device.
+4. 60 fps and widescreen patches.
 
 ## Analysis results (SLUS_203.67, sha256 debcb4b0…6d80a)
 

@@ -104,6 +104,9 @@ struct Target {
     /// Size in GS pixels.
     w: u32,
     h: u32,
+    /// Vertical scale; doubled in interlaced field mode so the 224-line
+    /// field buffers render at full output resolution.
+    sy: u32,
     color: Image,
     depth: Image,
     snapshot: Option<Image>,
@@ -138,6 +141,8 @@ pub struct Config {
     pub scale: u32,
     /// Stretch the picture to the window instead of keeping 4:3.
     pub stretch: bool,
+    /// Replace PlayStation button icons with Xbox ones.
+    pub xbox_icons: bool,
 }
 
 pub struct Hw {
@@ -163,6 +168,8 @@ pub struct Hw {
     pub stats: Stats,
     /// FREEK_SHOT=<file.png>:<frame>: save the displayed picture.
     shot: Option<(u64, String)>,
+    /// FREEK_SHOT_EVERY=<n> with FREEK_SHOT=<prefix>:<first>: a series.
+    shot_every: Option<u64>,
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -237,6 +244,7 @@ impl Hw {
                 batch: None,
                 verts: Vec::new(),
                 stats: Stats::default(),
+                shot_every: std::env::var("FREEK_SHOT_EVERY").ok().and_then(|v| v.parse().ok()),
                 shot: std::env::var("FREEK_SHOT").ok().and_then(|v| {
                     let (path, frame) = v.rsplit_once(':')?;
                     Some((frame.parse().ok()?, path.to_string()))
@@ -343,17 +351,18 @@ impl Hw {
             .load_op(load)
             .store_op(vk::AttachmentStoreOp::STORE)
             .clear_value(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 0.0, stencil: 0 } });
-        let area = vk::Rect2D { offset: vk::Offset2D::default(), extent: vk::Extent2D { width: t.w * s, height: t.h * s } };
+        let area = vk::Rect2D { offset: vk::Offset2D::default(), extent: vk::Extent2D { width: t.w * s, height: t.h * t.sy } };
         let info = vk::RenderingInfo::default().render_area(area).layer_count(1).color_attachments(&color).depth_attachment(&depth);
         unsafe { self.vk.device.cmd_begin_rendering(self.cmd(), &info) };
         self.rendering = Some(bp);
     }
 
-    /// Get or create the target at `bp`, at least `min_h` GS lines tall.
-    fn target(&mut self, bp: u32, bw: u32, psm: Psm, min_h: u32) -> Result<()> {
+    /// Get or create the target at `bp`, at least `min_h` GS lines tall,
+    /// with vertical scale `sy`.
+    fn target(&mut self, bp: u32, bw: u32, psm: Psm, min_h: u32, sy: u32) -> Result<()> {
         let need_h = min_h.max(512).next_multiple_of(64).min(2048);
         if let Some(t) = self.targets.get(&bp) {
-            if t.h >= min_h.min(2048) && t.bw == bw {
+            if t.h >= min_h.min(2048) && t.bw == bw && t.sy == sy {
                 return Ok(());
             }
         }
@@ -361,24 +370,27 @@ impl Hw {
         let s = self.cfg.scale;
         let w = (bw.max(1) * 64).min(2048);
         let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED;
-        let color = self.vk.create_image(w * s, need_h * s, COLOR, usage, "target")?;
-        let depth = self.vk.create_image(w * s, need_h * s, DEPTH, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, "depth")?;
+        let color = self.vk.create_image(w * s, need_h * sy, COLOR, usage, "target")?;
+        let depth = self.vk.create_image(w * s, need_h * sy, DEPTH, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, "depth")?;
         let dev = self.vk.device.clone();
         let cmd = self.cmd();
         transition(&dev, cmd, color.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
         transition(&dev, cmd, depth.image, vk::ImageAspectFlags::DEPTH, vk::ImageLayout::UNDEFINED, vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
-        let mut t = Target { bp, bw, psm, w, h: need_h, color, depth, snapshot: None, snapshot_valid: false, fresh: true };
+        let mut t = Target { bp, bw, psm, w, h: need_h, sy, color, depth, snapshot: None, snapshot_valid: false, fresh: true };
         // Growing: keep the old picture.
         if let Some(old) = self.targets.remove(&bp) {
             let clear = vk::ClearColorValue { float32: [0.0; 4] };
             unsafe {
                 dev.cmd_clear_color_image(cmd, t.color.image, vk::ImageLayout::GENERAL, &clear, &[range(vk::ImageAspectFlags::COLOR)]);
                 barrier(&dev, cmd);
-                let copy = vk::ImageCopy::default()
-                    .src_subresource(layers(vk::ImageAspectFlags::COLOR))
-                    .dst_subresource(layers(vk::ImageAspectFlags::COLOR))
-                    .extent(vk::Extent3D { width: old.w.min(w) * s, height: old.h.min(need_h) * s, depth: 1 });
-                dev.cmd_copy_image(cmd, old.color.image, vk::ImageLayout::GENERAL, t.color.image, vk::ImageLayout::GENERAL, &[copy]);
+                // Blit: the old target may have a different vertical scale.
+                let blit = vk::ImageBlit {
+                    src_subresource: layers(vk::ImageAspectFlags::COLOR),
+                    src_offsets: [vk::Offset3D::default(), vk::Offset3D { x: (old.w.min(w) * s) as i32, y: (old.h.min(need_h) * old.sy) as i32, z: 1 }],
+                    dst_subresource: layers(vk::ImageAspectFlags::COLOR),
+                    dst_offsets: [vk::Offset3D::default(), vk::Offset3D { x: (old.w.min(w) * s) as i32, y: (old.h.min(need_h) * sy) as i32, z: 1 }],
+                };
+                dev.cmd_blit_image(cmd, old.color.image, vk::ImageLayout::GENERAL, t.color.image, vk::ImageLayout::GENERAL, &[blit], vk::Filter::LINEAR);
             }
             barrier(&dev, cmd);
             // Colour is valid now; only depth needs clearing on first use,
@@ -404,7 +416,7 @@ impl Hw {
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
             .clear_value(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 0.0, stencil: 0 } });
-        let area = vk::Rect2D { offset: vk::Offset2D::default(), extent: vk::Extent2D { width: t.w * s, height: t.h * s } };
+        let area = vk::Rect2D { offset: vk::Offset2D::default(), extent: vk::Extent2D { width: t.w * s, height: t.h * t.sy } };
         unsafe {
             self.vk.device.cmd_begin_rendering(self.cmd(), &vk::RenderingInfo::default().render_area(area).layer_count(1).depth_attachment(&depth));
             self.vk.device.cmd_end_rendering(self.cmd());
@@ -432,6 +444,7 @@ impl Hw {
         let tmp = self.upload_image(w, h, &px, vk::ImageUsageFlags::TRANSFER_SRC, "target upload")?;
         let s = self.cfg.scale as i32;
         let t = self.targets.get_mut(&bp).unwrap();
+        let sy = t.sy as i32;
         if t.fresh {
             // The upload must not be wiped by a later first-use clear.
             let clear = vk::ClearColorValue { float32: [0.0; 4] };
@@ -443,8 +456,8 @@ impl Hw {
             src_offsets: [vk::Offset3D::default(), vk::Offset3D { x: w as i32, y: h as i32, z: 1 }],
             dst_subresource: layers(vk::ImageAspectFlags::COLOR),
             dst_offsets: [
-                vk::Offset3D { x: x as i32 * s, y: y as i32 * s, z: 0 },
-                vk::Offset3D { x: (x + w) as i32 * s, y: (y + h) as i32 * s, z: 1 },
+                vk::Offset3D { x: x as i32 * s, y: y as i32 * sy, z: 0 },
+                vk::Offset3D { x: (x + w) as i32 * s, y: (y + h) as i32 * sy, z: 1 },
             ],
         };
         let cmd = self.frames[self.slot].cmd;
@@ -497,6 +510,11 @@ impl Hw {
             return Ok((TexRef::Cache(key), [1.0, 1.0], false));
         }
         let (w, h, px) = gs::tex::decode(&gs.vram, t, gs.texa, &gs.clut, gs.clut_psm);
+        if let Some(dir) = std::env::var_os("FREEK_DUMP_TEXTURES") {
+            dump_texture(std::path::Path::new(&dir), &key, t, w, h, &px);
+        }
+        // PlayStation button prompts become Xbox buttons.
+        let (w, h, px) = if self.cfg.xbox_icons { crate::icons::replace(w, h, &px).unwrap_or((w, h, px)) } else { (w, h, px) };
         self.end_rendering();
         let image = self.upload_image(w, h, &px, vk::ImageUsageFlags::SAMPLED, "texture")?;
         self.textures.insert(key, Texture { image, last_used: frame });
@@ -665,7 +683,7 @@ impl Hw {
             let t = &self.targets[&k.target];
             let s = self.cfg.scale as f32;
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-            dev.cmd_set_viewport(cmd, 0, &[vk::Viewport { x: 0.0, y: 0.0, width: t.w as f32 * s, height: t.h as f32 * s, min_depth: 0.0, max_depth: 1.0 }]);
+            dev.cmd_set_viewport(cmd, 0, &[vk::Viewport { x: 0.0, y: 0.0, width: t.w as f32 * s, height: (t.h * t.sy) as f32, min_depth: 0.0, max_depth: 1.0 }]);
             dev.cmd_set_scissor(cmd, 0, &[k.scissor]);
             dev.cmd_set_depth_test_enable(cmd, k.depth.0 || k.depth.1 != vk::CompareOp::ALWAYS);
             dev.cmd_set_depth_write_enable(cmd, k.depth.0);
@@ -698,7 +716,8 @@ impl Hw {
             return Ok(());
         }
         let bp = fb.bp();
-        self.target(bp, fb.bw(), fb.psm(), sy1 + 1)?;
+        let ysc = self.vertical_scale(gs);
+        self.target(bp, fb.bw(), fb.psm(), sy1 + 1, ysc)?;
 
         // Texture first: it may need transfers outside rendering.
         let (tex, tex_scale, rt_tex) = if attrs.textured() { self.texture(gs)? } else { (TexRef::None, [1.0, 1.0], false) };
@@ -745,8 +764,8 @@ impl Hw {
         };
         let s = self.cfg.scale;
         let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: (sx0 * s) as i32, y: (sy0 * s) as i32 },
-            extent: vk::Extent2D { width: ((sx1.min(t.w - 1) + 1).saturating_sub(sx0)) * s, height: ((sy1.min(t.h - 1) + 1).saturating_sub(sy0)) * s },
+            offset: vk::Offset2D { x: (sx0 * s) as i32, y: (sy0 * t.sy) as i32 },
+            extent: vk::Extent2D { width: ((sx1.min(t.w - 1) + 1).saturating_sub(sx0)) * s, height: ((sy1.min(t.h - 1) + 1).saturating_sub(sy0)) * t.sy },
         };
         let ztst = match test.ztst() {
             0 => vk::CompareOp::NEVER,
@@ -818,6 +837,13 @@ impl Hw {
         Ok(())
     }
 
+    /// Vertical render scale: doubled for interlaced field-mode output,
+    /// where each 224-line buffer is shown at 448 lines.
+    fn vertical_scale(&self, gs: &Gs) -> u32 {
+        let field_mode = gs.display.smode2 & 3 == 3;
+        self.cfg.scale * if field_mode { 2 } else { 1 }
+    }
+
     // ---- display ----
 
     /// Present the frame buffer the display circuits point at.
@@ -836,11 +862,16 @@ impl Hw {
             let magh = ((disp >> 23) & 0xf) as u32 + 1;
             let magv = ((disp >> 27) & 3) as u32 + 1;
             let w = (((disp >> 32) & 0xfff) as u32 + 1) / magh;
-            let h = (((disp >> 44) & 0x7ff) as u32 + 1) / magv;
+            let mut h = (((disp >> 44) & 0x7ff) as u32 + 1) / magv;
+            // Interlaced field mode (SMODE2 INT and FFMD): the buffer holds
+            // one field, shown at double height.
+            if d.smode2 & 3 == 3 {
+                h /= 2;
+            }
             if w > 0 && h > 0 && bw > 0 {
                 // Never drawn into: build the target from GS memory.
                 let fresh = !self.targets.contains_key(&bp);
-                if self.target(bp, bw, psm, dby + h).is_ok() {
+                if self.target(bp, bw, psm, dby + h, self.vertical_scale(gs)).is_ok() {
                     if fresh {
                         let _ = self.upload_to_target(&gs.vram, gs.texa, bp, 0, 0, bw * 64, dby + h);
                     }
@@ -866,12 +897,13 @@ impl Hw {
     fn record_readback(&mut self, (bp, x, y, w, h): (u32, u32, u32, u32, u32)) -> Result<(Buffer, u32, u32)> {
         let s = self.cfg.scale;
         let t = &self.targets[&bp];
-        let (w, h) = ((w * s).min(t.color.extent.width - x * s), (h * s).min(t.color.extent.height - y * s));
+        let sy = t.sy;
+        let (w, h) = ((w * s).min(t.color.extent.width - x * s), (h * sy).min(t.color.extent.height - y * sy));
         let image = t.color.image;
         let buf = self.vk.create_buffer(w as u64 * h as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, "screenshot")?;
         let region = vk::BufferImageCopy::default()
             .image_subresource(layers(vk::ImageAspectFlags::COLOR))
-            .image_offset(vk::Offset3D { x: (x * s) as i32, y: (y * s) as i32, z: 0 })
+            .image_offset(vk::Offset3D { x: (x * s) as i32, y: (y * sy) as i32, z: 0 })
             .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
         unsafe { self.vk.device.cmd_copy_image_to_buffer(self.cmd(), image, vk::ImageLayout::GENERAL, buf.buffer, &[region]) };
         barrier(&self.vk.device, self.cmd());
@@ -882,7 +914,14 @@ impl Hw {
         unsafe {
             let _ = self.vk.device.device_wait_idle();
         }
-        let path = self.shot.take().unwrap().1;
+        let (frame, base) = self.shot.take().unwrap();
+        let path = match self.shot_every {
+            Some(n) => {
+                self.shot = Some((frame + n, base.clone()));
+                format!("{}_{frame:06}.png", base.trim_end_matches(".png"))
+            }
+            None => base,
+        };
         let png = crate::png::encode(w, h, &buf.mapped()[..(w * h * 4) as usize]);
         match std::fs::write(&path, png) {
             Ok(()) => eprintln!("[gs] saved {w}x{h} screenshot to {path}"),
@@ -922,11 +961,12 @@ impl Hw {
                     (ww, ww * 3 / 4)
                 };
                 let (dx, dy) = ((ww - dw) / 2, (wh - dh) / 2);
+                let ys = t.sy as i32;
                 let sx1 = ((x + w) as i32 * s).min(t.color.extent.width as i32);
-                let sy1 = ((y + h) as i32 * s).min(t.color.extent.height as i32);
+                let sy1 = ((y + h) as i32 * ys).min(t.color.extent.height as i32);
                 let blit = vk::ImageBlit {
                     src_subresource: layers(vk::ImageAspectFlags::COLOR),
-                    src_offsets: [vk::Offset3D { x: x as i32 * s, y: y as i32 * s, z: 0 }, vk::Offset3D { x: sx1, y: sy1, z: 1 }],
+                    src_offsets: [vk::Offset3D { x: x as i32 * s, y: y as i32 * ys, z: 0 }, vk::Offset3D { x: sx1, y: sy1, z: 1 }],
                     dst_subresource: layers(vk::ImageAspectFlags::COLOR),
                     dst_offsets: [vk::Offset3D { x: dx, y: dy, z: 0 }, vk::Offset3D { x: dx + dw, y: dy + dh, z: 1 }],
                 };
@@ -986,6 +1026,23 @@ impl Hw {
             self.frames[self.slot].garbage.push(Garbage::Image(t.image));
         }
     }
+}
+
+/// Write a decoded texture as PNG (alpha scaled to 0-255) for inspection.
+fn dump_texture(dir: &std::path::Path, key: &TexKey, t: gs::regs::Tex0, w: u32, h: u32, px: &[u32]) {
+    let _ = std::fs::create_dir_all(dir);
+    let id = key.tex0 ^ key.clut.rotate_left(17) ^ key.texa.rotate_left(33);
+    let name = format!("tex_{id:016x}_{:?}_{w}x{h}_tbp{:x}.png", t.psm(), t.tbp0());
+    // Composite over magenta so transparent areas are visible.
+    let rgba: Vec<u8> = px
+        .iter()
+        .flat_map(|p| {
+            let a = ((p >> 24).min(128) * 255 / 128) as f32 / 255.0;
+            let c = |v: u32, bg: f32| ((v & 0xff) as f32 * a + bg * (1.0 - a)) as u8;
+            [c(*p, 255.0), c(p >> 8, 0.0), c(p >> 16, 255.0), 255]
+        })
+        .collect();
+    let _ = std::fs::write(dir.join(name), crate::png::encode(w, h, &rgba));
 }
 
 impl Drop for Hw {
