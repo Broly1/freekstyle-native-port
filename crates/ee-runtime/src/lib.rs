@@ -17,6 +17,7 @@ pub mod mmi;
 pub mod pad;
 pub mod text;
 pub mod vu;
+pub mod vumicro;
 
 pub use cpu::{Cpu, Func};
 

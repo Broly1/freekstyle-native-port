@@ -28,6 +28,13 @@ pub struct Memory {
     pub io: Io,
     pub vif: [Vif; 2],
     pub pad: crate::pad::Pad,
+    /// VU1 registers (VU0's live in `Cpu::vu0`, shared with COP2).
+    pub vu1: crate::vu::VuRegs,
+    /// Bumped whenever VU0/VU1 program memory changes.
+    pub vu_code_gen: [u64; 2],
+    pub vu_cache: [crate::vumicro::DecodeCache; 2],
+    /// Recompiled VU microprograms.
+    pub vu_programs: crate::vumicro::Programs,
 }
 
 fn zeroed(n: usize) -> Box<[u8]> {
@@ -71,6 +78,10 @@ impl Memory {
             io: Io::new(),
             vif: Default::default(),
             pad: Default::default(),
+            vu1: crate::vu::VuRegs::new(),
+            vu_code_gen: [1, 1],
+            vu_cache: Default::default(),
+            vu_programs: crate::vumicro::Programs(&[]),
         }
     }
 
@@ -127,6 +138,12 @@ impl Memory {
 
     #[cold]
     fn write_slow(&mut self, addr: u32, n: usize, v: u128) {
+        // Writes into VU program memory invalidate decoded programs.
+        match addr & 0x1fff_ffff {
+            0x1100_0000..=0x1100_0fff => self.vu_code_gen[0] += 1,
+            0x1100_8000..=0x1100_bfff => self.vu_code_gen[1] += 1,
+            _ => {}
+        }
         if let Some(b) = self.backing(addr, n) {
             b.copy_from_slice(&v.to_le_bytes()[..n]);
             return;

@@ -409,6 +409,7 @@ dependencies = [
  "gilrs",
  "gs",
  "gs-vulkan",
+ "r5900",
  "winit",
 ]
 

@@ -1,7 +1,7 @@
 //! Freekstyle native: boots the recompiled EE executable.
 //!
 //! Generate the code first:
-//!   cargo run --release -p ee-recomp -- game/SLUS_203.67 freekstyle/src/gen freekstyle/hle.txt freekstyle/seeds.txt
+//!   cargo run --release -p ee-recomp -- game/SLUS_203.67 freekstyle/src/gen freekstyle/hle.txt freekstyle/seeds.txt freekstyle/vu_dumps
 //! then:
 //!   cargo run --release -p freekstyle -- [options] [game/SLUS_203.67 [disc image]]
 //!
@@ -128,6 +128,7 @@ fn main() {
             c.iop.disc = Some(disc);
             c.iop.patch_disc_files();
             c.mem.io.gs = Some(gs_tx);
+            c.mem.vu_programs = ee_runtime::vumicro::Programs(&gen::vu_programs::VU_PROGRAMS);
             let entry = ee_runtime::load_elf(&mut c, &bytes).expect("load ELF");
             eprintln!("[boot] {} functions, entry {entry:#x}", gen::FUNCS.len());
             ee_runtime::kernel::run_thread_body(&mut c, entry);
@@ -341,6 +342,7 @@ fn watchdog() {
     use ee_runtime::cpu::{ENTER_COUNT, LAST_ENTERED};
     let mut last = 0;
     let mut reported = 0;
+    let mut last_poll = 0;
     let heartbeat = env::var_os("FREEK_HEARTBEAT").is_some();
     loop {
         thread::sleep(Duration::from_secs(2));
@@ -351,7 +353,16 @@ fn watchdog() {
             reported = f;
         }
         if heartbeat {
-            eprintln!("[heartbeat] in fn {f:#010x}, {} calls in the last 2s", n - last);
+            let (runs, cycles, ns) = std::mem::take(&mut *ee_runtime::vumicro::STATS.lock().unwrap());
+            let poll = ee_runtime::cpu::POLL_US.load(Relaxed);
+            eprintln!(
+                "[heartbeat] in fn {f:#010x}, {} calls in the last 2s; VU: {runs} programs ({} native), {cycles} cycles, {:.0} ms; polling {:.0} ms",
+                n - last,
+                ee_runtime::vumicro::NATIVE_RUNS.swap(0, Relaxed),
+                ns as f64 / 1e6,
+                (poll - last_poll) as f64 / 1e3
+            );
+            last_poll = poll;
         }
         last = n;
     }

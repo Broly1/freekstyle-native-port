@@ -55,8 +55,44 @@ impl DmaStart {
     }
 }
 
+/// Register storage: flat arrays for the EE (0x1000_xxxx) and GS
+/// privileged (0x1200_0xxx/1xxx) ranges, which are hit on every DMA kick
+/// and poll; a map for anything else.
+struct Regs {
+    ee: Vec<u128>,
+    gs: Vec<u128>,
+    other: HashMap<u32, u128>,
+}
+
+impl Regs {
+    fn new() -> Regs {
+        Regs { ee: vec![0; 0x1_0000 / 4], gs: vec![0; 0x2000 / 4], other: HashMap::new() }
+    }
+
+    fn slot(&mut self, addr: u32) -> &mut u128 {
+        match addr {
+            0x1000_0000..=0x1000_ffff => &mut self.ee[((addr - 0x1000_0000) >> 2) as usize],
+            0x1200_0000..=0x1200_1fff => &mut self.gs[((addr - 0x1200_0000) >> 2) as usize],
+            _ => self.other.entry(addr).or_insert(0),
+        }
+    }
+
+    fn get(&self, addr: &u32) -> Option<&u128> {
+        let addr = *addr;
+        match addr {
+            0x1000_0000..=0x1000_ffff => self.ee.get(((addr - 0x1000_0000) >> 2) as usize),
+            0x1200_0000..=0x1200_1fff => self.gs.get(((addr - 0x1200_0000) >> 2) as usize),
+            _ => self.other.get(&addr),
+        }
+    }
+
+    fn insert(&mut self, addr: u32, v: u128) {
+        *self.slot(addr) = v;
+    }
+}
+
 pub struct Io {
-    regs: HashMap<u32, u128>,
+    regs: Regs,
     logged: HashSet<(u32, bool)>,
     pub log: bool,
     /// Consecutive reads of one address, for spotting hardware poll loops.
@@ -69,12 +105,15 @@ pub struct Io {
     warned: HashSet<String>,
     /// Set on each new vblank; cleared by `Memory::service_vblank`.
     pub new_vblank: bool,
+    /// Time spent spinning on one register (idle), for FREEK_HEARTBEAT.
+    pub poll_time: std::time::Duration,
+    last_read_at: Instant,
 }
 
 impl Io {
     pub fn new() -> Io {
         Io {
-            regs: HashMap::new(),
+            regs: Regs::new(),
             logged: HashSet::new(),
             log: std::env::var_os("FREEK_IO_LOG").is_some(),
             last_read: (0, 0),
@@ -84,6 +123,8 @@ impl Io {
             gif_packets: 0,
             warned: HashSet::new(),
             new_vblank: false,
+            poll_time: Default::default(),
+            last_read_at: Instant::now(),
         }
     }
 
@@ -162,7 +203,7 @@ impl Io {
     }
 
     fn trace(&mut self, addr: u32, write: bool, n: usize, v: u128) {
-        if self.log || self.logged.insert((addr, write)) && self.logged.len() < 400 {
+        if self.log {
             let dir = if write { "W" } else { "R" };
             eprintln!("[io] {dir}{} {addr:08x} {:<16} = {v:#x}", n * 8, Self::name(addr));
         }
@@ -177,7 +218,7 @@ impl Io {
             GS_CSR => self.regs.get(&addr).copied().unwrap_or(0) | (1 << 14) | (0x55 << 24),
             0x1000_0000 | 0x1000_0800 | 0x1000_1000 | 0x1000_1800 => {
                 // Timer counters: advance on every read.
-                let c = self.regs.entry(addr).or_insert(0);
+                let c = self.regs.slot(addr);
                 *c = (*c + 64) & 0xffff;
                 *c
             }
@@ -188,11 +229,16 @@ impl Io {
         };
         if self.last_read.0 == addr {
             self.last_read.1 += 1;
+            // Repeated reads of one register are a poll loop: idle time.
+            let now = Instant::now();
+            self.poll_time += now - self.last_read_at;
+            self.last_read_at = now;
             if self.last_read.1 == 5_000_000 {
                 eprintln!("[io] warning: polling {addr:08x} ({}) for 5M reads, value {v:#x}", Self::name(addr));
             }
         } else {
             self.last_read = (addr, 1);
+            self.last_read_at = Instant::now();
         }
         self.trace(addr, false, n, v);
         v

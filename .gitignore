@@ -5,3 +5,4 @@
 *.bin
 /out
 /freekstyle/src/gen
+/freekstyle/vu_dumps

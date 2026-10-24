@@ -1,6 +1,6 @@
 //! ee-recomp: translate every function in the EE executable into Rust.
 //!
-//! Usage: ee-recomp <SLUS_203.67> <out-dir> [hle.txt [seeds.txt]]
+//! Usage: ee-recomp <SLUS_203.67> <out-dir> [hle.txt [seeds.txt [vu-dumps]]]
 //!
 //! Each guest function becomes `pub fn f_XXXXXXXX(c: &mut Cpu)`. Its body is
 //! a `loop { match pc { ... } }` with one arm per basic block, so any
@@ -13,6 +13,7 @@
 //! becomes a call to the named replacement in `ee_runtime::hle`.
 
 mod emit;
+mod vu;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -224,8 +225,8 @@ fn indent(s: &str, n: usize) -> String {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if !(3..=5).contains(&args.len()) {
-        eprintln!("usage: ee-recomp <elf> <out-dir> [hle.txt [seeds.txt]]");
+    if !(3..=6).contains(&args.len()) {
+        eprintln!("usage: ee-recomp <elf> <out-dir> [hle.txt [seeds.txt [vu-dumps]]]");
         process::exit(2);
     }
     let hle = args.get(3).map(|p| read_list(p)).unwrap_or_default();
@@ -277,6 +278,9 @@ fn main() {
     for m in &modules {
         let _ = writeln!(root, "mod {m};\npub use {m}::*;");
     }
+    let _ = writeln!(root, "pub mod vu_programs;");
+    let (vu_src, vu_images, vu_entries) = vu::generate(args.get(5).map(std::path::Path::new));
+    fs::write(format!("{out_dir}/vu_programs.rs"), vu_src).expect("write vu_programs.rs");
     let _ = writeln!(root, "\n/// FNV-1a of the executable this code was generated from.");
     let _ = writeln!(root, "pub const ELF_HASH: u64 = {:#x};", ee_runtime_fnv(&bytes));
     let _ = writeln!(root, "pub const ENTRY: u32 = {:#x};\n", elf.entry);
@@ -296,6 +300,7 @@ fn main() {
         hle.keys().filter(|a| starts.contains(a)).count(),
         modules.len()
     );
+    eprintln!("recompiled {vu_entries} VU microprogram entry points from {vu_images} recorded images");
     if ctx.unimplemented.is_empty() {
         eprintln!("all reached instructions have implementations");
     } else {

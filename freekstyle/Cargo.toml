@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 ee-runtime = { path = "../crates/ee-runtime" }
 gs = { path = "../crates/gs" }
+r5900 = { path = "../crates/r5900" }
 gs-vulkan = { path = "../crates/gs-vulkan" }
 winit = "=0.30.5"
 gilrs = "=0.11.0"

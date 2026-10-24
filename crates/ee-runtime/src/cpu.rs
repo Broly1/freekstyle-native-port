@@ -15,6 +15,8 @@ const FCC: u32 = 1 << 23;
 /// watchdog thread in the frontend.
 pub static LAST_ENTERED: AtomicU32 = AtomicU32::new(0);
 pub static ENTER_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Microseconds the game has spent spinning on hardware registers.
+pub static POLL_US: AtomicU64 = AtomicU64::new(0);
 
 /// Registers saved across a thread switch. VU0 is shared, as on hardware
 /// (the kernel does not save COP2 state).
@@ -131,6 +133,9 @@ impl Cpu {
         self.calls += 1;
         LAST_ENTERED.store(addr, Relaxed);
         ENTER_COUNT.store(self.calls, Relaxed);
+        if self.calls & 0xfff == 0 {
+            POLL_US.store(self.mem.io.poll_time.as_micros() as u64, Relaxed);
+        }
         if self.calls & 0xfff == 0 && (self.poll_interrupts() || self.kernel.need_resched) && !self.in_interrupt {
             crate::kernel::reschedule(self);
         }
@@ -475,8 +480,12 @@ impl Cpu {
         self.vu0.ctc2(r, v);
     }
 
+    /// vcallms/vcallmsr: run a VU0 microprogram on the COP2 registers.
     pub fn vu0_callms(&mut self, addr: u32) {
-        self.kernel.warn_once(&format!("vcallms {addr:#x}: VU0 microprograms are not emulated yet"));
+        let m = &mut self.mem;
+        m.vu_cache[0].sync(m.vu_code_gen[0], m.vu0_code.len() / 8);
+        let env = crate::vumicro::Env { code: &m.vu0_code, data: &mut m.vu0_data, top: 0, itop: 0, kick: None };
+        crate::vumicro::run(&mut self.vu0, env, &mut m.vu_cache[0], 0, &m.vu_programs, addr / 8);
     }
 
     // ---- traps into the runtime ----

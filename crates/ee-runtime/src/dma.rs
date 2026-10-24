@@ -2,7 +2,7 @@
 //! walking, and the VIF command stream (UNPACK, MPG, DIRECT, ...).
 //!
 //! Transfers run to completion when started. GIF data is forwarded to the
-//! GS thread; VU microprograms (MSCAL) are not executed yet.
+//! GS thread; VU1 microprograms started by MSCAL run immediately.
 
 use crate::io::DmaStart;
 use crate::mem::Memory;
@@ -125,8 +125,6 @@ pub struct Vif {
     pub mpg_addr: u32,
     /// DIRECT data collected for the GIF.
     direct: Vec<u128>,
-    /// Microprogram start requests (address in bytes), for when VUs run.
-    pub mscal: Vec<u32>,
     /// Position within the current qword, for DIRECT alignment.
     word_pos: usize,
 }
@@ -193,9 +191,20 @@ impl Vif {
         }
     }
 
+    /// Start a microprogram (MSCAL/MSCALF at `addr`, MSCNT at u32::MAX)
+    /// and run it to completion. VU1 output goes to the GS (PATH1).
     fn mscal(&mut self, m: &mut Memory, unit: usize, addr: u32) {
-        self.mscal.push(addr);
-        m.io.warn_once(&format!("VIF{unit}: MSCAL to VU{unit} microprograms is not emulated yet"));
+        if unit == 0 {
+            // VU0 registers live in the CPU; VIF0-started programs are rare.
+            m.io.warn_once("VIF0: MSCAL to VU0 is not supported yet");
+            return;
+        }
+        let Memory { vu1, vu1_code, vu1_data, io, vu_cache, vu_code_gen, vu_programs, .. } = m;
+        let start = if addr == u32::MAX { vu1.tpc } else { addr / 8 };
+        let mut kick = |p: Vec<u128>| io.send_gif(p);
+        vu_cache[1].sync(vu_code_gen[1], vu1_code.len() / 8);
+        let env = crate::vumicro::Env { code: vu1_code, data: vu1_data, top: self.tops, itop: self.itop, kick: Some(&mut kick) };
+        crate::vumicro::run(vu1, env, &mut vu_cache[1], 1, vu_programs, start);
     }
 
     fn data(&mut self, m: &mut Memory, unit: usize, w: u32) {
@@ -205,7 +214,12 @@ impl Vif {
             0x4a => {
                 let code = if unit == 0 { &mut m.vu0_code } else { &mut m.vu1_code };
                 let a = (self.mpg_addr as usize) % code.len();
-                code[a..a + 4].copy_from_slice(&w.to_le_bytes());
+                // Games re-upload the same microcode constantly; only a real
+                // change invalidates decoded and recompiled programs.
+                if code[a..a + 4] != w.to_le_bytes() {
+                    code[a..a + 4].copy_from_slice(&w.to_le_bytes());
+                    m.vu_code_gen[unit] += 1;
+                }
                 self.mpg_addr += 4;
             }
             0x50 | 0x51 => {

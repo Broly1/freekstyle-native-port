@@ -12,3 +12,7 @@ publish = false
 # The generated code is huge; keep debug builds usable.
 [profile.dev.package.freekstyle]
 opt-level = 1
+
+# Line tables only: readable profiles and backtraces at no runtime cost.
+[profile.release]
+debug = "line-tables-only"

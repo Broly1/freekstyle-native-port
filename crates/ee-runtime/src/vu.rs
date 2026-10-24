@@ -1,5 +1,6 @@
-//! VU0 state as seen by COP2 macro instructions, plus the 4-lane helpers the
-//! generated code uses. Destination masks use bit 3 = x .. bit 0 = w.
+//! Vector unit register state (VU0, shared with COP2 macro instructions, and
+//! VU1), plus the 4-lane helpers the generated code and the microcode
+//! interpreter use. Destination masks use bit 3 = x .. bit 0 = w.
 
 use crate::fpu::{fdiv, ps2f};
 
@@ -12,12 +13,19 @@ pub struct Vu0 {
     pub q: f32,
     pub i: f32,
     pub r: u32,
+    /// EFU result register.
+    pub p: f32,
     pub clip: u32,
     pub status: u32,
     pub mac: u32,
     pub fbrst: u32,
     pub cmsar0: u32,
+    /// Where the last microprogram ended (MSCNT continues here).
+    pub tpc: u32,
 }
+
+/// VU1 has the same registers as VU0.
+pub type VuRegs = Vu0;
 
 impl Vu0 {
     pub fn new() -> Vu0 {
@@ -30,11 +38,13 @@ impl Vu0 {
             q: 0.0,
             i: 0.0,
             r: 0,
+            p: 0.0,
             clip: 0,
             status: 0,
             mac: 0,
             fbrst: 0,
             cmsar0: 0,
+            tpc: 0,
         }
     }
 
@@ -128,6 +138,18 @@ impl Default for Vu0 {
     }
 }
 
+/// PS2 float clamp without branches: infinities and NaNs become +/-MAX,
+/// denormals become signed zero.
+#[inline(always)]
+fn clamp(x: f32) -> f32 {
+    let b = x.to_bits();
+    let e = b & 0x7f80_0000;
+    let sign = b & 0x8000_0000;
+    let b = if e == 0x7f80_0000 { sign | 0x7f7f_ffff } else { b };
+    let b = if e == 0 { sign } else { b };
+    f32::from_bits(b)
+}
+
 #[inline(always)]
 pub fn splat(x: f32) -> V4 {
     [x; 4]
@@ -135,17 +157,17 @@ pub fn splat(x: f32) -> V4 {
 
 #[inline(always)]
 pub fn add(a: V4, b: V4) -> V4 {
-    std::array::from_fn(|n| ps2f(a[n] + b[n]))
+    [clamp(a[0] + b[0]), clamp(a[1] + b[1]), clamp(a[2] + b[2]), clamp(a[3] + b[3])]
 }
 
 #[inline(always)]
 pub fn sub(a: V4, b: V4) -> V4 {
-    std::array::from_fn(|n| ps2f(a[n] - b[n]))
+    [clamp(a[0] - b[0]), clamp(a[1] - b[1]), clamp(a[2] - b[2]), clamp(a[3] - b[3])]
 }
 
 #[inline(always)]
 pub fn mul(a: V4, b: V4) -> V4 {
-    std::array::from_fn(|n| ps2f(a[n] * b[n]))
+    [clamp(a[0] * b[0]), clamp(a[1] * b[1]), clamp(a[2] * b[2]), clamp(a[3] * b[3])]
 }
 
 #[inline(always)]
