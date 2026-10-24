@@ -113,6 +113,64 @@ pub fn image_hash(code: &[u8]) -> u64 {
 /// Runaway guard: no real microprogram runs this long.
 const MAX_CYCLES: u64 = 1 << 24;
 const FLAG_LATENCY: u64 = 4;
+/// FMAC results are readable this many cycles after issue.
+const FMAC_LATENCY: u64 = 4;
+
+/// VF register fields a pair reads, as (register, field mask) with bit 3 =
+/// x .. bit 0 = w. Used to model the hazard stalls programs are timed for.
+#[inline(always)]
+fn reads(lo: u32, hi: u32, m: M) -> impl Iterator<Item = (usize, u8)> {
+    use r5900::Format as F;
+    let dest = ((hi >> 21) & 15) as u8;
+    let (fs, ft) = (((hi >> 11) & 31) as usize, ((hi >> 16) & 31) as usize);
+    let bc = 8u8 >> (hi & 3);
+    let mut out = [(0usize, 0u8); 4];
+    let mut n = 0;
+    let mut push = |reg: usize, mask: u8| {
+        if reg != 0 && mask != 0 {
+            out[n] = (reg, mask);
+            n += 1;
+        }
+    };
+    match m.format() {
+        F::VFdFsFt | F::VAccFsFt => {
+            push(fs, dest);
+            push(ft, dest);
+        }
+        F::VFdFsFtBc | F::VAccFsFtBc => {
+            push(fs, dest);
+            push(ft, bc);
+        }
+        F::VFdFsQ | F::VFdFsI | F::VAccFsQ | F::VAccFsI | F::VFtFs => push(fs, dest),
+        F::VClip => {
+            push(fs, 0xe);
+            push(ft, 0x1);
+        }
+        _ => {}
+    }
+    if hi >> 31 == 0 {
+        let (lfs, lft) = (((lo >> 11) & 31) as usize, ((lo >> 16) & 31) as usize);
+        let ldest = ((lo >> 21) & 15) as u8;
+        let (fsf, ftf) = (8u8 >> ((lo >> 21) & 3), 8u8 >> ((lo >> 23) & 3));
+        match lo >> 25 {
+            0x01 => push(lfs, ldest), // SQ
+            0x40 if lo & 63 >= 0x3c => match ((lo >> 6) & 31) << 2 | (lo & 3) {
+                0x30 | 0x35 | 0x37 => push(lfs, ldest), // MOVE, SQI, SQD
+                0x31 => push(lfs, 0xf),                 // MR32
+                0x38 | 0x3a => {
+                    push(lfs, fsf);
+                    push(lft, ftf);
+                }
+                0x39 => push(lft, ftf),
+                0x3c | 0x42 | 0x43 | 0x78..=0x7e => push(lfs, fsf),
+                0x70..=0x76 => push(lfs, 0xf),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    out.into_iter().take(n)
+}
 
 /// Pending writes to one flag register: at most one per cycle, each
 /// visible FLAG_LATENCY cycles later, so a short ring suffices.
@@ -308,6 +366,9 @@ pub struct Ctx<'a> {
     kick: Option<&'a mut dyn FnMut(Vec<u128>)>,
     pipe: Pipe,
     pub cycle: u64,
+    /// Cycle at which each VF register field's pending FMAC result is
+    /// available ([reg][x, y, z, w]); reading earlier stalls.
+    ready: [[u64; 4]; 32],
     /// VI register written by the previous pair, with its old value.
     last_vi: Option<(usize, u16)>,
     mask: u32,
@@ -325,6 +386,7 @@ impl<'a> Ctx<'a> {
             kick: env.kick,
             pipe: Pipe::default(),
             cycle: 0,
+            ready: [[0; 4]; 32],
             last_vi: None,
             mask,
         }
@@ -350,13 +412,29 @@ impl<'a> Ctx<'a> {
 /// (see `reads_flags`); their FMAC instructions then skip computing them.
 #[inline(always)]
 pub fn pair<const FLAGS: bool>(c: &mut Ctx, pc: u32, lo: u32, hi: u32, m: M) -> Option<u32> {
+    // Hazard stalls: wait for FMAC results this pair reads, and for the
+    // divider before another DIV/SQRT/RSQRT or WAITQ.
+    let mut issue = c.cycle;
+    for (reg, mask) in reads(lo, hi, m) {
+        for f in 0..4 {
+            if mask & (8 >> f) != 0 {
+                issue = issue.max(c.ready[reg][f]);
+            }
+        }
+    }
+    if hi >> 31 == 0 && lo >> 25 == 0x40 && lo & 63 >= 0x3c && matches!(((lo >> 6) & 31) << 2 | (lo & 3), 0x38..=0x3b) {
+        if let Some((ready, _)) = c.pipe.q {
+            issue = issue.max(ready);
+        }
+    }
+    c.cycle = issue;
     c.pipe.advance_q(c.r, c.cycle);
     // Flag-reading lower instructions see flags as of this cycle.
     let op = lo >> 25;
     if hi >> 31 == 0 && (matches!(op, 0x10 | 0x12..=0x14 | 0x16..=0x1c)) {
         c.pipe.advance(c.r, c.cycle);
     }
-    let Ctx { r, mem, pipe, cycle, last_vi, top, itop, kick, mask, .. } = c;
+    let Ctx { r, mem, pipe, cycle, last_vi, top, itop, kick, mask, ready, .. } = c;
     let r: &mut VuRegs = r;
     let mut delayed = None;
     // ---- lower ----
@@ -575,6 +653,14 @@ pub fn pair<const FLAGS: bool>(c: &mut Ctx, pc: u32, lo: u32, hi: u32, m: M) -> 
 
     // ---- upper ----
     let upper_fd = upper::<FLAGS>(r, pipe, hi, *cycle, m);
+    if let Some(reg) = upper_fd {
+        let dest = ((hi >> 21) & 15) as u8;
+        for f in 0..4 {
+            if dest & (8 >> f) != 0 {
+                ready[reg][f] = *cycle + FMAC_LATENCY;
+            }
+        }
+    }
 
     // Lower VF results land after the upper's, unless both target the
     // same register.
@@ -616,7 +702,8 @@ pub fn interpret(c: &mut Ctx, cache: &mut DecodeCache, mut pc: u32) {
             if c.cycle > MAX_CYCLES {
                 eprintln!("[vu] microprogram at {start:#x} did not end; stopped");
             }
-            c.finish(pc + 1);
+            // A branch taken in the E-bit pair decides where MSCNT resumes.
+            c.finish(take.unwrap_or(pc + 1));
             return;
         }
         if hi & (1 << 30) != 0 {
@@ -944,6 +1031,51 @@ mod tests {
         );
         assert_eq!(r.vf[2][0], 800.0);
         assert_eq!(r.vf[3][0], 32.0);
+    }
+
+    #[test]
+    fn hazard_stall_delivers_q_in_time() {
+        // The pattern of the game's transform loop: DIV, then an FMAC read
+        // of a register written two pairs earlier (stalls 2 cycles), so a
+        // MULQ six pairs after the DIV already sees the new Q.
+        let mut data = vec![0u8; 16 << 10];
+        put(&mut data, 0, [8.0, 2.0, 0.0, 0.0]);
+        let mut r = VuRegs::new();
+        r.q = 100.0;
+        let mini_w = 0x1 << 21 | 1 << 16 | 1 << 11 | 5 << 6 | 47; // mini.w vf5, vf1, vf1
+        let mul_w = 0x1 << 21 | 5 << 16 | 1 << 11 | 6 << 6 | 42; // mul.w vf6, vf1, vf5 (needs vf5)
+        exec(
+            &[
+                (NOP, lq(1, 0, 0, 0xf)),
+                (NOP, NOPL),
+                (NOP, NOPL),
+                (NOP, NOPL),
+                (NOP, NOPL),
+                (mini_w, div(1, 0, 1, 1)), // Q = 4 after 7 cycles
+                (NOP, NOPL),
+                (mul_w, NOPL), // stalls 2 cycles on vf5
+                (NOP, NOPL),
+                (NOP, NOPL),
+                (NOP, NOPL),
+                (vmulq(3, 1), NOPL), // 6 pairs after DIV, 8 cycles: new Q
+                (NOP | E, NOPL),
+                (NOP, NOPL),
+            ],
+            &mut data,
+            &mut r,
+        );
+        assert_eq!(r.vf[3][0], 32.0);
+    }
+
+    #[test]
+    fn end_with_branch_resumes_at_target() {
+        // E bit on a pair that branches: the program stops after the delay
+        // slot, and TPC (where MSCNT continues) is the branch target.
+        let mut data = vec![0u8; 16 << 10];
+        let mut r = VuRegs::new();
+        let b = |off: i32| 0x20 << 25 | (off as u32 & 0x7ff);
+        exec(&[(NOP, NOPL), (NOP | E, b(-2)), (NOP, NOPL), (NOP, NOPL)], &mut data, &mut r);
+        assert_eq!(r.tpc, 0);
     }
 
     #[test]

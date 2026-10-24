@@ -24,6 +24,8 @@ const COLOR: vk::Format = vk::Format::R8G8B8A8_UNORM;
 const DEPTH: vk::Format = vk::Format::D32_SFLOAT;
 /// Unused textures are dropped after this many frames.
 const TEXTURE_TTL: u64 = 600;
+/// Texture cache budget; least recently used textures go first beyond it.
+const TEXTURE_BUDGET: u64 = 1 << 30;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -118,6 +120,7 @@ struct Target {
 struct Texture {
     image: Image,
     last_used: u64,
+    bytes: u64,
 }
 
 enum Garbage {
@@ -152,6 +155,9 @@ pub struct Hw {
     frames: Vec<Frame>,
     slot: usize,
     pub frame_no: u64,
+    /// Vblank number of the frame being presented (the game's clock; the
+    /// same one FREEK_PAD_SCRIPT uses).
+    pub vblank: u64,
     rendered: Vec<vk::Semaphore>,
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
@@ -165,11 +171,16 @@ pub struct Hw {
     rendering: Option<u32>,
     batch: Option<BatchKey>,
     verts: Vec<GpuVertex>,
+    texture_bytes: u64,
     pub stats: Stats,
     /// FREEK_SHOT=<file.png>:<frame>: save the displayed picture.
     shot: Option<(u64, String)>,
     /// FREEK_SHOT_EVERY=<n> with FREEK_SHOT=<prefix>:<first>: a series.
     shot_every: Option<u64>,
+    /// FREEK_GS_TRACE=<vblank>[:<presents>]: log every draw from that
+    /// vblank on, for that many presented frames (default 1).
+    trace_frame: Option<u64>,
+    trace_left: u32,
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -230,6 +241,7 @@ impl Hw {
                 frames,
                 slot: 0,
                 frame_no: 0,
+                vblank: 0,
                 rendered,
                 set_layout,
                 layout,
@@ -243,8 +255,11 @@ impl Hw {
                 rendering: None,
                 batch: None,
                 verts: Vec::new(),
+                texture_bytes: 0,
                 stats: Stats::default(),
                 shot_every: std::env::var("FREEK_SHOT_EVERY").ok().and_then(|v| v.parse().ok()),
+                trace_frame: std::env::var("FREEK_GS_TRACE").ok().and_then(|v| v.split(':').next()?.parse().ok()),
+                trace_left: std::env::var("FREEK_GS_TRACE").ok().and_then(|v| v.split(':').nth(1)?.parse().ok()).unwrap_or(1),
                 shot: std::env::var("FREEK_SHOT").ok().and_then(|v| {
                     let (path, frame) = v.rsplit_once(':')?;
                     Some((frame.parse().ok()?, path.to_string()))
@@ -517,7 +532,11 @@ impl Hw {
         let (w, h, px) = if self.cfg.xbox_icons { crate::icons::replace(w, h, &px).unwrap_or((w, h, px)) } else { (w, h, px) };
         self.end_rendering();
         let image = self.upload_image(w, h, &px, vk::ImageUsageFlags::SAMPLED, "texture")?;
-        self.textures.insert(key, Texture { image, last_used: frame });
+        self.textures.insert(key, Texture { image, last_used: frame, bytes: w as u64 * h as u64 * 4 });
+        self.texture_bytes += w as u64 * h as u64 * 4;
+        if self.texture_bytes > TEXTURE_BUDGET {
+            self.evict_lru();
+        }
         self.stats.texture_uploads += 1;
         Ok((TexRef::Cache(key), [1.0, 1.0], false))
     }
@@ -706,6 +725,15 @@ impl Hw {
     fn draw_inner(&mut self, gs: &Gs, shape: Shape, v: &[Vertex]) -> Result<()> {
         let attrs = gs.attrs();
         let ctx = *gs.context();
+        if self.trace_frame.is_some_and(|f| self.vblank >= f) {
+            let (f, z, t) = (ctx.frame, ctx.zbuf, ctx.test);
+            eprintln!(
+                "[draw] {shape:?} v0=({:.1},{:.1},z={:#x}) v1=({:.1},{:.1}) rgba={:?} tme={} psm={:?} tbp={:#x} fb={:#x}/{:?} mask={:#x} zb={:#x}/{:?} zmsk={} zte={} ztst={} ate={} atst={} aref={} afail={} date={} abe={} alpha={:?} sc={:?} prim={:#x}",
+                v[0].x, v[0].y, v[0].z, v.get(1).map_or(0.0, |x| x.x), v.get(1).map_or(0.0, |x| x.y), v[0].rgba,
+                attrs.textured(), ctx.tex0.psm(), ctx.tex0.tbp0(), f.bp(), f.psm(), f.mask(), z.bp(), z.psm(), z.masked(),
+                t.zte(), t.ztst(), t.alpha_test(), t.atst(), t.aref(), t.afail(), t.date(), attrs.blend(), ctx.alpha.abcd(), ctx.scissor.rect(), attrs.0
+            );
+        }
         let (fb, zb, test) = (ctx.frame, ctx.zbuf, ctx.test);
         let (sx0, sy0, sx1, sy1) = ctx.scissor.rect();
         if sx1 < sx0 || sy1 < sy0 {
@@ -849,6 +877,14 @@ impl Hw {
     /// Present the frame buffer the display circuits point at.
     pub fn present(&mut self, gs: &Gs) {
         self.end_rendering();
+        // A traced frame ends here.
+        if self.trace_frame.is_some_and(|f| self.vblank >= f) {
+            eprintln!("[draw] --- present at vblank {} ---", self.vblank);
+            self.trace_left = self.trace_left.saturating_sub(1);
+            if self.trace_left == 0 {
+                self.trace_frame = None;
+            }
+        }
         let d = gs.display;
         let circuit = if d.enabled(1) { Some(1) } else if d.enabled(0) { Some(0) } else { None };
         let mut src = None;
@@ -883,7 +919,7 @@ impl Hw {
             eprintln!("[gs] frame {} display {:?} pmode {:#x} dispfb {:#x?} display {:#x?} targets {:?} textures {} {:?}", self.frame_no, src, d.pmode, d.dispfb, d.display, self.targets.keys().collect::<Vec<_>>(), self.textures.len(), self.stats);
         }
         let readback = match (&self.shot, src) {
-            (Some((frame, _)), Some(src)) if *frame == self.frame_no => self.record_readback(src).ok(),
+            (Some((frame, _)), Some(src)) if self.vblank >= *frame => self.record_readback(src).ok(),
             _ => None,
         };
         self.submit_and_present(src);
@@ -914,11 +950,11 @@ impl Hw {
         unsafe {
             let _ = self.vk.device.device_wait_idle();
         }
-        let (frame, base) = self.shot.take().unwrap();
+        let (_, base) = self.shot.take().unwrap();
         let path = match self.shot_every {
             Some(n) => {
-                self.shot = Some((frame + n, base.clone()));
-                format!("{}_{frame:06}.png", base.trim_end_matches(".png"))
+                self.shot = Some((self.vblank - self.vblank % n + n, base.clone()));
+                format!("{}_{:06}.png", base.trim_end_matches(".png"), self.vblank)
             }
             None => base,
         };
@@ -1023,6 +1059,22 @@ impl Hw {
         let old: Vec<TexKey> = self.textures.iter().filter(|(_, t)| now - t.last_used > TEXTURE_TTL).map(|(k, _)| *k).collect();
         for k in old {
             let t = self.textures.remove(&k).unwrap();
+            self.texture_bytes -= t.bytes;
+            self.frames[self.slot].garbage.push(Garbage::Image(t.image));
+        }
+    }
+
+    /// Drop least recently used textures (not used this frame) until the
+    /// cache is back under half its budget.
+    fn evict_lru(&mut self) {
+        let mut by_age: Vec<(u64, TexKey)> = self.textures.iter().filter(|(_, t)| t.last_used + 2 < self.frame_no).map(|(k, t)| (t.last_used, *k)).collect();
+        by_age.sort_by_key(|e| e.0);
+        for (_, k) in by_age {
+            if self.texture_bytes <= TEXTURE_BUDGET / 2 {
+                break;
+            }
+            let t = self.textures.remove(&k).unwrap();
+            self.texture_bytes -= t.bytes;
             self.frames[self.slot].garbage.push(Garbage::Image(t.image));
         }
     }

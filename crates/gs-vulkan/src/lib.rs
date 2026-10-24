@@ -47,7 +47,8 @@ impl Renderer {
                 }
                 self.gs.write_priv(reg, v)
             }
-            gs::Msg::Vsync => {
+            gs::Msg::Vsync(n) => {
+                self.hw.vblank = n;
                 self.hw.present(&self.gs);
                 self.timing.1 += t0.elapsed();
                 self.timing.2 += 1;

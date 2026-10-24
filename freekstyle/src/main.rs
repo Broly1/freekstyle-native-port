@@ -356,9 +356,10 @@ fn watchdog() {
             let (runs, cycles, ns) = std::mem::take(&mut *ee_runtime::vumicro::STATS.lock().unwrap());
             let poll = ee_runtime::cpu::POLL_US.load(Relaxed);
             eprintln!(
-                "[heartbeat] in fn {f:#010x}, {} calls in the last 2s; VU: {runs} programs ({} native), {cycles} cycles, {:.0} ms; polling {:.0} ms",
+                "[heartbeat] in fn {f:#010x}, {} calls in the last 2s; VU: {runs} programs ({} VU1, {} XGKICKs), {cycles} cycles, {:.0} ms; polling {:.0} ms",
                 n - last,
-                ee_runtime::vumicro::NATIVE_RUNS.swap(0, Relaxed),
+                ee_runtime::dma::VU1_RUNS.swap(0, Relaxed),
+                ee_runtime::dma::PATH1_PACKETS.swap(0, Relaxed),
                 ns as f64 / 1e6,
                 (poll - last_poll) as f64 / 1e3
             );
@@ -392,7 +393,7 @@ fn headless_gs(rx: Receiver<gs::Msg>) {
         match msg {
             gs::Msg::Gif(d) => g.write_gif(&d, &mut count),
             gs::Msg::Priv(r, v) => g.write_priv(r, v),
-            gs::Msg::Vsync => {
+            gs::Msg::Vsync(_) => {
                 frames += 1;
                 if frames % 60 == 0 {
                     let d = &g.display;

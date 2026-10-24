@@ -162,7 +162,7 @@ impl Io {
             let csr = if n % 2 == 1 { csr | GS_CSR_FIELD } else { csr & !GS_CSR_FIELD };
             self.regs.insert(GS_CSR, csr);
             if let Some(tx) = &self.gs {
-                let _ = tx.send(gs::Msg::Vsync);
+                let _ = tx.send(gs::Msg::Vsync(n));
             }
         }
     }

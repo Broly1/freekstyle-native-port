@@ -147,7 +147,8 @@ impl Image {
                     }
                     let _ = writeln!(body, "let t = {};\n{};", self.pair_call(pc), self.pair_call(delay));
                     if end {
-                        let _ = writeln!(body, "c.finish({:#x});\nreturn;", (pc + 2) & mask);
+                        // A branch in the E-bit pair sets where MSCNT resumes.
+                        let _ = writeln!(body, "c.finish(t.unwrap_or({:#x}));\nreturn;", (pc + 2) & mask);
                     } else if k == Branch::Cond {
                         let _ = writeln!(body, "pc = t.unwrap_or({:#x});", (pc + 2) & mask);
                     } else {

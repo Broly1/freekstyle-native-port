@@ -1,0 +1,6 @@
+[package]
+name = "flm"
+description = "EA .FLM movies (Freekstyle): demuxer, PS2 ADPCM decoder, MKV converter"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

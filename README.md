@@ -23,7 +23,9 @@ go in `game/`, which git ignores.
 | IOP services | partial | CD/DVD from the disc image; padman (controller frames each vblank); saves as files instead of memory cards. Todo: EA audio |
 | `gs`         | working | GS core: registers, GIF PACKED/REGLIST/IMAGE, 4 MB VRAM with all swizzled formats (verified against hardware tables), transfers, CLUT, primitive assembly |
 | `gs-vulkan`  | working | Vulkan renderer: render targets at N x resolution (3x 1080p, 5x 4K), GS blend modes, texture cache, display output, screenshots |
-| VU0/VU1, IPU | todo    | Microprogram execution (3D) and MPEG decoding (splash/movies) |
+| VU0/VU1      | working | VIF unpack/MPG/DIRECT, VU micro-mode interpreter with pipeline timing (Q/P latency, flag delay, hazard stalls); recorded programs are recompiled to Rust from `freekstyle/vu_dumps` |
+| `flm`        | working | EA `.FLM` movie demuxer and PS2 ADPCM decoder; `flm2mkv` converts movies to VP9 + Opus `.mkv` |
+| IPU          | todo    | MPEG decoding for compressed backgrounds |
 
 ## Building and running
 
@@ -55,6 +57,19 @@ and Esc quits.
 
 The disc image (raw `.bin` or `.iso`) defaults to `game/Freekstyle.bin`.
 
+## Movies
+
+The intro and logo movies are EA `.FLM` files (MPEG-2 video at 512x448,
+29.97 fps, with PS2 ADPCM stereo audio). `flm2mkv` converts them to
+Linux-friendly Matroska (VP9 video, Opus audio) with ffmpeg:
+
+```sh
+cargo run --release -p flm --bin flm2mkv -- <extracted OPENING dir> game/movies
+```
+
+In-game playback of the `.mkv` files is not wired up yet, so the game still
+skips its movies.
+
 Generation takes under a second. The release build of about 460k generated
 lines takes about a minute on 12 cores.
 
@@ -80,7 +95,8 @@ Add the address to `freekstyle/seeds.txt` and regenerate.
 
 The game reaches its main menu natively and is controllable: profile name
 entry, main menu (Circuit, Single Race, Freestyle, Freeride, Record Book,
-Options), at up to 5x resolution with Xbox prompts.
+Options), at up to 5x resolution with Xbox prompts. The rider select
+screen renders the 3D rider models (VU1) and the animated flames.
 
 Temporarily skipped:
 - Intro movies (`.FLM`) and IPU-compressed backgrounds. The IPU (MPEG
@@ -89,9 +105,8 @@ Temporarily skipped:
 - Sound: EA's IOP audio driver is acknowledged silently each frame.
 
 Next steps, in order:
-1. VU1 microprogram execution (the game's 3D renderer) and VU0 macro
-   microprograms, to get into races.
-2. The IPU decoder, for backgrounds and movies.
+1. Get into races, and speed up VU1 (busy 3D scenes run at about 20 fps).
+2. The IPU decoder for backgrounds, and `.mkv` movie playback in game.
 3. EA audio (`AUDIO.IRX` protocol) through the host audio device.
 4. 60 fps and widescreen patches.
 

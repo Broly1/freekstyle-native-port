@@ -70,8 +70,9 @@ pub enum Msg {
     Gif(Vec<u128>),
     /// Write to a privileged register, by offset from 0x1200_0000.
     Priv(u32, u64),
-    /// A vertical blank happened: present the current display.
-    Vsync,
+    /// A vertical blank happened (with its number since boot): present
+    /// the current display.
+    Vsync(u64),
 }
 
 /// Privileged (memory-mapped) registers that control video output.

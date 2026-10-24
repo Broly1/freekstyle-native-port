@@ -11,6 +11,10 @@ pub const CH_VIF0: usize = 0;
 pub const CH_VIF1: usize = 1;
 pub const CH_GIF: usize = 2;
 
+/// XGKICKed packets and VU1 program runs, for FREEK_HEARTBEAT.
+pub static PATH1_PACKETS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static VU1_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Guard against runaway tag chains in broken lists.
 const MAX_TAGS: usize = 1 << 16;
 
@@ -108,7 +112,8 @@ pub struct Vif {
     unpack_done: u32,
     unpack_target: u32,
     unpack_cycle: u32,
-    unpack_bits: u64,
+    /// Pending input bits; an element is up to 128 bits (V4-32).
+    unpack_bits: u128,
     unpack_nbits: u32,
     /// Words received for multi-word commands (STROW etc.).
     buf: Vec<u32>,
@@ -201,7 +206,11 @@ impl Vif {
         }
         let Memory { vu1, vu1_code, vu1_data, io, vu_cache, vu_code_gen, vu_programs, .. } = m;
         let start = if addr == u32::MAX { vu1.tpc } else { addr / 8 };
-        let mut kick = |p: Vec<u128>| io.send_gif(p);
+        let mut kick = |p: Vec<u128>| {
+            PATH1_PACKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            io.send_gif(p)
+        };
+        VU1_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         vu_cache[1].sync(vu_code_gen[1], vu1_code.len() / 8);
         let env = crate::vumicro::Env { code: vu1_code, data: vu1_data, top: self.tops, itop: self.itop, kick: Some(&mut kick) };
         crate::vumicro::run(vu1, env, &mut vu_cache[1], 1, vu_programs, start);
@@ -289,12 +298,12 @@ impl Vif {
     }
 
     fn unpack_word(&mut self, m: &mut Memory, unit: usize, w: u32) {
-        self.unpack_bits |= (w as u64) << self.unpack_nbits;
+        self.unpack_bits |= (w as u128) << self.unpack_nbits;
         self.unpack_nbits += 32;
         let eb = self.element_bits();
         while self.unpack_nbits >= eb && self.unpack_done < self.unpack_target {
-            let e = self.unpack_bits & ((1u64 << eb) - 1);
-            self.unpack_bits = if eb == 64 { 0 } else { self.unpack_bits >> eb };
+            let e = if eb == 128 { self.unpack_bits } else { self.unpack_bits & ((1u128 << eb) - 1) };
+            self.unpack_bits = if eb == 128 { 0 } else { self.unpack_bits >> eb };
             self.unpack_nbits -= eb;
             self.write_element(m, unit, Some(e));
             // Fill mode: after CL data writes, WL-CL filler writes.
@@ -306,7 +315,7 @@ impl Vif {
     }
 
     /// Write one unpacked qword (or a filler when `e` is None).
-    fn write_element(&mut self, m: &mut Memory, unit: usize, e: Option<u64>) {
+    fn write_element(&mut self, m: &mut Memory, unit: usize, e: Option<u128>) {
         let (vn, vl) = self.unpack_format();
         let usn = self.code & 0x4000 != 0;
         let masked = self.cmd & 0x10 != 0;
@@ -314,7 +323,7 @@ impl Vif {
         if let Some(e) = e {
             let bits = 32 >> vl;
             let comp = |n: u32| -> u32 {
-                let raw = ((e >> (n * bits)) & ((1u64 << bits) - 1)) as u32;
+                let raw = ((e >> (n * bits)) & ((1u128 << bits) - 1)) as u32;
                 if usn || bits == 32 { raw } else { ((raw << (32 - bits)) as i32 >> (32 - bits)) as u32 }
             };
             if vn == 3 && vl == 3 {
@@ -367,5 +376,43 @@ impl Vif {
         } else {
             self.unpack_done
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Run VIF1 words through the parser and return VU1 data qword `q`.
+    fn unpack(words: &[u32], q: usize) -> [u32; 4] {
+        let mut m = Memory::new();
+        let mut vif = Vif::default();
+        vif.run(&mut m, 1, words);
+        std::array::from_fn(|n| u32::from_le_bytes(m.vu1_data[q * 16 + n * 4..q * 16 + n * 4 + 4].try_into().unwrap()))
+    }
+
+    #[test]
+    fn unpack_v4_32() {
+        // STCYCL 1,1 ; UNPACK V4-32 num=2 addr=5
+        let w = [0x0100_0101, 0x6c02_0005, 1, 2, 3, 4, 5, 6, 7, 8];
+        assert_eq!(unpack(&w, 5), [1, 2, 3, 4]);
+        assert_eq!(unpack(&w, 6), [5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn unpack_v3_32_and_v2_32() {
+        // V3-32: x, y, z per element; V2-32: x, y (z, w repeat x, y).
+        let w = [0x0100_0101, 0x6802_0000, 1, 2, 3, 4, 5, 6];
+        assert_eq!(&unpack(&w, 0)[..3], &[1, 2, 3]);
+        assert_eq!(&unpack(&w, 1)[..3], &[4, 5, 6]);
+        let w = [0x0100_0101, 0x6401_0000, 9, 10];
+        assert_eq!(&unpack(&w, 0)[..2], &[9, 10]);
+    }
+
+    #[test]
+    fn unpack_v4_16_sign_extends() {
+        // V4-16 signed: 0xffff -> -1.
+        let w = [0x0100_0101, 0x6d01_0000, 0x0002_ffff, 0x0004_0003];
+        assert_eq!(unpack(&w, 0), [u32::MAX, 2, 3, 4]);
     }
 }
