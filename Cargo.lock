@@ -714,6 +714,7 @@ dependencies = [
  "ash-window",
  "gpu-allocator",
  "gs",
+ "png",
  "raw-window-handle",
 ]
 

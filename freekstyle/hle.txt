@@ -41,3 +41,6 @@
 001ac580 movie_play
 001ab670 movie_play
 001ab620 movie_play
+
+# Camera projection scale: the widescreen option widens the race camera.
+00145210 camera_scale

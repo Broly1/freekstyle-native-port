@@ -26,6 +26,9 @@ const DEPTH: vk::Format = vk::Format::D32_SFLOAT;
 const TEXTURE_TTL: u64 = 600;
 /// Texture cache budget; least recently used textures go first beyond it.
 const TEXTURE_BUDGET: u64 = 1 << 30;
+/// Blurred side bars: the picture is halved down this chain (each blit
+/// averages 2x2 texels), then the smallest is stretched over the window.
+const BLUR_CHAIN: [(u32, u32); 6] = [(1024, 768), (512, 384), (256, 192), (128, 96), (64, 48), (32, 24)];
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -154,11 +157,22 @@ struct Frame {
 }
 
 pub struct Config {
+    /// Internal resolution: target pixels per GS pixel, vertically and
+    /// horizontally (higher in widescreen, where the picture is stretched).
     pub scale: u32,
+    pub scale_x: u32,
+    /// Show the picture at 16:9 (the game renders a squeezed wide view)
+    /// and use the wide versions of high-resolution pictures.
+    pub widescreen: bool,
     /// Stretch the picture to the window instead of keeping 4:3.
     pub stretch: bool,
+    /// Fill the sides of a wide window with a blurred copy of the picture
+    /// instead of black.
+    pub blur_bars: bool,
     /// Replace PlayStation button icons with Xbox ones.
     pub xbox_icons: bool,
+    /// Converted pictures (`game/images`); replacements in its `hd`.
+    pub pictures: Option<std::path::PathBuf>,
 }
 
 pub struct Hw {
@@ -180,6 +194,9 @@ pub struct Hw {
     samplers: HashMap<SamplerKey, vk::Sampler>,
     targets: HashMap<u32, Target>,
     textures: HashMap<TexKey, Texture>,
+    pictures: Option<crate::pictures::Pictures>,
+    /// Images for the blurred side bars, made on first use.
+    blur: Vec<Image>,
     white: Image,
     rendering: Option<u32>,
     batch: Option<BatchKey>,
@@ -251,7 +268,6 @@ impl Hw {
             let rendered = (0..vk.swapchain.images.len()).map(|_| dev.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap()).collect();
             let mut hw = Hw {
                 vk,
-                cfg,
                 cmd_pool,
                 frames,
                 slot: 0,
@@ -266,6 +282,9 @@ impl Hw {
                 samplers: HashMap::new(),
                 targets: HashMap::new(),
                 textures: HashMap::new(),
+                pictures: cfg.pictures.as_deref().map(crate::pictures::Pictures::load),
+                cfg,
+                blur: Vec::new(),
                 white,
                 rendering: None,
                 batch: None,
@@ -372,7 +391,7 @@ impl Hw {
             return;
         }
         self.end_rendering();
-        let s = self.cfg.scale;
+        let s = self.cfg.scale_x;
         let t = self.targets.get_mut(&bp).unwrap();
         let load = if t.fresh { vk::AttachmentLoadOp::CLEAR } else { vk::AttachmentLoadOp::LOAD };
         t.fresh = false;
@@ -410,7 +429,7 @@ impl Hw {
             }
         }
         self.end_rendering();
-        let s = self.cfg.scale;
+        let s = self.cfg.scale_x;
         let w = (bw.max(1) * 64).min(2048);
         let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED;
         let color = self.vk.create_image(w * s, need_h * sy, COLOR, usage, "target")?;
@@ -455,7 +474,7 @@ impl Hw {
     }
 
     fn clear_depth_now(&self, t: &Target) {
-        let s = self.cfg.scale;
+        let s = self.cfg.scale_x;
         let depth = vk::RenderingAttachmentInfo::default()
             .image_view(t.depth.view)
             .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
@@ -488,7 +507,7 @@ impl Hw {
         }
         self.end_rendering();
         let tmp = self.upload_image(w, h, &px, vk::ImageUsageFlags::TRANSFER_SRC, "target upload")?;
-        let s = self.cfg.scale as i32;
+        let s = self.cfg.scale_x as i32;
         let t = self.targets.get_mut(&key).unwrap();
         let sy = t.sy as i32;
         if t.fresh {
@@ -561,8 +580,17 @@ impl Hw {
         if let Some(dir) = std::env::var_os("FREEK_DUMP_TEXTURES") {
             dump_texture(std::path::Path::new(&dir), &key, t, w, h, &px);
         }
-        // PlayStation button prompts become Xbox buttons.
-        let (w, h, px) = if self.cfg.xbox_icons { crate::icons::replace(w, h, &px).unwrap_or((w, h, px)) } else { (w, h, px) };
+        // Pictures in high resolution; PlayStation button prompts become
+        // Xbox buttons.
+        let picture = match &self.pictures {
+            Some(p) if !t.psm().is_indexed() => p.replace(w, h, &px, (self.cfg.scale_x, self.cfg.scale), self.cfg.widescreen),
+            _ => None,
+        };
+        let (w, h, px) = match picture {
+            Some(r) => r,
+            None if self.cfg.xbox_icons => crate::icons::replace(w, h, &px).unwrap_or((w, h, px)),
+            None => (w, h, px),
+        };
         self.end_rendering();
         let image = self.upload_image(w, h, &px, vk::ImageUsageFlags::SAMPLED, "texture")?;
         self.textures.insert(key, Texture { image, last_used: frame, bytes: w as u64 * h as u64 * 4 });
@@ -733,7 +761,7 @@ impl Hw {
             let write = vk::WriteDescriptorSet::default().dst_set(sets[0]).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&img);
             dev.update_descriptor_sets(&[write], &[]);
             let t = &self.targets[&k.target];
-            let s = self.cfg.scale as f32;
+            let s = self.cfg.scale_x as f32;
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
             dev.cmd_set_viewport(cmd, 0, &[vk::Viewport { x: 0.0, y: 0.0, width: t.w as f32 * s, height: (t.h * t.sy) as f32, min_depth: 0.0, max_depth: 1.0 }]);
             dev.cmd_set_scissor(cmd, 0, &[k.scissor]);
@@ -822,7 +850,7 @@ impl Hw {
             fix: ctx.alpha.fix() as f32 / 128.0,
             _pad: 0.0,
         };
-        let s = self.cfg.scale;
+        let s = self.cfg.scale_x;
         let scissor = vk::Rect2D {
             offset: vk::Offset2D { x: (sx0 * s) as i32, y: (sy0 * t.sy) as i32 },
             extent: vk::Extent2D { width: ((sx1.min(t.w - 1) + 1).saturating_sub(sx0)) * s, height: ((sy1.min(t.h - 1) + 1).saturating_sub(sy0)) * t.sy },
@@ -861,8 +889,9 @@ impl Hw {
         };
         let (tw, th) = ((1u32 << tex0.tw()) as f32, (1u32 << tex0.th()) as f32);
         let fst = attrs.fst();
+        let squeeze = self.overlay_centre(&ctx, v);
         let conv = |v: &Vertex| GpuVertex {
-            x: v.x,
+            x: squeeze.map_or(v.x, |c| c + (v.x - c) * 0.75),
             y: v.y,
             z: (v.z as f64 * zscale).min(1.0) as f32,
             color: u32::from_le_bytes(v.rgba),
@@ -895,6 +924,30 @@ impl Hw {
         }
         self.stats.draws += 1;
         Ok(())
+    }
+
+    /// In widescreen the frame is shown stretched by 4/3, so 2D overlays
+    /// (HUD, menu text, button prompts) are drawn 3/4 as wide around the
+    /// frame's centre to keep their shape; returns that centre for such a
+    /// draw. The game draws its overlays at the far depth limit with the
+    /// depth test on; 3D geometry never sits exactly there, and full-screen
+    /// passes (backgrounds, fades, effects) either use another depth or
+    /// span the whole width, which is left alone.
+    fn overlay_centre(&self, ctx: &gs::regs::Context, v: &[Vertex]) -> Option<f32> {
+        if !self.cfg.widescreen || !ctx.test.zte() || ctx.test.ztst() < 2 {
+            return None;
+        }
+        let far = match ctx.zbuf.psm() {
+            Psm::Z32 => u32::MAX,
+            Psm::Z24 => 0xff_ffff,
+            _ => 0xffff,
+        };
+        if v.iter().any(|v| v.z != far) {
+            return None;
+        }
+        let width = (ctx.frame.bw() * 64) as f32;
+        let (x0, x1) = v.iter().fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(v.x), b.max(v.x)));
+        (x0 > 1.0 || x1 < width - 1.0).then_some(width / 2.0)
     }
 
     /// Vertical render scale: doubled for interlaced field-mode output,
@@ -980,7 +1033,7 @@ impl Hw {
 
     /// Copy the displayed region at internal resolution into a buffer.
     fn record_readback(&mut self, (bp, x, y, w, h): (u32, u32, u32, u32, u32)) -> Result<(Buffer, u32, u32)> {
-        let s = self.cfg.scale;
+        let s = self.cfg.scale_x;
         let t = &self.targets[&bp];
         let sy = t.sy;
         let (w, h) = ((w * s).min(t.color.extent.width - x * s), (h * sy).min(t.color.extent.height - y * sy));
@@ -1064,6 +1117,21 @@ impl Hw {
     }
 
     fn submit_and_present(&mut self, src: Option<(u32, u32, u32, u32, u32)>) {
+        if self.cfg.blur_bars && !self.cfg.stretch && self.blur.is_empty() {
+            for (w, h) in BLUR_CHAIN {
+                match self.vk.create_image(w, h, COLOR, vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST, "blur") {
+                    Ok(img) => {
+                        transition(&self.vk.device, self.cmd(), img.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
+                        self.blur.push(img);
+                    }
+                    Err(e) => {
+                        eprintln!("[gs] blurred bars: {e}");
+                        self.cfg.blur_bars = false;
+                        break;
+                    }
+                }
+            }
+        }
         let dev = self.vk.device.clone();
         let cmd = self.cmd();
         let f = &self.frames[self.slot];
@@ -1082,28 +1150,35 @@ impl Hw {
             }
             barrier(&dev, cmd);
             if let Some((bp, x, y, w, h)) = src {
-                let s = self.cfg.scale as i32;
+                let s = self.cfg.scale_x as i32;
                 let t = &self.targets[&bp];
-                // Fit 4:3 into the window unless stretching.
+                // Fit 4:3 (16:9 in widescreen) into the window unless stretching.
                 let (ww, wh) = (ext.width as i32, ext.height as i32);
+                let (ax, ay) = if self.cfg.widescreen { (16, 9) } else { (4, 3) };
                 let (dw, dh) = if self.cfg.stretch {
                     (ww, wh)
-                } else if ww * 3 > wh * 4 {
-                    (wh * 4 / 3, wh)
+                } else if ww * ay > wh * ax {
+                    (wh * ax / ay, wh)
                 } else {
-                    (ww, ww * 3 / 4)
+                    (ww, ww * ay / ax)
                 };
                 let (dx, dy) = ((ww - dw) / 2, (wh - dh) / 2);
                 let ys = t.sy as i32;
                 let sx1 = ((x + w) as i32 * s).min(t.color.extent.width as i32);
                 let sy1 = ((y + h) as i32 * ys).min(t.color.extent.height as i32);
-                let blit = vk::ImageBlit {
-                    src_subresource: layers(vk::ImageAspectFlags::COLOR),
-                    src_offsets: [vk::Offset3D { x: x as i32 * s, y: y as i32 * ys, z: 0 }, vk::Offset3D { x: sx1, y: sy1, z: 1 }],
-                    dst_subresource: layers(vk::ImageAspectFlags::COLOR),
-                    dst_offsets: [vk::Offset3D { x: dx, y: dy, z: 0 }, vk::Offset3D { x: dx + dw, y: dy + dh, z: 1 }],
-                };
-                unsafe { dev.cmd_blit_image(cmd, t.color.image, vk::ImageLayout::GENERAL, sw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::LINEAR) };
+                let src_rect = [vk::Offset3D { x: x as i32 * s, y: y as i32 * ys, z: 0 }, vk::Offset3D { x: sx1, y: sy1, z: 1 }];
+                if self.cfg.blur_bars && dw < ww {
+                    // Blur by halving, then stretch the smallest over the window.
+                    let mut from = (t.color.image, src_rect);
+                    for img in &self.blur {
+                        let to = [vk::Offset3D::default(), vk::Offset3D { x: img.extent.width as i32, y: img.extent.height as i32, z: 1 }];
+                        blit(&dev, cmd, from, (img.image, vk::ImageLayout::GENERAL, to));
+                        from = (img.image, to);
+                    }
+                    blit(&dev, cmd, from, (sw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, [vk::Offset3D::default(), vk::Offset3D { x: ww, y: wh, z: 1 }]));
+                }
+                let to = [vk::Offset3D { x: dx, y: dy, z: 0 }, vk::Offset3D { x: dx + dw, y: dy + dh, z: 1 }];
+                blit(&dev, cmd, (t.color.image, src_rect), (sw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, to));
             }
             transition(&dev, cmd, sw, vk::ImageAspectFlags::COLOR, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR);
         }
@@ -1175,6 +1250,13 @@ impl Hw {
             self.frames[self.slot].garbage.push(Garbage::Image(t.image));
         }
     }
+}
+
+/// Linear blit between colour images; the source is in GENERAL layout.
+fn blit(dev: &ash::Device, cmd: vk::CommandBuffer, (src, from): (vk::Image, [vk::Offset3D; 2]), (dst, layout, to): (vk::Image, vk::ImageLayout, [vk::Offset3D; 2])) {
+    let region = vk::ImageBlit { src_subresource: layers(vk::ImageAspectFlags::COLOR), src_offsets: from, dst_subresource: layers(vk::ImageAspectFlags::COLOR), dst_offsets: to };
+    unsafe { dev.cmd_blit_image(cmd, src, vk::ImageLayout::GENERAL, dst, layout, &[region], vk::Filter::LINEAR) };
+    barrier(dev, cmd);
 }
 
 /// Write a decoded texture as PNG (alpha scaled to 0-255) for inspection.

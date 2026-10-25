@@ -479,6 +479,41 @@ fn picture_pixels(c: &mut Cpu, bytes: &[u8], w: u32, h: u32) -> Vec<u32> {
     crate::ipu::decode_picture(bytes).map(|p| p.2).unwrap_or_else(|| vec![0; (w * h) as usize])
 }
 
+// ---- Widescreen ----
+
+/// Set by the frontend: render the race camera 16:9 (shown stretched).
+pub static WIDESCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Camera projection scale (0x145210): `(camera or 0 for the current
+/// one, sx in $f12, sy in $f13, update)` stores sx, sy and their
+/// reciprocals at +1144..+1156 and, if `update`, rebuilds the camera's
+/// matrices (0x144200).
+///
+/// In widescreen the race camera's setup (the call returning to
+/// 0x1443c4, sx = 1.0) gets sx = 0.75: a third more view horizontally,
+/// squeezed into the 4:3 frame and stretched back out on display. This
+/// is the same change as PCSX2's widescreen patch for this game.
+pub fn camera_scale(c: &mut Cpu) {
+    const RA: usize = 31;
+    let mut cam = c.r32(A0);
+    if cam == 0 {
+        cam = c.mem.r32(c.r32(GP).wrapping_sub(5928));
+        c.ws(A0, cam);
+    }
+    let mut sx = c.fpr[12];
+    if c.r32(RA) == 0x1443c4 && WIDESCREEN.load(std::sync::atomic::Ordering::Relaxed) {
+        sx *= 0.75;
+    }
+    let sy = c.fpr[13];
+    c.mem.w32(cam + 1144, sx.to_bits());
+    c.mem.w32(cam + 1148, sy.to_bits());
+    c.mem.w32(cam + 1152, crate::fpu::fdiv(1.0, sx).to_bits());
+    c.mem.w32(cam + 1156, crate::fpu::fdiv(1.0, sy).to_bits());
+    if c.r32(A1) != 0 {
+        c.call(0x144200);
+    }
+}
+
 // ---- Movies ----
 
 /// The game's movie API (EA .FLM via the IPU): open (0x1ac580), blocking

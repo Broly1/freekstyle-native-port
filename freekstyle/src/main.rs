@@ -10,6 +10,10 @@
 //!   --scale N            internal resolution multiplier (overrides --res)
 //!   --fullscreen         borderless fullscreen
 //!   --stretch            fill the window instead of keeping 4:3
+//!   --widescreen         16:9: the game renders a wider view, shown
+//!                        stretched to 16:9, with wide pictures
+//!   --blur-bars          fill the sides of a wide window with a blurred
+//!                        copy of the picture instead of black
 //!   --headless           no window; print GS statistics
 //!   --ps2-icons          keep the original PlayStation button icons
 //!   --mute               no sound (the sound driver still runs)
@@ -48,6 +52,8 @@ struct Options {
     scale: u32,
     fullscreen: bool,
     stretch: bool,
+    blur_bars: bool,
+    widescreen: bool,
     headless: bool,
     ps2_icons: bool,
     mute: bool,
@@ -61,6 +67,8 @@ fn options() -> Options {
         scale: 3,
         fullscreen: false,
         stretch: false,
+        blur_bars: false,
+        widescreen: false,
         headless: false,
         ps2_icons: false,
         mute: false,
@@ -83,6 +91,8 @@ fn options() -> Options {
             "--scale" => scale = args.next().and_then(|v| v.parse().ok()),
             "--fullscreen" => o.fullscreen = true,
             "--stretch" => o.stretch = true,
+            "--blur-bars" => o.blur_bars = true,
+            "--widescreen" => o.widescreen = true,
             "--headless" => o.headless = true,
             "--ps2-icons" => o.ps2_icons = true,
             "--mute" => o.mute = true,
@@ -111,6 +121,7 @@ const STACK_SIZE: usize = 512 << 20;
 
 fn main() {
     let opts = options();
+    ee_runtime::hle::WIDESCREEN.store(opts.widescreen, std::sync::atomic::Ordering::Relaxed);
     let path = opts.elf.clone();
     let disc = ee_runtime::disc::Disc::open(opts.disc.as_ref()).unwrap_or_else(|e| {
         eprintln!("disc image: {e}");
@@ -282,7 +293,15 @@ impl ApplicationHandler for App {
             process::exit(1);
         });
         let size = window.inner_size();
-        let cfg = gs_vulkan::Config { scale: self.opts.scale, stretch: self.opts.stretch, xbox_icons: !self.opts.ps2_icons };
+        let pictures = std::path::Path::new(&self.opts.disc).parent().unwrap_or(std::path::Path::new(".")).join("images");
+        // Widescreen stretches the frame by 4/3: render that much wider.
+        let scale_x = if self.opts.widescreen { (self.opts.scale * 4).div_ceil(3) } else { self.opts.scale };
+        let cfg = gs_vulkan::Config {
+            scale: self.opts.scale,
+            scale_x,
+            widescreen: self.opts.widescreen,
+            stretch: self.opts.stretch, blur_bars: self.opts.blur_bars, xbox_icons: !self.opts.ps2_icons, pictures: Some(pictures),
+        };
         let renderer = gs_vulkan::Renderer::new(&window, (size.width, size.height), cfg).unwrap_or_else(|e| {
             eprintln!("Vulkan: {e}");
             process::exit(1);

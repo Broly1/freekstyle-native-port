@@ -34,7 +34,7 @@ go in `game/`, which git ignores.
 # 1. Copy SLUS_203.67 from your own disc into game/.
 # 2. Generate Rust from it, then build and run.
 cargo run --release -p ee-recomp -- game/SLUS_203.67 freekstyle/src/gen freekstyle/hle.txt freekstyle/seeds.txt
-cargo run --release -p freekstyle -- [--res 1080|1440|4k] [--scale N] [--fullscreen] [--stretch] [--mute]
+cargo run --release -p freekstyle -- [--res 1080|1440|4k] [--scale N] [--fullscreen] [--widescreen] [--stretch] [--blur-bars] [--mute]
 ```
 
 `--res` picks the window size and a matching internal resolution (3x, 4x
@@ -70,6 +70,32 @@ cargo run --release -p ee-runtime --bin lsc2png -- game/Freekstyle.bin game/imag
 The game then loads `game/images/*.png` (found next to the disc image).
 They can be edited; a picture of another size is scaled to the original's.
 Without them the game still works, decoding the originals in software.
+
+**High-resolution pictures**: put a replacement with the same name in
+`game/images/hd/` (for example an AI upscale). It may have any size and is
+shown over the same 4:3 area, so make it 4:3 (2880x2160 for 4K); the
+originals are 512x448 shown at 4:3, so stretch an upscale's width by 8/7.
+The renderer recognises the picture by its texels, resamples the
+replacement (Lanczos) to the internal resolution and draws it instead.
+
+On a wide window the 4:3 picture is centred with black bars;
+`--blur-bars` fills them with a blurred copy of the picture.
+
+## Widescreen
+
+`--widescreen` gives a real 16:9 view rather than a stretched one:
+
+- **3D**: the race camera's horizontal projection scale (set at 0x145210
+  from 0x1443a4) becomes 0.75 instead of 1.0, the same change as PCSX2's
+  widescreen patch. The game renders a third more view squeezed into its
+  4:3 frame, which is shown stretched to 16:9. The frame is rendered with
+  a 4/3 higher horizontal internal resolution so the stretch costs no
+  sharpness.
+- **HUD and menu text**: drawn 3/4 as wide around the screen centre, so
+  they keep their shape inside the middle 4:3 area. The renderer
+  recognises them as draws at the far depth limit with the depth test on.
+- **Pictures**: `game/images/hd/wide/<NAME>.png` (16:9, e.g. 3840x2160)
+  is used if present, else the 4:3 one is stretched.
 
 ## Movies
 
