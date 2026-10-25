@@ -919,7 +919,13 @@ impl Hw {
             eprintln!("[gs] frame {} display {:?} pmode {:#x} dispfb {:#x?} display {:#x?} targets {:?} textures {} {:?}", self.frame_no, src, d.pmode, d.dispfb, d.display, self.targets.keys().collect::<Vec<_>>(), self.textures.len(), self.stats);
         }
         let readback = match (&self.shot, src) {
-            (Some((frame, _)), Some(src)) if self.vblank >= *frame => self.record_readback(src).ok(),
+            (Some((frame, _)), Some(src)) if self.vblank >= *frame => match self.record_readback(src) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    eprintln!("[gs] screenshot at vblank {}: {e}", self.vblank);
+                    None
+                }
+            },
             _ => None,
         };
         self.submit_and_present(src);

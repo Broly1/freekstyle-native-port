@@ -55,7 +55,7 @@ impl Renderer {
                 if self.timing.2 == 120 && std::env::var_os("FREEK_GS_LOG").is_some() {
                     let (g, p, n) = self.timing;
                     let fps = n as f64 / self.since.elapsed().as_secs_f64();
-                    eprintln!("[gs] {fps:.1} fps; per frame: GS {:.2} ms, present {:.2} ms", g.as_secs_f64() * 1e3 / n as f64, p.as_secs_f64() * 1e3 / n as f64);
+                    eprintln!("[gs] {fps:.1} fps; per frame: GS {:.2} ms, present {:.2} ms; vblank {}", g.as_secs_f64() * 1e3 / n as f64, p.as_secs_f64() * 1e3 / n as f64, self.hw.vblank);
                     self.timing = Default::default();
                     self.since = std::time::Instant::now();
                 }

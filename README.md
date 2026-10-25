@@ -26,7 +26,7 @@ go in `game/`, which git ignores.
 | `gs-vulkan`  | working | Vulkan renderer: render targets at N x resolution (3x 1080p, 5x 4K), GS blend modes, texture cache, display output, screenshots |
 | VU0/VU1      | working | VIF unpack/MPG/DIRECT, VU micro-mode interpreter with pipeline timing (Q/P latency, flag delay, hazard stalls); recorded programs are recompiled to Rust from `freekstyle/vu_dumps` |
 | `flm`        | working | EA `.FLM` movie demuxer and PS2 ADPCM decoder; `flm2mkv` converts movies to VP9 + Opus `.mkv` |
-| IPU          | todo    | MPEG decoding for compressed backgrounds |
+| IPU          | partial | MPEG-2 intra picture decoding (IDEC with VLC, dequantisation, IDCT, colour conversion) for the title, menu and loading screens; checked against FFmpeg on all 21 pictures. Movie commands (BDEC, CSC) todo |
 
 ## Building and running
 
@@ -107,15 +107,15 @@ screen renders the 3D rider models (VU1) and the animated flames, and
 races are playable (the game runs them at its own 30 fps cap).
 
 Temporarily skipped:
-- Intro movies (`.FLM`) and IPU-compressed backgrounds. The IPU (MPEG
-  decoder) is not emulated, so movie open/play/close are no-ops and some
-  backgrounds (e.g. the title screen) show undecoded data.
+- Intro movies (`.FLM`): the IPU's movie commands are not emulated, so
+  movie open/play/close are no-ops.
 - SPU2 reverb, noise and pitch modulation, so sound is drier than the
   original.
 
 Next steps, in order:
 1. A 60 fps patch for races.
-2. The IPU decoder for backgrounds, and `.mkv` movie playback in game.
+2. Movies: the `.mkv` conversions played in game (or the IPU's movie
+   commands).
 3. SPU2 reverb.
 4. 60 fps and widescreen patches.
 

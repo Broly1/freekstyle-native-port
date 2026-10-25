@@ -38,6 +38,8 @@ const VIF1_STAT: u32 = 0x1000_3c00;
 const IPU_CMD: u32 = 0x1000_2000;
 const IPU_CTRL: u32 = 0x1000_2010;
 
+pub const CH_FROM_IPU: usize = 3;
+pub const CH_TO_IPU: usize = 4;
 pub const CH_FROM_SPR: usize = 8;
 pub const CH_TO_SPR: usize = 9;
 

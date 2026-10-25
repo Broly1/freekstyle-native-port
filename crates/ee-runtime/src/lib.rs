@@ -10,6 +10,7 @@ pub mod fpu;
 pub mod hle;
 pub mod io;
 pub mod iop;
+pub mod ipu;
 pub mod kernel;
 pub mod mc;
 pub mod mem;

@@ -70,6 +70,19 @@ fn gather(m: &mut Memory, d: &DmaStart, out: &mut dyn FnMut(&mut Memory, Chunk))
     eprintln!("[dma] tag chain too long at {tadr:#x}; aborting");
 }
 
+/// Feed a toIPU transfer into the IPU's input FIFO.
+pub fn to_ipu(m: &mut Memory, d: &DmaStart) {
+    let mut bytes = Vec::new();
+    gather(m, d, &mut |m, c| {
+        if let Chunk::Data(src, qwc) = c {
+            for q in 0..qwc {
+                bytes.extend_from_slice(&m.r128(src + q * 16).to_le_bytes());
+            }
+        }
+    });
+    m.ipu.feed(&bytes);
+}
+
 /// Run a GIF (PATH3) transfer.
 pub fn gif(m: &mut Memory, d: &DmaStart) {
     let mut packet = Vec::new();

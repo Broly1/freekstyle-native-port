@@ -398,10 +398,10 @@ impl Cpu {
 // ---- Movies ----
 
 /// The game's movie API (EA .FLM via the IPU): open (0x1ac580), blocking
-/// play (0x1ab670) and close (0x1ab620). The IPU is not emulated yet, so
-/// all three do nothing and movies end immediately instead of hanging on
-/// the decoder.
+/// play (0x1ab670) and close (0x1ab620). The IPU's movie commands (BDEC,
+/// CSC) are not emulated yet, so all three do nothing and movies end
+/// immediately instead of hanging on the decoder.
 pub fn movie_play(c: &mut Cpu) {
-    c.kernel.warn_once("movies are skipped until the IPU (MPEG decoder) is implemented");
+    c.kernel.warn_once("movies are skipped (the IPU decodes still pictures only so far)");
     c.ws(V0, 0);
 }

@@ -25,7 +25,7 @@ pub fn start_if_requested() {
     let target = unsafe { libc::pthread_self() };
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = on_prof as usize;
+        sa.sa_sigaction = on_prof as *const () as usize;
         sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
         libc::sigaction(libc::SIGPROF, &sa, std::ptr::null_mut());
     }
