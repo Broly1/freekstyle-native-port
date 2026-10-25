@@ -6,8 +6,11 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ps2_iop::AudioRing;
 
-/// Samples kept queued ahead of the device: about 40 ms.
-pub const LATENCY: usize = 2048;
+/// Samples kept queued ahead of the device: about 16 ms.
+pub const LATENCY: usize = 768;
+/// Device buffer per callback: 5 ms. The default (often 100 ms periods
+/// on ALSA) makes sound trail the picture noticeably.
+const PERIOD: u32 = 240;
 
 /// Start playback from `ring`. Returns the stream, which must be kept
 /// alive. Without a usable device, samples are drained at the output
@@ -34,12 +37,20 @@ fn open(ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
         .filter(|c| c.channels() == 2 && c.sample_format() == cpal::SampleFormat::F32)
         .find(|c| c.min_sample_rate() <= rate && rate <= c.max_sample_rate())
         .ok_or("no 48 kHz stereo float output")?;
-    let config: cpal::StreamConfig = supported.with_sample_rate(rate).into();
+    let period = match supported.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } => PERIOD.clamp(*min, *max),
+        cpal::SupportedBufferSize::Unknown => PERIOD,
+    };
+    let mut config: cpal::StreamConfig = supported.with_sample_rate(rate).into();
+    config.buffer_size = cpal::BufferSize::Fixed(period);
     let mut last = [0f32; 2];
     let stream = device
         .build_output_stream(
             &config,
             move |out: &mut [f32], _| {
+                if std::env::var_os("FREEK_AUDIO_LOG").is_some() {
+                    eprintln!("[audio] callback {} frames, queued {}", out.len() / 2, ring.len());
+                }
                 let mut q = ring.buf.lock().unwrap();
                 for frame in out.chunks_exact_mut(2) {
                     // On underrun, hold the last sample rather than click.

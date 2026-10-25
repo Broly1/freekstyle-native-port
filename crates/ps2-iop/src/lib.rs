@@ -96,7 +96,7 @@ impl Link {
     fn sync(&self) {
         let start = std::time::Instant::now();
         while self.handled.load(Ordering::Acquire) < self.posted.load(Ordering::Acquire) {
-            if start.elapsed() > std::time::Duration::from_millis(20) {
+            if start.elapsed() > std::time::Duration::from_millis(5) {
                 return;
             }
             std::thread::yield_now();
