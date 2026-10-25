@@ -132,6 +132,8 @@ fn main() {
     ps2_iop::spawn(link.clone(), ring.clone(), audio::LATENCY);
     let _stream = audio::start(ring, opts.mute);
 
+    // Converted pictures live next to the disc image (see lsc2png).
+    let images_dir = std::path::Path::new(&opts.disc).parent().unwrap_or(std::path::Path::new(".")).join("images");
     let (gs_tx, gs_rx) = std::sync::mpsc::channel();
     thread::Builder::new()
         .name("ee-main".into())
@@ -141,6 +143,7 @@ fn main() {
             let mut c = Cpu::new(&gen::FUNCS);
             c.iop.disc = Some(disc);
             c.iop.link = Some(link);
+            c.iop.images = std::path::Path::new(&images_dir).to_path_buf();
             c.iop.patch_disc_files();
             c.mem.io.gs = Some(gs_tx);
             // FREEK_VU_INTERP: interpret all VU microcode (debugging aid).

@@ -21,6 +21,7 @@ pub struct Renderer {
     /// Time spent in GS processing and in presenting, for FREEK_GS_LOG.
     timing: (std::time::Duration, std::time::Duration, u32),
     since: std::time::Instant,
+    last_flip: Option<std::time::Instant>,
 }
 
 impl Renderer {
@@ -30,7 +31,7 @@ impl Renderer {
             "[gs] Vulkan on {} | {}x{} window | {}x internal resolution",
             vk.device_name, vk.swapchain.extent.width, vk.swapchain.extent.height, cfg.scale
         );
-        Ok(Renderer { gs: gs::Gs::new(), hw: hw::Hw::new(vk, cfg)?, timing: Default::default(), since: std::time::Instant::now() })
+        Ok(Renderer { gs: gs::Gs::new(), hw: hw::Hw::new(vk, cfg)?, timing: Default::default(), since: std::time::Instant::now(), last_flip: None })
     }
 
     /// Process one message from the EE. Returns true after presenting.
@@ -45,11 +46,29 @@ impl Renderer {
                 if std::env::var_os("FREEK_GS_LOG").is_some() {
                     eprintln!("[gs] priv {reg:#x} = {v:#x}");
                 }
+                if reg == 0x90 && std::env::var_os("FREEK_FRAME_GAPS").is_some() {
+                    // Game frames are buffer flips (DISPFB2); report hitches.
+                    let now = std::time::Instant::now();
+                    if let Some(prev) = self.last_flip {
+                        let ms = now.duration_since(prev).as_millis();
+                        if ms > 100 {
+                            eprintln!("[hitch] {ms} ms between game frames at vblank {}", self.hw.vblank);
+                        }
+                    }
+                    self.last_flip = Some(now);
+                }
                 self.gs.write_priv(reg, v)
             }
             gs::Msg::Vsync(n) => {
+                if std::env::var_os("FREEK_FRAME_GAPS").is_some() && n > self.hw.vblank + 3 && self.hw.vblank > 0 {
+                    eprintln!("[hitch] renderer {} vblanks behind at vblank {n}", n - self.hw.vblank);
+                }
                 self.hw.vblank = n;
+                let tp = std::time::Instant::now();
                 self.hw.present(&self.gs);
+                if std::env::var_os("FREEK_FRAME_GAPS").is_some() && tp.elapsed().as_millis() > 50 {
+                    eprintln!("[hitch] present took {} ms at vblank {n}", tp.elapsed().as_millis());
+                }
                 self.timing.1 += t0.elapsed();
                 self.timing.2 += 1;
                 if self.timing.2 == 120 && std::env::var_os("FREEK_GS_LOG").is_some() {

@@ -26,7 +26,6 @@ pub struct Memory {
     pub vu1_code: Box<[u8]>,
     pub vu1_data: Box<[u8]>,
     pub io: Io,
-    pub ipu: crate::ipu::Ipu,
     pub vif: [Vif; 2],
     pub pad: crate::pad::Pad,
     /// VU1 registers (VU0's live in `Cpu::vu0`, shared with COP2).
@@ -77,7 +76,6 @@ impl Memory {
             vu1_code: zeroed(16 << 10),
             vu1_data: zeroed(16 << 10),
             io: Io::new(),
-            ipu: crate::ipu::Ipu::default(),
             vif: Default::default(),
             pad: Default::default(),
             vu1: crate::vu::VuRegs::new(),
@@ -123,11 +121,7 @@ impl Memory {
             v[..n].copy_from_slice(b);
             return u128::from_le_bytes(v);
         }
-        let a = addr & 0x1fff_ffff;
-        if matches!(a, 0x1000_2000..=0x1000_203f | 0x1000_7000..=0x1000_701f) {
-            return self.ipu.read(a & !0xf);
-        }
-        let v = self.io.read(a, n);
+        let v = self.io.read(addr & 0x1fff_ffff, n);
         self.service_vblank();
         v
     }
@@ -154,14 +148,7 @@ impl Memory {
             b.copy_from_slice(&v.to_le_bytes()[..n]);
             return;
         }
-        let a = addr & 0x1fff_ffff;
-        if matches!(a, 0x1000_2000..=0x1000_203f | 0x1000_7000..=0x1000_701f) {
-            if self.ipu.write(a & !0xf, v) {
-                self.ipu_output();
-            }
-            return;
-        }
-        if let Some(d) = self.io.write(a, n, v) {
+        if let Some(d) = self.io.write(addr & 0x1fff_ffff, n, v) {
             self.run_dma(&d);
         }
     }
@@ -184,14 +171,6 @@ impl Memory {
                 }
             }
             CH_GIF => dma::gif(self, d),
-            crate::io::CH_TO_IPU => dma::to_ipu(self, d),
-            crate::io::CH_FROM_IPU => {
-                // Completes once the IPU has produced the data.
-                self.ipu.pending = Some((d.madr, d.qwc));
-                self.io.set_reg(0x1000_b000, d.chcr | 0x100);
-                self.ipu_output();
-                return;
-            }
             // VIF1 towards memory: a GS local-to-host transfer (BUSDIR).
             CH_VIF1 if d.chcr & 1 == 0 => {
                 let ram = mem_addr(d.madr);
@@ -204,28 +183,6 @@ impl Memory {
             _ => self.io.dma_note(d, "not emulated yet; completed with no effect"),
         }
         self.io.dma_finish(d);
-    }
-
-    /// Move IPU output into a pending fromIPU transfer; finish it when full.
-    pub fn ipu_output(&mut self) {
-        let Some((madr, qwc)) = self.ipu.pending else { return };
-        let data = self.ipu.take_output(qwc);
-        let ram = if madr & 0x8000_0000 != 0 { SPR_BASE | (madr & 0x3ff0) } else { madr & 0x01ff_fff0 };
-        for (i, q) in data.iter().enumerate() {
-            self.w128(ram + i as u32 * 16, *q);
-        }
-        let n = data.len() as u32;
-        if n < qwc {
-            self.ipu.pending = Some((madr + n * 16, qwc - n));
-            self.io.set_reg(0x1000_b010, madr + n * 16);
-            self.io.set_reg(0x1000_b020, qwc - n);
-            return;
-        }
-        self.ipu.pending = None;
-        let chcr = self.io.reg(0x1000_b000) & !0x100;
-        self.io.set_reg(0x1000_b000, chcr);
-        let d = crate::io::DmaStart { channel: crate::io::CH_FROM_IPU, chcr, madr, qwc, tadr: 0, sadr: 0 };
-        self.io.dma_finish(&d);
     }
 
     /// Copy bytes into guest memory (used by the ELF loader and HLE code).

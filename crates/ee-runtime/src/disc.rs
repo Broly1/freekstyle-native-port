@@ -82,6 +82,37 @@ impl Disc {
         found
     }
 
+    /// Every file on the disc, with its full path (`\\DIR\\NAME`).
+    pub fn walk(&mut self) -> Vec<(String, Entry)> {
+        let mut out = Vec::new();
+        let mut dirs = vec![(String::new(), self.root)];
+        while let Some((path, dir)) = dirs.pop() {
+            for (name, e) in self.list(dir) {
+                if name == "." || name == ".." {
+                    continue;
+                }
+                let full = format!("{path}\\{name}");
+                if e.dir {
+                    dirs.push((full, (e.lsn, e.size)));
+                } else {
+                    out.push((full, e));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// A whole file's contents.
+    pub fn read_file(&mut self, e: &Entry) -> Result<Vec<u8>, String> {
+        let mut data = vec![0u8; e.size.div_ceil(SECTOR as u32) as usize * SECTOR];
+        for (n, chunk) in data.chunks_mut(SECTOR).enumerate() {
+            self.read_into(e.lsn + n as u32, chunk)?;
+        }
+        data.truncate(e.size as usize);
+        Ok(data)
+    }
+
     /// Entries of a directory extent, names without the version suffix.
     fn list(&mut self, (lsn, size): (u32, u32)) -> Vec<(String, Entry)> {
         let mut out = Vec::new();

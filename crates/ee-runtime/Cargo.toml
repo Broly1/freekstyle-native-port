@@ -9,3 +9,4 @@ publish.workspace = true
 r5900 = { path = "../r5900" }
 gs = { path = "../gs" }
 ps2-iop = { path = "../ps2-iop" }
+png = "0.17.16"

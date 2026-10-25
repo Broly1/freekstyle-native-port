@@ -1,17 +1,14 @@
-//! IPU: the EE's MPEG-2 image decoder.
+//! A model of the IPU (the EE's MPEG-2 decoder), used offline.
 //!
 //! Freekstyle stores its title, menu and loading backgrounds (`.LSC`,
-//! Sony's "ipum" format) as MPEG-2 intra pictures and decodes them with
-//! IDEC: VLC decoding, dequantisation, IDCT and colour conversion to
-//! RGBA32, one 16x16 macroblock (64 qwords) after another.
+//! Sony's "ipum" format) as MPEG-2 intra pictures decoded with IDEC: VLC
+//! decoding, dequantisation, IDCT and colour conversion to RGBA32, one
+//! 16x16 macroblock (64 qwords) after another. The port doesn't emulate
+//! the IPU hardware: `lsc2png` uses this model to convert the pictures to
+//! PNG once, and `hle::lsc_decode` loads those (falling back to
+//! `decode_picture` if a PNG is missing).
 //!
-//! Input arrives through the toIPU DMA channel or CPU writes to the input
-//! FIFO; it is buffered whole, so commands run to completion at once.
-//! Output goes to the fromIPU channel; a transfer started before its data
-//! exists stays pending until a command produces it.
-//!
-//! Implemented commands: BCLR, IDEC, FDEC, SETIQ, SETVQ, SETTH. BDEC,
-//! VDEC, CSC and PACK (movies) are not yet.
+//! Implemented commands: BCLR, IDEC, FDEC, SETIQ, SETVQ, SETTH.
 
 use std::collections::VecDeque;
 use std::sync::OnceLock;
@@ -172,8 +169,6 @@ pub struct Ipu {
     iq: [[u8; 64]; 2],
     vqclut: [u16; 16],
     th: (u32, u32),
-    /// A fromIPU transfer waiting for data: (madr, qwc).
-    pub pending: Option<(u32, u32)>,
 }
 
 impl Default for Ipu {
@@ -182,7 +177,7 @@ impl Default for Ipu {
         for (i, &z) in ZIGZAG.iter().enumerate() {
             iq[0][z] = DEFAULT_INTRA[i];
         }
-        Ipu { input: Vec::new(), pos: 0, out: VecDeque::new(), ctrl: 0, result: 0, iq, vqclut: [0; 16], th: (0, 0), pending: None }
+        Ipu { input: Vec::new(), pos: 0, out: VecDeque::new(), ctrl: 0, result: 0, iq, vqclut: [0; 16], th: (0, 0) }
     }
 }
 
@@ -220,14 +215,13 @@ impl Ipu {
         Bits { data: &self.input, pos: self.pos }
     }
 
-    /// Register write. Returns true when output became available for a
-    /// pending fromIPU transfer.
+    /// Register write. Returns true when a command produced output.
     pub fn write(&mut self, addr: u32, v: u128) -> bool {
         match addr {
             IPU_CTRL => {
                 let v = v as u32;
                 if v & CTRL_RST != 0 {
-                    *self = Ipu { iq: self.iq, vqclut: self.vqclut, th: self.th, pending: self.pending, ..Ipu::default() };
+                    *self = Ipu { iq: self.iq, vqclut: self.vqclut, th: self.th, ..Ipu::default() };
                 }
                 // Software sets IDP, AS, IVF, QST, MP1 and PCT.
                 self.ctrl = (self.ctrl & (CTRL_ECD | CTRL_SCD)) | (v & 0x07f3_0000);
@@ -563,4 +557,35 @@ mod tests {
         assert_eq!(b.get(5), 0);
         assert_eq!(b.get(4), 0xf);
     }
+}
+
+/// Decode a whole "ipum" picture file (.LSC) the way Freekstyle drives the
+/// IPU. Returns (width, height, pixels) in raster order, RGBA with PS2
+/// alpha (0x80 = opaque).
+pub fn decode_picture(file: &[u8]) -> Option<(u32, u32, Vec<u32>)> {
+    if file.len() < 16 || &file[..4] != b"ipum" {
+        return None;
+    }
+    let (w, h) = (u16::from_le_bytes([file[8], file[9]]) as u32, u16::from_le_bytes([file[10], file[11]]) as u32);
+    let mut ipu = Ipu::default();
+    ipu.feed(&file[16..]);
+    // The first byte holds picture flags; macroblocks follow.
+    ipu.write(IPU_CMD, 0x4000_0008);
+    ipu.write(IPU_CMD, 0x1001_0000);
+    let out = ipu.take_output(u32::MAX);
+    let (mbw, mbh) = (w.div_ceil(16), h.div_ceil(16));
+    if out.len() < (mbw * mbh * 64) as usize {
+        return None;
+    }
+    let mut px = vec![0u32; (w * h) as usize];
+    for (mb, q) in out.chunks(64).take((mbw * mbh) as usize).enumerate() {
+        let (mx, my) = ((mb as u32 % mbw) * 16, (mb as u32 / mbw) * 16);
+        for (i, p) in q.iter().flat_map(|q| (0..4).map(move |n| (*q >> (32 * n)) as u32)).enumerate() {
+            let (x, y) = (mx + i as u32 % 16, my + i as u32 / 16);
+            if x < w && y < h {
+                px[(y * w + x) as usize] = p;
+            }
+        }
+    }
+    Some((w, h, px))
 }

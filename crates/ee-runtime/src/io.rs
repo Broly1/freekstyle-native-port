@@ -38,8 +38,6 @@ const VIF1_STAT: u32 = 0x1000_3c00;
 const IPU_CMD: u32 = 0x1000_2000;
 const IPU_CTRL: u32 = 0x1000_2010;
 
-pub const CH_FROM_IPU: usize = 3;
-pub const CH_TO_IPU: usize = 4;
 pub const CH_FROM_SPR: usize = 8;
 pub const CH_TO_SPR: usize = 9;
 
@@ -175,6 +173,15 @@ impl Io {
             return;
         }
         let n = (self.start.elapsed().as_secs_f64() * VBLANK_HZ) as u64;
+        if n > self.vblanks + 6 && self.vblanks > 0 {
+            eprintln!(
+                "[stall] {} vblanks ({} ms) without a vblank check, at vblank {}; last guest fn {:#x}",
+                n - self.vblanks,
+                (n - self.vblanks) * 1000 / 60,
+                n,
+                crate::cpu::LAST_ENTERED.load(std::sync::atomic::Ordering::Relaxed)
+            );
+        }
         if n > self.vblanks {
             self.vblanks = n;
             self.new_vblank = true;

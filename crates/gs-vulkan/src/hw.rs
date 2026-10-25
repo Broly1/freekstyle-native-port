@@ -117,6 +117,19 @@ struct Target {
     fresh: bool,
 }
 
+/// Target map key: frame buffer address and width.
+fn target_key(bp: u32, bw: u32) -> u32 {
+    bp | bw << 16
+}
+
+struct Recording {
+    path: String,
+    start: u64,
+    end: u64,
+    size: Option<(u32, u32)>,
+    encoder: Option<std::process::Child>,
+}
+
 struct Texture {
     image: Image,
     last_used: u64,
@@ -175,6 +188,8 @@ pub struct Hw {
     pub stats: Stats,
     /// FREEK_SHOT=<file.png>:<frame>: save the displayed picture.
     shot: Option<(u64, String)>,
+    /// FREEK_RECORD=<file.mkv>:<start vblank>:<seconds>: video capture.
+    record: Option<Recording>,
     /// FREEK_SHOT_EVERY=<n> with FREEK_SHOT=<prefix>:<first>: a series.
     shot_every: Option<u64>,
     /// FREEK_GS_TRACE=<vblank>[:<presents>]: log every draw from that
@@ -258,6 +273,13 @@ impl Hw {
                 texture_bytes: 0,
                 stats: Stats::default(),
                 shot_every: std::env::var("FREEK_SHOT_EVERY").ok().and_then(|v| v.parse().ok()),
+                record: std::env::var("FREEK_RECORD").ok().and_then(|v| {
+                    let mut it = v.rsplitn(3, ':');
+                    let secs: u64 = it.next()?.parse().ok()?;
+                    let start: u64 = it.next()?.parse().ok()?;
+                    let path = it.next()?.to_string();
+                    Some(Recording { path, start, end: start + secs * 60, size: None, encoder: None })
+                }),
                 trace_frame: std::env::var("FREEK_GS_TRACE").ok().and_then(|v| v.split(':').next()?.parse().ok()),
                 trace_left: std::env::var("FREEK_GS_TRACE").ok().and_then(|v| v.split(':').nth(1)?.parse().ok()).unwrap_or(1),
                 shot: std::env::var("FREEK_SHOT").ok().and_then(|v| {
@@ -372,13 +394,19 @@ impl Hw {
         self.rendering = Some(bp);
     }
 
-    /// Get or create the target at `bp`, at least `min_h` GS lines tall,
-    /// with vertical scale `sy`.
-    fn target(&mut self, bp: u32, bw: u32, psm: Psm, min_h: u32, sy: u32) -> Result<()> {
+    /// Get or create the target at `bp` with buffer width `bw`, at least
+    /// `min_h` GS lines tall, with vertical scale `sy`. Returns its key.
+    ///
+    /// Targets are per (address, width): games reuse a frame buffer's
+    /// memory with another width for effects (Freekstyle draws alpha masks
+    /// at 256 and 128 pixels wide into its 512-wide buffer every frame),
+    /// and rebuilding the buffer at that width would lose the picture.
+    fn target(&mut self, bp: u32, bw: u32, psm: Psm, min_h: u32, sy: u32) -> Result<u32> {
+        let key = target_key(bp, bw);
         let need_h = min_h.max(512).next_multiple_of(64).min(2048);
-        if let Some(t) = self.targets.get(&bp) {
-            if t.h >= min_h.min(2048) && t.bw == bw && t.sy == sy {
-                return Ok(());
+        if let Some(t) = self.targets.get(&key) {
+            if t.h >= min_h.min(2048) && t.sy == sy {
+                return Ok(key);
             }
         }
         self.end_rendering();
@@ -393,7 +421,10 @@ impl Hw {
         transition(&dev, cmd, depth.image, vk::ImageAspectFlags::DEPTH, vk::ImageLayout::UNDEFINED, vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
         let mut t = Target { bp, bw, psm, w, h: need_h, sy, color, depth, snapshot: None, snapshot_valid: false, fresh: true };
         // Growing: keep the old picture.
-        if let Some(old) = self.targets.remove(&bp) {
+        if let Some(old) = self.targets.remove(&key) {
+            if std::env::var_os("FREEK_TARGET_LOG").is_some() {
+                eprintln!("[target] recreate bp={bp:#x}: bw {} -> {bw}, h {} -> {need_h}, sy {} -> {sy} at vblank {}", old.bw, old.h, old.sy, self.vblank);
+            }
             let clear = vk::ClearColorValue { float32: [0.0; 4] };
             unsafe {
                 dev.cmd_clear_color_image(cmd, t.color.image, vk::ImageLayout::GENERAL, &clear, &[range(vk::ImageAspectFlags::COLOR)]);
@@ -419,8 +450,8 @@ impl Hw {
                 f.garbage.push(Garbage::Image(s));
             }
         }
-        self.targets.insert(bp, t);
-        Ok(())
+        self.targets.insert(key, t);
+        Ok(key)
     }
 
     fn clear_depth_now(&self, t: &Target) {
@@ -440,10 +471,10 @@ impl Hw {
     }
 
     /// Copy GS memory (already updated) into a target's picture.
-    fn upload_to_target(&mut self, vram: &Vram, texa: gs::regs::Texa, bp: u32, x: u32, y: u32, w: u32, h: u32) -> Result<()> {
-        let (psm, bw, tw, th) = {
-            let t = &self.targets[&bp];
-            (t.psm, t.bw, t.w, t.h)
+    fn upload_to_target(&mut self, vram: &Vram, texa: gs::regs::Texa, key: u32, x: u32, y: u32, w: u32, h: u32) -> Result<()> {
+        let (psm, bw, tw, th, bp) = {
+            let t = &self.targets[&key];
+            (t.psm, t.bw, t.w, t.h, t.bp)
         };
         let (w, h) = (w.min(tw.saturating_sub(x)), h.min(th.saturating_sub(y)));
         if w == 0 || h == 0 {
@@ -458,7 +489,7 @@ impl Hw {
         self.end_rendering();
         let tmp = self.upload_image(w, h, &px, vk::ImageUsageFlags::TRANSFER_SRC, "target upload")?;
         let s = self.cfg.scale as i32;
-        let t = self.targets.get_mut(&bp).unwrap();
+        let t = self.targets.get_mut(&key).unwrap();
         let sy = t.sy as i32;
         if t.fresh {
             // The upload must not be wiped by a later first-use clear.
@@ -481,7 +512,7 @@ impl Hw {
         t.snapshot_valid = false;
         let was_fresh = std::mem::replace(&mut t.fresh, false);
         if was_fresh {
-            let t = &self.targets[&bp];
+            let t = &self.targets[&key];
             self.clear_depth_now(t);
         }
         self.frames[self.slot].garbage.push(Garbage::Image(tmp));
@@ -497,9 +528,11 @@ impl Hw {
         let (tw, th) = (1u32 << t.tw(), 1u32 << t.th());
         // A texture that starts at a render target samples its picture.
         if !t.psm().is_indexed() {
-            if let Some(rt) = self.targets.get(&t.tbp0()) {
+            // Prefer the target drawn with the texture's own width.
+            let found = self.targets.get_key_value(&target_key(t.tbp0(), t.tbw())).or_else(|| self.targets.iter().find(|(_, rt)| rt.bp == t.tbp0()));
+            if let Some((&k, rt)) = found {
                 let scale = [tw as f32 / rt.w as f32, th as f32 / rt.h as f32];
-                return Ok((TexRef::Target(rt.bp), scale, true));
+                return Ok((TexRef::Target(k), scale, true));
             }
         }
         let indexed = t.psm().is_indexed();
@@ -743,9 +776,8 @@ impl Hw {
         if color_off && zb.masked() {
             return Ok(());
         }
-        let bp = fb.bp();
         let ysc = self.vertical_scale(gs);
-        self.target(bp, fb.bw(), fb.psm(), sy1 + 1, ysc)?;
+        let bp = self.target(fb.bp(), fb.bw(), fb.psm(), sy1 + 1, ysc)?;
 
         // Texture first: it may need transfers outside rendering.
         let (tex, tex_scale, rt_tex) = if attrs.textured() { self.texture(gs)? } else { (TexRef::None, [1.0, 1.0], false) };
@@ -906,18 +938,26 @@ impl Hw {
             }
             if w > 0 && h > 0 && bw > 0 {
                 // Never drawn into: build the target from GS memory.
-                let fresh = !self.targets.contains_key(&bp);
-                if self.target(bp, bw, psm, dby + h, self.vertical_scale(gs)).is_ok() {
+                let fresh = !self.targets.contains_key(&target_key(bp, bw));
+                if let Ok(key) = self.target(bp, bw, psm, dby + h, self.vertical_scale(gs)) {
                     if fresh {
-                        let _ = self.upload_to_target(&gs.vram, gs.texa, bp, 0, 0, bw * 64, dby + h);
+                        let _ = self.upload_to_target(&gs.vram, gs.texa, key, 0, 0, bw * 64, dby + h);
                     }
-                    src = Some((bp, dbx, dby, w, h));
+                    src = Some((key, dbx, dby, w, h));
                 }
             }
         }
         if self.frame_no % 120 == 0 && std::env::var_os("FREEK_GS_LOG").is_some() {
             eprintln!("[gs] frame {} display {:?} pmode {:#x} dispfb {:#x?} display {:#x?} targets {:?} textures {} {:?}", self.frame_no, src, d.pmode, d.dispfb, d.display, self.targets.keys().collect::<Vec<_>>(), self.textures.len(), self.stats);
         }
+        if std::env::var("FREEK_DISPLAY_LOG").ok().and_then(|v| v.parse::<u64>().ok()).is_some_and(|v| (v..v + 12).contains(&self.vblank)) {
+            let t = src.and_then(|s| self.targets.get(&s.0)).map(|t| (t.bw, t.psm, t.w, t.h));
+            eprintln!("[display] vblank {} src {:?} target {:?} dispfb {:#x?} display {:#x?}", self.vblank, src, t, d.dispfb, d.display);
+        }
+        let recording = match (&self.record, src) {
+            (Some(r), Some(src)) if (r.start..r.end).contains(&self.vblank) => self.record_readback(src).ok(),
+            _ => None,
+        };
         let readback = match (&self.shot, src) {
             (Some((frame, _)), Some(src)) if self.vblank >= *frame => match self.record_readback(src) {
                 Ok(r) => Some(r),
@@ -931,6 +971,9 @@ impl Hw {
         self.submit_and_present(src);
         if let Some((buf, w, h)) = readback {
             self.save_shot(buf, w, h);
+        }
+        if let Some((buf, w, h)) = recording {
+            self.record_frame(buf, w, h);
         }
         self.evict_textures();
     }
@@ -950,6 +993,54 @@ impl Hw {
         unsafe { self.vk.device.cmd_copy_image_to_buffer(self.cmd(), image, vk::ImageLayout::GENERAL, buf.buffer, &[region]) };
         barrier(&self.vk.device, self.cmd());
         Ok((buf, w, h))
+    }
+
+    /// Send one frame to the FREEK_RECORD encoder. Every frame is scaled
+    /// into the first frame's size, so display mode changes don't break
+    /// the stream.
+    fn record_frame(&mut self, mut buf: Buffer, w: u32, h: u32) {
+        unsafe {
+            let _ = self.vk.device.device_wait_idle();
+        }
+        let src = buf.mapped()[..(w * h * 4) as usize].to_vec();
+        self.vk.destroy_buffer(buf);
+        let Some(r) = self.record.as_mut() else { return };
+        let (ow, oh) = *r.size.get_or_insert((w, h));
+        let mut frame = vec![0u8; (ow * oh * 4) as usize];
+        for y in 0..oh {
+            let sy = (y * h / oh) as usize;
+            for x in 0..ow {
+                let sx = (x * w / ow) as usize;
+                let o = ((y * ow + x) * 4) as usize;
+                let i = (sy * w as usize + sx) * 4;
+                frame[o..o + 3].copy_from_slice(&src[i..i + 3]);
+                frame[o + 3] = 255;
+            }
+        }
+        if r.encoder.is_none() {
+            let child = std::process::Command::new("ffmpeg")
+                .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{ow}x{oh}"), "-r", "60", "-i", "-"])
+                .args(["-vf", "scale=1024:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", &r.path])
+                .stdin(std::process::Stdio::piped())
+                .spawn();
+            match child {
+                Ok(c) => r.encoder = Some(c),
+                Err(e) => {
+                    eprintln!("[gs] recording: cannot start ffmpeg: {e}");
+                    self.record = None;
+                    return;
+                }
+            }
+        }
+        use std::io::Write;
+        let enc = r.encoder.as_mut().unwrap();
+        let ok = enc.stdin.as_mut().is_some_and(|i| i.write_all(&frame).is_ok());
+        if !ok || self.vblank + 1 >= r.end {
+            let mut r = self.record.take().unwrap();
+            drop(r.encoder.as_mut().and_then(|e| e.stdin.take()));
+            let _ = r.encoder.as_mut().map(|e| e.wait());
+            eprintln!("[gs] recording saved to {}", r.path);
+        }
     }
 
     fn save_shot(&mut self, mut buf: Buffer, w: u32, h: u32) {
@@ -1127,12 +1218,12 @@ impl gs::Backend for Hw {
         // a row-aligned base offset).
         let hits: Vec<(u32, u32)> = self
             .targets
-            .values()
-            .filter(|t| t.bw == r.bw && t.psm.bpp() == r.psm.bpp() && r.bp >= t.bp)
-            .filter_map(|t| {
+            .iter()
+            .filter(|(_, t)| t.bw == r.bw && t.psm.bpp() == r.psm.bpp() && r.bp >= t.bp)
+            .filter_map(|(&k, t)| {
                 let row_blocks = t.bw * 32;
                 let off = r.bp - t.bp;
-                (off % row_blocks == 0).then(|| (t.bp, off / row_blocks * 32)).filter(|&(_, dy)| dy + r.y < t.h)
+                (off % row_blocks == 0).then(|| (k, off / row_blocks * 32)).filter(|&(_, dy)| dy + r.y < t.h)
             })
             .collect();
         for (bp, dy) in hits {

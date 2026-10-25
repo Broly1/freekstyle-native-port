@@ -33,6 +33,10 @@
 00116118 mc_unformat
 001161e0 mc_get_ent_space
 
+# Pictures (.LSC): loaded from game/images/*.png (made by lsc2png)
+# instead of being decoded by the IPU.
+00192090 lsc_decode
+
 # Movie open / play / close: skip until the IPU is emulated.
 001ac580 movie_play
 001ab670 movie_play

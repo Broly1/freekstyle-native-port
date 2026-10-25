@@ -229,7 +229,15 @@ impl Vk {
             let req = self.device.get_buffer_memory_requirements(buffer);
             let alloc = self
                 .allocator
-                .allocate(&AllocationCreateDesc { name, requirements: req, location: MemoryLocation::CpuToGpu, linear: true, allocation_scheme: AllocationScheme::GpuAllocatorManaged })
+                .allocate(&AllocationCreateDesc {
+                    name,
+                    requirements: req,
+                    // Readback buffers need cached memory: reading the
+                    // write-combined upload kind is ~100x slower.
+                    location: if usage == vk::BufferUsageFlags::TRANSFER_DST { MemoryLocation::GpuToCpu } else { MemoryLocation::CpuToGpu },
+                    linear: true,
+                    allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+                })
                 .map_err(err("allocate buffer"))?;
             self.device.bind_buffer_memory(buffer, alloc.memory(), alloc.offset()).map_err(err("bind buffer"))?;
             Ok(Buffer { buffer, alloc: Some(alloc), size })

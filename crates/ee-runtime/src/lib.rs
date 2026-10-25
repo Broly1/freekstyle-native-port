@@ -8,6 +8,7 @@ pub mod disc;
 pub mod dma;
 pub mod fpu;
 pub mod hle;
+pub mod images;
 pub mod io;
 pub mod iop;
 pub mod ipu;

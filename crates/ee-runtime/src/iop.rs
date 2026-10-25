@@ -33,6 +33,9 @@ pub struct Iop {
     pub link: Option<std::sync::Arc<ps2_iop::Link>>,
     /// Rotates the buffers that IOP command packets are delivered in.
     pub cmd_slot: u32,
+    /// Converted pictures (see `images`) and their index, loaded on use.
+    pub images: std::path::PathBuf,
+    pub image_index: Option<std::collections::HashMap<u64, String>>,
 }
 
 impl Iop {

@@ -26,7 +26,7 @@ go in `game/`, which git ignores.
 | `gs-vulkan`  | working | Vulkan renderer: render targets at N x resolution (3x 1080p, 5x 4K), GS blend modes, texture cache, display output, screenshots |
 | VU0/VU1      | working | VIF unpack/MPG/DIRECT, VU micro-mode interpreter with pipeline timing (Q/P latency, flag delay, hazard stalls); recorded programs are recompiled to Rust from `freekstyle/vu_dumps` |
 | `flm`        | working | EA `.FLM` movie demuxer and PS2 ADPCM decoder; `flm2mkv` converts movies to VP9 + Opus `.mkv` |
-| IPU          | partial | MPEG-2 intra picture decoding (IDEC with VLC, dequantisation, IDCT, colour conversion) for the title, menu and loading screens; checked against FFmpeg on all 21 pictures. Movie commands (BDEC, CSC) todo |
+| pictures     | working | No IPU emulation: `lsc2png` converts the 21 MPEG-2 still pictures (.LSC: title, menu, loading screens) to PNG once, and the game's picture decoder is replaced by a native function that loads them. The converter's decoder matches FFmpeg to 45-60 dB |
 
 ## Building and running
 
@@ -57,6 +57,19 @@ and Esc quits.
   ("Saving.", "No saved game found.", ...) when the file is read.
 
 The disc image (raw `.bin` or `.iso`) defaults to `game/Freekstyle.bin`.
+
+## Pictures
+
+The title, menu and loading-screen backgrounds are MPEG-2 stills that the
+PS2 decodes with its IPU. Convert them to PNG once:
+
+```sh
+cargo run --release -p ee-runtime --bin lsc2png -- game/Freekstyle.bin game/images
+```
+
+The game then loads `game/images/*.png` (found next to the disc image).
+They can be edited; a picture of another size is scaled to the original's.
+Without them the game still works, decoding the originals in software.
 
 ## Movies
 
@@ -94,6 +107,8 @@ Debugging switches (environment variables):
 | `FREEK_AUDIO_LOG`    | Log each audio device callback and the queue depth |
 | `FREEK_VU_INTERP`    | Interpret all VU microcode (to tell recompiler bugs from VU semantics bugs) |
 | `FREEK_VU_TOP`       | Periodically list the most-run VU microprogram entry points |
+| `FREEK_RECORD=out.mkv:V:S` | Record S seconds of video from vblank V (needs ffmpeg) |
+| `FREEK_FRAME_GAPS`   | Report hitches: long gaps between game frames, slow presents |
 
 When guest code calls an address the analyzer missed, the runtime says so.
 Add the address to `freekstyle/seeds.txt` and regenerate.
@@ -107,8 +122,7 @@ screen renders the 3D rider models (VU1) and the animated flames, and
 races are playable (the game runs them at its own 30 fps cap).
 
 Temporarily skipped:
-- Intro movies (`.FLM`): the IPU's movie commands are not emulated, so
-  movie open/play/close are no-ops.
+- Intro movies (`.FLM`): movie open/play/close are no-ops.
 - SPU2 reverb, noise and pitch modulation, so sound is drier than the
   original.
 

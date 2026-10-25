@@ -40,6 +40,7 @@ const T1: usize = 9;
 const T2: usize = 10;
 const T3: usize = 11;
 const SP: usize = 29;
+const GP: usize = 28;
 
 /// sceSifInitCmd / sceSifInitRpc: the IOP side is native, nothing to set up.
 pub fn sif_init(c: &mut Cpu) {
@@ -395,13 +396,95 @@ impl Cpu {
     }
 }
 
+// ---- Pictures (.LSC) ----
+
+/// The game's picture decoder, `0x192090(data, size)`: decodes an "ipum"
+/// MPEG still with the IPU into a buffer of 16x16 macroblocks, uploads it
+/// to GS memory as a texture and returns a 36-byte picture record. Here
+/// the pixels come from `game/images/<NAME>.png` (see `images`), so the
+/// IPU is not involved; allocation and upload still use the game's own
+/// functions.
+///
+/// Record: +0 GS address, +4 0, +8 width, +12 height, +16 texture buffer
+/// width (64-pixel units), +20/+24 log2 of the texture size, +28/+32 the
+/// used fraction of it (float).
+pub fn lsc_decode(c: &mut Cpu) {
+    let (data, size) = (c.r32(A0), c.r32(A1));
+    if data == 0 {
+        c.ws(V0, 0);
+        return;
+    }
+    let call = |c: &mut Cpu, f: u32, args: &[u32]| -> u32 {
+        for (i, &a) in args.iter().enumerate() {
+            c.ws(A0 + i, a);
+        }
+        c.call(f);
+        c.r32(V0)
+    };
+    let bytes: Vec<u8> = (0..size).map(|i| c.mem.r8(data + i)).collect();
+    let (w, h) = (u16::from_le_bytes([bytes[8], bytes[9]]) as u32, u16::from_le_bytes([bytes[10], bytes[11]]) as u32);
+    let px = picture_pixels(c, &bytes, w, h);
+
+    call(c, 0x191e00, &[]);
+    let rec = call(c, 0x122e10, &[36, 2, 16]);
+    let (mbw, mbh) = (w.div_ceil(16), h.div_ceil(16));
+    let buf = call(c, 0x122e10, &[mbw * mbh * 1024, 1, 64]);
+    // Macroblock order, as the IPU outputs it.
+    for mb in 0..mbw * mbh {
+        let (mx, my) = ((mb % mbw) * 16, (mb / mbw) * 16);
+        for i in 0..256 {
+            let (x, y) = (mx + i % 16, my + i / 16);
+            let p = if x < w && y < h { px[(y * w + x) as usize] } else { 0 };
+            c.mem.w32(buf + mb * 1024 + i * 4, p);
+        }
+    }
+    let log2 = |v: u32| 32 - (v.max(1) - 1).leading_zeros();
+    let (tw, th) = (log2(w), log2(h));
+    c.mem.w32(rec + 8, w);
+    c.mem.w32(rec + 12, h);
+    c.mem.w32(rec + 4, 0);
+    c.mem.w32(rec + 20, tw);
+    c.mem.w32(rec + 24, th);
+    c.mem.w32(rec + 16, (1u32 << tw).div_ceil(64));
+    let vram = call(c, 0x12e640, &[0x0024_d330, ((1u32 << tw) * (1 << th) * 4) / 256]);
+    c.mem.w32(rec, vram);
+    c.mem.w32(rec + 28, (w as f32 / (1u32 << tw) as f32).to_bits());
+    c.mem.w32(rec + 32, (h as f32 / (1u32 << th) as f32).to_bits());
+    let gp = c.r32(GP);
+    let ctx = c.mem.r32(gp.wrapping_sub(18064)) + 4;
+    call(c, 0x191c90, &[ctx, buf, vram, w, h, 1]);
+    let ctx = c.mem.r32(gp.wrapping_sub(18064)) + 4;
+    call(c, 0x191bb0, &[ctx]);
+    let ctx = c.mem.r32(gp.wrapping_sub(18064)) + 4;
+    call(c, 0x191c60, &[ctx]);
+    call(c, 0x191e40, &[]);
+    call(c, 0x1231a0, &[buf]);
+    c.ws(V0, rec);
+}
+
+/// The picture's pixels: its PNG if present (scaled if replaced at
+/// another size), else decoded from the original data.
+fn picture_pixels(c: &mut Cpu, bytes: &[u8], w: u32, h: u32) -> Vec<u32> {
+    let dir = c.iop.images.clone();
+    let index = c.iop.image_index.get_or_insert_with(|| crate::images::load_index(&dir));
+    if let Some(name) = index.get(&crate::images::content_hash(bytes)).cloned() {
+        match crate::images::load_png(&dir.join(&name)) {
+            Ok((pw, ph, px)) if (pw, ph) == (w, h) => return px,
+            Ok((pw, ph, px)) => return crate::images::resize(pw, ph, &px, w, h),
+            Err(e) => eprintln!("[images] {}: {e}; decoding the original", dir.join(&name).display()),
+        }
+    } else {
+        c.kernel.warn_once("pictures not converted to PNG (run lsc2png); decoding the originals");
+    }
+    crate::ipu::decode_picture(bytes).map(|p| p.2).unwrap_or_else(|| vec![0; (w * h) as usize])
+}
+
 // ---- Movies ----
 
 /// The game's movie API (EA .FLM via the IPU): open (0x1ac580), blocking
-/// play (0x1ab670) and close (0x1ab620). The IPU's movie commands (BDEC,
-/// CSC) are not emulated yet, so all three do nothing and movies end
-/// immediately instead of hanging on the decoder.
+/// play (0x1ab670) and close (0x1ab620). The IPU is not emulated, so all
+/// three do nothing and movies end immediately.
 pub fn movie_play(c: &mut Cpu) {
-    c.kernel.warn_once("movies are skipped (the IPU decodes still pictures only so far)");
+    c.kernel.warn_once("movies are skipped (in-game playback of the .mkv conversions is not done yet)");
     c.ws(V0, 0);
 }
