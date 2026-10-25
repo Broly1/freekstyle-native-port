@@ -332,6 +332,9 @@ pub fn run<'a>(r: &'a mut VuRegs, env: Env<'a>, cache: &mut DecodeCache, unit: u
     let start = start & (n as u32 - 1);
     let hash = *cache.hash.get_or_insert_with(|| image_hash(env.code));
     let native = programs.find(unit, hash, start);
+    if std::env::var_os("FREEK_VU_TOP").is_some() {
+        vu_top(unit, hash, start);
+    }
     if native.is_none() {
         record(unit, hash, start, env.code);
         if std::env::var_os("FREEK_VU_MISS").is_some() {
@@ -674,7 +677,11 @@ pub fn pair<const FLAGS: bool>(c: &mut Ctx, pc: u32, lo: u32, hi: u32, m: M) -> 
     if let Some(i) = new_i {
         r.i = i;
     }
-    *last_vi = vi_write;
+    // Only integer ALU results and loads reach the branch unit late; flag
+    // checks (FCAND, FSAND, FMAND, ...) are seen at once. Freekstyle's
+    // clipper tests FCOR results with the very next IBNE.
+    let flag_op = hi >> 31 == 0 && (0x10..=0x1c).contains(&(lo >> 25));
+    *last_vi = if flag_op { None } else { vi_write };
     *cycle += 1;
     delayed
 }
@@ -1008,6 +1015,22 @@ mod tests {
     }
 
     #[test]
+    fn branch_sees_flag_check_result_at_once() {
+        // FCSET 1; FCOR vi1 = (clip | 0xfffffe) == 0xffffff = 1; IBNE vi1
+        // right after it must see the new value and branch.
+        let fcset = |v: u32| 0x11 << 25 | v;
+        let fcor = |v: u32| 0x13 << 25 | v;
+        let mut data = vec![0u8; 16 << 10];
+        let mut r = VuRegs::new();
+        exec(
+            &[(NOP, fcset(1)), (NOP, fcor(0xff_fffe)), (NOP, ibne(1, 0, 3)), (NOP, NOPL), (NOP | E, iaddiu(4, 0, 1)), (NOP, NOPL), (NOP, NOPL), (NOP | E, iaddiu(4, 0, 2)), (NOP, NOPL)],
+            &mut data,
+            &mut r,
+        );
+        assert_eq!(r.vi[4], 2);
+    }
+
+    #[test]
     fn q_has_divider_latency() {
         let mut data = vec![0u8; 16 << 10];
         put(&mut data, 0, [8.0, 2.0, 0.0, 0.0]);
@@ -1176,5 +1199,23 @@ mod bench_parts {
         time("decode()", &mut || {
             black_box(decode(black_box(0x4a00_0000 | (hi & 0x01ff_ffff))));
         });
+    }
+}
+
+/// FREEK_VU_TOP: count runs per entry point; print the busiest every
+/// 600 runs of VU1 (debugging aid).
+#[cold]
+fn vu_top(unit: u8, hash: u64, start: u32) {
+    use std::collections::HashMap;
+    static COUNTS: std::sync::Mutex<Option<(u64, HashMap<(u8, u64, u32), u64>)>> = std::sync::Mutex::new(None);
+    let mut g = COUNTS.lock().unwrap();
+    let (n, m) = g.get_or_insert_with(|| (0, HashMap::new()));
+    *m.entry((unit, hash, start)).or_default() += 1;
+    *n += 1;
+    if *n % 200_000 == 0 {
+        let mut v: Vec<_> = m.drain().collect();
+        v.sort_by_key(|e| std::cmp::Reverse(e.1));
+        let top: Vec<String> = v.iter().take(10).map(|((u, h, s), c)| format!("vu{u} {h:016x}@{s:#x}:{c}")).collect();
+        eprintln!("[vu-top] {}", top.join(" "));
     }
 }

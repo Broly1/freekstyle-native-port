@@ -143,7 +143,10 @@ fn main() {
             c.iop.link = Some(link);
             c.iop.patch_disc_files();
             c.mem.io.gs = Some(gs_tx);
-            c.mem.vu_programs = ee_runtime::vumicro::Programs(&gen::vu_programs::VU_PROGRAMS);
+            // FREEK_VU_INTERP: interpret all VU microcode (debugging aid).
+            if env::var_os("FREEK_VU_INTERP").is_none() {
+                c.mem.vu_programs = ee_runtime::vumicro::Programs(&gen::vu_programs::VU_PROGRAMS);
+            }
             let entry = ee_runtime::load_elf(&mut c, &bytes).expect("load ELF");
             eprintln!("[boot] {} functions, entry {entry:#x}", gen::FUNCS.len());
             ee_runtime::kernel::run_thread_body(&mut c, entry);

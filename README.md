@@ -92,6 +92,8 @@ Debugging switches (environment variables):
 | `IOP_WAV=out.wav`    | Record the sound output |
 | `FREEK_PROFILE=N`    | After N seconds, sample the EE thread for 10 s into `profile.txt` (addresses for `addr2line -f -C -e target/release/freekstyle`) |
 | `FREEK_AUDIO_LOG`    | Log each audio device callback and the queue depth |
+| `FREEK_VU_INTERP`    | Interpret all VU microcode (to tell recompiler bugs from VU semantics bugs) |
+| `FREEK_VU_TOP`       | Periodically list the most-run VU microprogram entry points |
 
 When guest code calls an address the analyzer missed, the runtime says so.
 Add the address to `freekstyle/seeds.txt` and regenerate.
@@ -101,7 +103,8 @@ Add the address to `freekstyle/seeds.txt` and regenerate.
 The game reaches its main menu natively and is controllable: profile name
 entry, main menu (Circuit, Single Race, Freestyle, Freeride, Record Book,
 Options), at up to 5x resolution with Xbox prompts. The rider select
-screen renders the 3D rider models (VU1) and the animated flames.
+screen renders the 3D rider models (VU1) and the animated flames, and
+races are playable (the game runs them at its own 30 fps cap).
 
 Temporarily skipped:
 - Intro movies (`.FLM`) and IPU-compressed backgrounds. The IPU (MPEG
@@ -111,7 +114,7 @@ Temporarily skipped:
   original.
 
 Next steps, in order:
-1. Get into races, and speed up VU1 (busy 3D scenes run at about 20 fps).
+1. A 60 fps patch for races.
 2. The IPU decoder for backgrounds, and `.mkv` movie playback in game.
 3. SPU2 reverb.
 4. 60 fps and widescreen patches.
