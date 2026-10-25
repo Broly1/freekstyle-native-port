@@ -52,3 +52,10 @@ pub fn load_elf(c: &mut Cpu, bytes: &[u8]) -> Result<u32, String> {
 pub fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
 }
+
+/// FREEK_HEARTBEAT is set: keep the timing statistics it prints. Reading
+/// the clock is costly enough to matter in hot paths otherwise.
+pub fn stats_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FREEK_HEARTBEAT").is_some())
+}

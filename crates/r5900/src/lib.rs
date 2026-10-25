@@ -28,6 +28,9 @@ macro_rules! mnemonics {
                 match self { $(Mnemonic::$v => $s),* }
             }
 
+            /// Inlined so that callers with a constant mnemonic (recompiled
+            /// VU code) fold it away.
+            #[inline(always)]
             pub fn format(self) -> Format {
                 match self { $(Mnemonic::$v => Format::$f),* }
             }

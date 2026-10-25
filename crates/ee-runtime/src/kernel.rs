@@ -837,6 +837,9 @@ fn set_alarm(c: &mut Cpu) -> u32 {
 
 /// Alarms whose time has come, removed from the list.
 pub fn due_alarms(k: &mut Kernel) -> Vec<Alarm> {
+    if k.alarms.is_empty() {
+        return Vec::new();
+    }
     let now = Instant::now();
     let (due, pending): (Vec<_>, Vec<_>) = std::mem::take(&mut k.alarms).into_iter().partition(|a| a.due <= now);
     k.alarms = pending;

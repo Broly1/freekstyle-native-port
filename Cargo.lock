@@ -551,6 +551,7 @@ dependencies = [
  "gilrs",
  "gs",
  "gs-vulkan",
+ "libc",
  "ps2-iop",
  "r5900",
  "winit",

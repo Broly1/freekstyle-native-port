@@ -114,16 +114,62 @@ impl Image {
         starts
     }
 
-    fn pair_call(&self, pc: u32) -> String {
+    /// Whether any block ends in a JR/JALR (target unknown statically).
+    fn has_dynamic_jumps(&self, starts: &BTreeSet<u32>) -> bool {
+        let mask = self.mask();
+        starts.iter().any(|&b| {
+            let mut pc = b;
+            for _ in 0..=mask {
+                let (lo, hi) = self.words(pc);
+                if let Some(k) = branch(lo, hi) {
+                    return matches!(k, Branch::Jump | Branch::JumpCall);
+                }
+                if hi & (1 << 30) != 0 {
+                    return false;
+                }
+                pc = (pc + 1) & mask;
+            }
+            false
+        })
+    }
+
+    fn pair_call(&self, pc: u32, flags: bool) -> String {
         let (lo, hi) = self.words(pc);
         let m = decode(0x4a00_0000 | (hi & 0x01ff_ffff)).m;
-        let flags = self.flags;
         format!("pair::<{flags}>(c, {pc:#x}, {lo:#010x}, {hi:#010x}, M::{m:?})")
+    }
+
+    /// Whether code reachable from `entry` reads the MAC/status flags; if
+    /// not, its FMAC instructions can skip computing them.
+    fn entry_reads_flags(&self, entry: u32, starts: &BTreeSet<u32>) -> bool {
+        let mask = self.mask();
+        starts.iter().any(|&b| {
+            let mut pc = b;
+            for _ in 0..=mask {
+                let (lo, hi) = self.words(pc);
+                if hi >> 31 == 0 && matches!(lo >> 25, 0x14..=0x18 | 0x1a | 0x1b) {
+                    return true;
+                }
+                // Through the end of the block (and its delay slot).
+                if branch(lo, hi).is_some() || hi & (1 << 30) != 0 {
+                    let (dlo, dhi) = self.words((pc + 1) & mask);
+                    return dhi >> 31 == 0 && matches!(dlo >> 25, 0x14..=0x18 | 0x1a | 0x1b);
+                }
+                pc = (pc + 1) & mask;
+                if pc != b && starts.contains(&pc) {
+                    return false;
+                }
+            }
+            false
+        })
     }
 
     fn function(&self, entry: u32, out: &mut String) {
         let mask = self.mask();
         let starts = self.blocks(entry);
+        // Jumps out of the analysed code continue in the interpreter, which
+        // decides for itself; the image-wide answer is the safe fallback.
+        let flags = self.flags && (self.entry_reads_flags(entry, &starts) || self.has_dynamic_jumps(&starts));
         let _ = writeln!(out, "fn vu{}_{:016x}_{entry:04x}(c: &mut Ctx) {{", self.unit, self.hash);
         let _ = writeln!(out, "    let mut pc: u32 = {entry:#x};\n    loop {{\n        match pc {{");
         for &b in &starts {
@@ -145,7 +191,7 @@ impl Image {
                         let _ = writeln!(body, "interpret_from(c, {pc:#x});\nreturn;");
                         break;
                     }
-                    let _ = writeln!(body, "let t = {};\n{};", self.pair_call(pc), self.pair_call(delay));
+                    let _ = writeln!(body, "let t = {};\n{};", self.pair_call(pc, flags), self.pair_call(delay, flags));
                     if end {
                         // A branch in the E-bit pair sets where MSCNT resumes.
                         let _ = writeln!(body, "c.finish(t.unwrap_or({:#x}));\nreturn;", (pc + 2) & mask);
@@ -157,10 +203,10 @@ impl Image {
                     break;
                 }
                 if end {
-                    let _ = writeln!(body, "{};\n{};\nc.finish({:#x});\nreturn;", self.pair_call(pc), self.pair_call(delay), (pc + 2) & mask);
+                    let _ = writeln!(body, "{};\n{};\nc.finish({:#x});\nreturn;", self.pair_call(pc, flags), self.pair_call(delay, flags), (pc + 2) & mask);
                     break;
                 }
-                let _ = writeln!(body, "{};", self.pair_call(pc));
+                let _ = writeln!(body, "{};", self.pair_call(pc, flags));
                 pc = (pc + 1) & mask;
             }
             let body: String = body.lines().map(|l| format!("                {l}\n")).collect();

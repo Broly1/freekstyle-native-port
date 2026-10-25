@@ -13,4 +13,5 @@ gs-vulkan = { path = "../crates/gs-vulkan" }
 winit = "=0.30.5"
 gilrs = "=0.11.0"
 cpal = "=0.15.3"
+libc = "0.2"
 ps2-iop = { path = "../crates/ps2-iop" }

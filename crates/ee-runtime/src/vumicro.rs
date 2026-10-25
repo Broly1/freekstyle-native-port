@@ -324,7 +324,7 @@ pub static NATIVE_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 /// Run a microprogram from instruction `start` until its E bit. Returns
 /// the cycles executed.
 pub fn run<'a>(r: &'a mut VuRegs, env: Env<'a>, cache: &mut DecodeCache, unit: u8, programs: &Programs, start: u32) -> u64 {
-    let t0 = std::time::Instant::now();
+    let t0 = crate::stats_enabled().then(std::time::Instant::now);
     let n = env.code.len() / 8;
     if cache.upper.len() != n {
         cache.sync(cache.gen, n);
@@ -350,8 +350,10 @@ pub fn run<'a>(r: &'a mut VuRegs, env: Env<'a>, cache: &mut DecodeCache, unit: u
         None => interpret(&mut c, cache, start),
     }
     let cycles = c.cycle;
-    let mut s = STATS.lock().unwrap();
-    *s = (s.0 + 1, s.1 + cycles, s.2 + t0.elapsed().as_nanos() as u64);
+    if let Some(t0) = t0 {
+        let mut s = STATS.lock().unwrap();
+        *s = (s.0 + 1, s.1 + cycles, s.2 + t0.elapsed().as_nanos() as u64);
+    }
     cycles
 }
 

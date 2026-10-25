@@ -171,6 +171,14 @@ impl Memory {
                 }
             }
             CH_GIF => dma::gif(self, d),
+            // VIF1 towards memory: a GS local-to-host transfer (BUSDIR).
+            CH_VIF1 if d.chcr & 1 == 0 => {
+                let ram = mem_addr(d.madr);
+                for q in 0..d.qwc {
+                    self.w128(ram + q * 16, 0);
+                }
+                self.io.warn_once("GS readback (StoreImage): returning zeros");
+            }
             CH_VIF0 | CH_VIF1 => dma::vif(self, d),
             _ => self.io.dma_note(d, "not emulated yet; completed with no effect"),
         }

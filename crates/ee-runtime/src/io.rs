@@ -12,6 +12,7 @@ const VBLANK_HZ: f64 = 59.94;
 pub const INT_DMAC: u32 = 1;
 pub const INT_VBLANK_START: u32 = 2;
 pub const INT_VBLANK_END: u32 = 3;
+const GS_CSR_FINISH: u128 = 1 << 1;
 const GS_CSR_VSINT: u128 = 1 << 3;
 const GS_CSR_FIELD: u128 = 1 << 13;
 
@@ -32,6 +33,8 @@ pub const D_STAT: u32 = 0x1000_e010;
 pub const INTC_STAT: u32 = 0x1000_f000;
 pub const INTC_MASK: u32 = 0x1000_f010;
 const GS_CSR: u32 = 0x1200_1000;
+const GS_BUSDIR: u32 = 0x1200_1040;
+const VIF1_STAT: u32 = 0x1000_3c00;
 const IPU_CMD: u32 = 0x1000_2000;
 const IPU_CTRL: u32 = 0x1000_2010;
 
@@ -108,6 +111,9 @@ pub struct Io {
     /// Time spent spinning on one register (idle), for FREEK_HEARTBEAT.
     pub poll_time: std::time::Duration,
     last_read_at: Instant,
+    /// GS BUSDIR set: a local-to-host transfer is waiting in VIF1's FIFO.
+    pub readback: bool,
+    tick_skip: u32,
 }
 
 impl Io {
@@ -125,11 +131,19 @@ impl Io {
             new_vblank: false,
             poll_time: Default::default(),
             last_read_at: Instant::now(),
+            readback: false,
+            tick_skip: 0,
         }
     }
 
     pub fn send_gif(&mut self, data: Vec<u128>) {
         self.gif_packets += 1;
+        // The GS consumes packets as they come, so a FINISH write is done
+        // by the time the EE can look: raise the event now.
+        if writes_finish(&data) {
+            let csr = self.regs.get(&GS_CSR).copied().unwrap_or(0) | GS_CSR_FINISH;
+            self.regs.insert(GS_CSR, csr);
+        }
         if let Some(tx) = &self.gs {
             let _ = tx.send(gs::Msg::Gif(data));
         }
@@ -152,6 +166,12 @@ impl Io {
     /// Advance hardware time to the host clock: raise vblank start/end in
     /// INTC_STAT and set the GS vsync flag for each new field.
     pub fn tick(&mut self) {
+        // The clock is costly to read and a vblank lasts 16 ms: polling
+        // loops call this constantly, so look only every 16th time.
+        self.tick_skip = self.tick_skip.wrapping_add(1);
+        if self.tick_skip & 15 != 0 {
+            return;
+        }
         let n = (self.start.elapsed().as_secs_f64() * VBLANK_HZ) as u64;
         if n > self.vblanks {
             self.vblanks = n;
@@ -216,6 +236,9 @@ impl Io {
         let v = match addr {
             // FIFO always empty; GS revision 0x55.
             GS_CSR => self.regs.get(&addr).copied().unwrap_or(0) | (1 << 14) | (0x55 << 24),
+            // VIF1_STAT: during a GS readback the FIFO holds data for the
+            // EE (FQC full, FDR set).
+            VIF1_STAT if self.readback => self.regs.get(&addr).copied().unwrap_or(0) | 1 << 23 | 0x10 << 24,
             0x1000_0000 | 0x1000_0800 | 0x1000_1000 | 0x1000_1800 => {
                 // Timer counters: advance on every read.
                 let c = self.regs.slot(addr);
@@ -230,15 +253,19 @@ impl Io {
         if self.last_read.0 == addr {
             self.last_read.1 += 1;
             // Repeated reads of one register are a poll loop: idle time.
-            let now = Instant::now();
-            self.poll_time += now - self.last_read_at;
-            self.last_read_at = now;
+            if crate::stats_enabled() {
+                let now = Instant::now();
+                self.poll_time += now - self.last_read_at;
+                self.last_read_at = now;
+            }
             if self.last_read.1 == 5_000_000 {
                 eprintln!("[io] warning: polling {addr:08x} ({}) for 5M reads, value {v:#x}", Self::name(addr));
             }
         } else {
             self.last_read = (addr, 1);
-            self.last_read_at = Instant::now();
+            if crate::stats_enabled() {
+                self.last_read_at = Instant::now();
+            }
         }
         self.trace(addr, false, n, v);
         v
@@ -270,6 +297,10 @@ impl Io {
                 if let Some(tx) = &self.gs {
                     let _ = tx.send(gs::Msg::Priv(addr - 0x1200_0000, v as u64));
                 }
+            }
+            GS_BUSDIR => {
+                self.readback = v & 1 != 0;
+                self.regs.insert(addr, v);
             }
             GS_CSR => {
                 // Event bits (0-4) are write-1-to-clear; keep FIELD.
@@ -322,5 +353,53 @@ impl Io {
 impl Default for Io {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Whether a GIF packet writes the GS FINISH register (A+D in PACKED mode).
+fn writes_finish(data: &[u128]) -> bool {
+    const A_D: u64 = 0xe;
+    const FINISH: u128 = 0x61;
+    let mut i = 0;
+    while i < data.len() {
+        let tag = data[i];
+        i += 1;
+        let nloop = (tag & 0x7fff) as usize;
+        let flg = (tag >> 58) & 3;
+        let nreg = match ((tag >> 60) & 0xf) as usize {
+            0 => 16,
+            n => n,
+        };
+        let regs = (tag >> 64) as u64;
+        match flg {
+            0 => {
+                for q in 0..nloop * nreg {
+                    let Some(&v) = data.get(i + q) else { return false };
+                    if (regs >> (4 * (q % nreg))) & 0xf == A_D && (v >> 64) & 0xff == FINISH {
+                        return true;
+                    }
+                }
+                i += nloop * nreg;
+            }
+            // REGLIST: two registers per qword.
+            1 => i += (nloop * nreg).div_ceil(2),
+            _ => i += nloop,
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod gif_tests {
+    use super::writes_finish;
+
+    #[test]
+    fn finds_finish_in_packed_a_d() {
+        // GIFtag: NLOOP 2, EOP, PACKED, NREG 1, REGS = A+D.
+        let tag = 2u128 | 1 << 15 | 1u128 << 60 | 0xeu128 << 64;
+        let other = 0x3fu128 << 64 | 5; // some other register
+        let finish = 0x61u128 << 64;
+        assert!(writes_finish(&[tag, other, finish]));
+        assert!(!writes_finish(&[tag, other, other]));
     }
 }

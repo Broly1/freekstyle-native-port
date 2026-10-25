@@ -22,6 +22,7 @@
 //! The disc image (raw .bin or .iso) defaults to game/Freekstyle.bin.
 
 mod audio;
+mod profile;
 #[allow(clippy::all)]
 mod gen;
 
@@ -136,6 +137,7 @@ fn main() {
         .name("ee-main".into())
         .stack_size(STACK_SIZE)
         .spawn(move || {
+            profile::start_if_requested();
             let mut c = Cpu::new(&gen::FUNCS);
             c.iop.disc = Some(disc);
             c.iop.link = Some(link);

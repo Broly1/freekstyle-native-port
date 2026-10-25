@@ -90,6 +90,8 @@ Debugging switches (environment variables):
 | `FREEK_DUMP_TEXTURES=dir` | Write every decoded texture as PNG |
 | `IOP_TRACE=1` / `=2` | Log SIF traffic and SPU2 state each second / also every IOP kernel call |
 | `IOP_WAV=out.wav`    | Record the sound output |
+| `FREEK_PROFILE=N`    | After N seconds, sample the EE thread for 10 s into `profile.txt` (addresses for `addr2line -f -C -e target/release/freekstyle`) |
+| `FREEK_AUDIO_LOG`    | Log each audio device callback and the queue depth |
 
 When guest code calls an address the analyzer missed, the runtime says so.
 Add the address to `freekstyle/seeds.txt` and regenerate.
