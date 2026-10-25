@@ -137,6 +137,18 @@ struct Texture {
     image: Image,
     last_used: u64,
     bytes: u64,
+    /// A title or loading picture replaced by its 16:9 version.
+    wide_picture: bool,
+}
+
+/// How a 2D overlay draw is placed in widescreen (see `Hw::overlay`).
+#[derive(Clone, Copy)]
+enum Overlay {
+    None,
+    /// 3/4 as wide around this x: keeps its shape (HUD, menus).
+    Squeeze(f32),
+    /// Moved like the wide picture under it around this x.
+    Picture(f32),
 }
 
 enum Garbage {
@@ -195,6 +207,9 @@ pub struct Hw {
     targets: HashMap<u32, Target>,
     textures: HashMap<TexKey, Texture>,
     pictures: Option<crate::pictures::Pictures>,
+    /// A wide picture fills the screen (set by drawing one, cleared by 3D
+    /// or another background), so overlays follow its stretch curve.
+    on_wide_picture: bool,
     /// Images for the blurred side bars, made on first use.
     blur: Vec<Image>,
     white: Image,
@@ -211,8 +226,11 @@ pub struct Hw {
     shot_every: Option<u64>,
     /// FREEK_GS_TRACE=<vblank>[:<presents>]: log every draw from that
     /// vblank on, for that many presented frames (default 1).
+    /// FREEK_GS_TRACE=tex:<tbp hex>[:<presents>] starts at the first draw
+    /// sampling that texture instead (game timing varies between runs).
     trace_frame: Option<u64>,
     trace_left: u32,
+    trace_tex: Option<u32>,
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -283,6 +301,7 @@ impl Hw {
                 targets: HashMap::new(),
                 textures: HashMap::new(),
                 pictures: cfg.pictures.as_deref().map(crate::pictures::Pictures::load),
+                on_wide_picture: false,
                 cfg,
                 blur: Vec::new(),
                 white,
@@ -300,7 +319,8 @@ impl Hw {
                     Some(Recording { path, start, end: start + secs * 60, size: None, encoder: None })
                 }),
                 trace_frame: std::env::var("FREEK_GS_TRACE").ok().and_then(|v| v.split(':').next()?.parse().ok()),
-                trace_left: std::env::var("FREEK_GS_TRACE").ok().and_then(|v| v.split(':').nth(1)?.parse().ok()).unwrap_or(1),
+                trace_left: std::env::var("FREEK_GS_TRACE").ok().and_then(|v| v.rsplit(':').next()?.parse().ok().filter(|_| v.matches(':').count() == 1 + v.starts_with("tex:") as usize)).unwrap_or(1),
+                trace_tex: std::env::var("FREEK_GS_TRACE").ok().and_then(|v| u32::from_str_radix(v.strip_prefix("tex:")?.split(':').next()?.trim_start_matches("0x"), 16).ok()),
                 shot: std::env::var("FREEK_SHOT").ok().and_then(|v| {
                     let (path, frame) = v.rsplit_once(':')?;
                     Some((frame.parse().ok()?, path.to_string()))
@@ -586,14 +606,17 @@ impl Hw {
             Some(p) if !t.psm().is_indexed() => p.replace(w, h, &px, (self.cfg.scale_x, self.cfg.scale), self.cfg.widescreen),
             _ => None,
         };
-        let (w, h, px) = match picture {
+        let (w, h, px, wide_picture) = match picture {
             Some(r) => r,
-            None if self.cfg.xbox_icons => crate::icons::replace(w, h, &px).unwrap_or((w, h, px)),
-            None => (w, h, px),
+            None if self.cfg.xbox_icons => match crate::icons::replace(w, h, &px) {
+                Some((w, h, px)) => (w, h, px, false),
+                None => (w, h, px, false),
+            },
+            None => (w, h, px, false),
         };
         self.end_rendering();
         let image = self.upload_image(w, h, &px, vk::ImageUsageFlags::SAMPLED, "texture")?;
-        self.textures.insert(key, Texture { image, last_used: frame, bytes: w as u64 * h as u64 * 4 });
+        self.textures.insert(key, Texture { image, last_used: frame, bytes: w as u64 * h as u64 * 4, wide_picture });
         self.texture_bytes += w as u64 * h as u64 * 4;
         if self.texture_bytes > TEXTURE_BUDGET {
             self.evict_lru();
@@ -786,6 +809,10 @@ impl Hw {
     fn draw_inner(&mut self, gs: &Gs, shape: Shape, v: &[Vertex]) -> Result<()> {
         let attrs = gs.attrs();
         let ctx = *gs.context();
+        if self.trace_tex.is_some_and(|tbp| attrs.textured() && ctx.tex0.tbp0() == tbp) {
+            self.trace_tex = None;
+            self.trace_frame = Some(self.vblank);
+        }
         if self.trace_frame.is_some_and(|f| self.vblank >= f) {
             let (f, z, t) = (ctx.frame, ctx.zbuf, ctx.test);
             eprintln!(
@@ -889,9 +916,13 @@ impl Hw {
         };
         let (tw, th) = ((1u32 << tex0.tw()) as f32, (1u32 << tex0.th()) as f32);
         let fst = attrs.fst();
-        let squeeze = self.overlay_centre(&ctx, v);
+        let overlay = self.overlay(&ctx, v, tex);
         let conv = |v: &Vertex| GpuVertex {
-            x: squeeze.map_or(v.x, |c| c + (v.x - c) * 0.75),
+            x: match overlay {
+                Overlay::None => v.x,
+                Overlay::Squeeze(c) => c + (v.x - c) * 0.75,
+                Overlay::Picture(c) => c + c * crate::pictures::wide_position((v.x - c) / c),
+            },
             y: v.y,
             z: (v.z as f64 * zscale).min(1.0) as f32,
             color: u32::from_le_bytes(v.rgba),
@@ -928,26 +959,46 @@ impl Hw {
 
     /// In widescreen the frame is shown stretched by 4/3, so 2D overlays
     /// (HUD, menu text, button prompts) are drawn 3/4 as wide around the
-    /// frame's centre to keep their shape; returns that centre for such a
-    /// draw. The game draws its overlays at the far depth limit with the
-    /// depth test on; 3D geometry never sits exactly there, and full-screen
-    /// passes (backgrounds, fades, effects) either use another depth or
-    /// span the whole width, which is left alone.
-    fn overlay_centre(&self, ctx: &gs::regs::Context, v: &[Vertex]) -> Option<f32> {
-        if !self.cfg.widescreen || !ctx.test.zte() || ctx.test.ztst() < 2 {
-            return None;
+    /// frame's centre to keep their shape. The game draws its overlays at
+    /// the far depth limit with the depth test on; 3D geometry never sits
+    /// exactly there, and full-screen passes (backgrounds, fades, effects)
+    /// either use another depth or span the whole width, which is left
+    /// alone.
+    ///
+    /// Over a wide picture, overlays (some drawn with the depth test off,
+    /// like the loading bar) instead follow the picture's stretch curve,
+    /// so they stay on the spot in the picture they were made for.
+    fn overlay(&mut self, ctx: &gs::regs::Context, v: &[Vertex], tex: TexRef) -> Overlay {
+        if !self.cfg.widescreen {
+            return Overlay::None;
         }
         let far = match ctx.zbuf.psm() {
             Psm::Z32 => u32::MAX,
             Psm::Z24 => 0xff_ffff,
             _ => 0xffff,
         };
-        if v.iter().any(|v| v.z != far) {
-            return None;
-        }
         let width = (ctx.frame.bw() * 64) as f32;
         let (x0, x1) = v.iter().fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(v.x), b.max(v.x)));
-        (x0 > 1.0 || x1 < width - 1.0).then_some(width / 2.0)
+        if x0 <= 1.0 && x1 >= width - 1.0 {
+            // A background: a wide picture, or something else textured.
+            match tex {
+                TexRef::Cache(k) if self.textures[&k].wide_picture => self.on_wide_picture = true,
+                TexRef::None => {}
+                _ => self.on_wide_picture = false,
+            }
+            return Overlay::None;
+        }
+        if v.iter().any(|v| v.z != far) {
+            self.on_wide_picture = false;
+            return Overlay::None;
+        }
+        if self.on_wide_picture {
+            Overlay::Picture(width / 2.0)
+        } else if ctx.test.zte() && ctx.test.ztst() >= 2 {
+            Overlay::Squeeze(width / 2.0)
+        } else {
+            Overlay::None
+        }
     }
 
     /// Vertical render scale: doubled for interlaced field-mode output,
@@ -1293,6 +1344,9 @@ impl gs::Backend for Hw {
     }
 
     fn mem_written(&mut self, gs: &Gs, r: MemRect) {
+        if self.trace_frame.is_some_and(|f| self.vblank >= f) {
+            eprintln!("[draw] transfer bp={:#x} bw={} psm={:?} rect=({},{} {}x{})", r.bp, r.bw, r.psm, r.x, r.y, r.w, r.h);
+        }
         if r.psm.is_indexed() || r.bw == 0 {
             return;
         }

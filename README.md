@@ -95,7 +95,10 @@ On a wide window the 4:3 picture is centred with black bars;
   they keep their shape inside the middle 4:3 area. The renderer
   recognises them as draws at the far depth limit with the depth test on.
 - **Pictures**: `game/images/hd/wide/<NAME>.png` (16:9, e.g. 3840x2160)
-  is used if present, else the 4:3 one is stretched.
+  is used if present, else the 4:3 one is stretched. Make them with
+  `tools/widen-pictures.py` (ffmpeg + numpy): it stretches the edges more
+  than the centre, and the game's overlays on a picture (loading bar,
+  "PRESS START") are moved by the same curve so they stay in place.
 
 ## Movies
 

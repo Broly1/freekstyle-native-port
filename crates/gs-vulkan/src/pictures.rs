@@ -12,10 +12,36 @@
 //!
 //! In widescreen the frame is stretched to 16:9 for display, so a 16:9
 //! version, `game/images/hd/wide/<NAME>.png`, is preferred: squeezed into
-//! the frame like everything else, it shows at its own shape.
+//! the frame like everything else, it shows at its own shape. Wide
+//! versions are made from the 4:3 ones by `tools/widen-pictures.py`, which
+//! stretches the edges more than the centre ([`WIDE_CENTRE`]); the game's
+//! overlays on a picture (loading bar, "PRESS START") are moved by the
+//! same curve ([`wide_position`]) so they stay on their spot in it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// Slope of the wide pictures' stretch curve at the centre: a point at
+/// `v` (-1..1 across the 4:3 picture) is shown at `u` across the 16:9 one,
+/// where `v = a*u + (1 - a)*u^3`. Must match `tools/widen-pictures.py`.
+pub const WIDE_CENTRE: f32 = 1.2;
+
+/// Where a point at `v` across a 4:3 picture is shown across its wide
+/// version (both -1..1). Outside the picture the curve continues straight.
+pub fn wide_position(v: f32) -> f32 {
+    let a = WIDE_CENTRE;
+    let f = |u: f32| a * u + (1.0 - a) * u * u * u;
+    let slope = |u: f32| a + 3.0 * (1.0 - a) * u * u;
+    if v.abs() > 1.0 {
+        return v.signum() * (1.0 + (v.abs() - 1.0) / slope(1.0));
+    }
+    // f is increasing on -1..1 (slope >= 3 - 2a > 0): Newton converges.
+    let mut u = v / a;
+    for _ in 0..8 {
+        u -= (f(u) - v) / slope(u);
+    }
+    u
+}
 
 /// Texels hashed first to reject other textures cheaply.
 const PREFIX: usize = 64;
@@ -99,8 +125,8 @@ impl Pictures {
 
     /// Replacement for a decoded `w` x `h` texture holding a known
     /// picture, at `(sx, sy)` texels per GS pixel; the 16:9 version if
-    /// `wide` and there is one.
-    pub fn replace(&self, w: u32, h: u32, px: &[u32], (sx, sy): (u32, u32), wide: bool) -> Option<(u32, u32, Vec<u32>)> {
+    /// `wide` and there is one. The flag says which was used.
+    pub fn replace(&self, w: u32, h: u32, px: &[u32], (sx, sy): (u32, u32), wide: bool) -> Option<(u32, u32, Vec<u32>, bool)> {
         for (&(pw, ph), by_hash) in &self.known {
             if pw > w || ph > h || (pw as usize) < PREFIX {
                 continue;
@@ -110,7 +136,8 @@ impl Pictures {
                 continue;
             }
             let Some(o) = by_hash.get(&hash(corner(px, w, pw, ph))) else { continue };
-            let path = if wide && o.wide || !o.hd { self.hd.join("wide").join(&o.name) } else { self.hd.join(&o.name) };
+            let use_wide = wide && o.wide || !o.hd;
+            let path = if use_wide { self.hd.join("wide").join(&o.name) } else { self.hd.join(&o.name) };
             let t = std::time::Instant::now();
             match load_png(&path) {
                 Ok((sw, sh, rgba)) => {
@@ -118,7 +145,7 @@ impl Pictures {
                     if std::env::var_os("FREEK_GS_LOG").is_some() {
                         eprintln!("[pictures] {} {sw}x{sh} -> {}x{} in {} ms", path.display(), pw * sx, ph * sy, t.elapsed().as_millis());
                     }
-                    return Some((w * sx, h * sy, out));
+                    return Some((w * sx, h * sy, out, use_wide));
                 }
                 Err(e) => eprintln!("[pictures] {}: {e}", path.display()),
             }
@@ -231,6 +258,20 @@ fn resample(rgba: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_position_inverts_the_stretch_curve() {
+        let a = WIDE_CENTRE;
+        for i in -10..=10 {
+            let u = i as f32 / 10.0;
+            let v = a * u + (1.0 - a) * u * u * u;
+            assert!((wide_position(v) - u).abs() < 1e-5, "{v} -> {} not {u}", wide_position(v));
+        }
+        // Centre stretched least, edges fixed, continuous past them.
+        assert!((wide_position(0.1) - 0.1 / a).abs() < 1e-3);
+        assert!((wide_position(1.0) - 1.0).abs() < 1e-5);
+        assert!(wide_position(1.01) > 1.0 && wide_position(1.01) < 1.03);
+    }
 
     #[test]
     fn taps_are_normalised_and_in_range() {
