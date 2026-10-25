@@ -29,9 +29,26 @@ pub struct Iop {
     pub mc_pending: Option<(i32, i32)>,
     /// Files served with changes: (first sector, patched contents).
     pub patched: Vec<(u32, Vec<u8>)>,
+    /// The emulated IOP running the sound driver, if audio is enabled.
+    pub link: Option<std::sync::Arc<ps2_iop::Link>>,
+    /// Rotates the buffers that IOP command packets are delivered in.
+    pub cmd_slot: u32,
 }
 
 impl Iop {
+    /// A whole file from the disc, by ISO path (e.g. `\\MODULES\\AUDIO.IRX`).
+    pub fn read_file(&mut self, path: &str) -> Option<Vec<u8>> {
+        let disc = self.disc.as_mut()?;
+        let e = disc.find(path)?;
+        let sector = crate::disc::SECTOR;
+        let mut data = vec![0u8; e.size.div_ceil(sector as u32) as usize * sector];
+        for (n, chunk) in data.chunks_mut(sector).enumerate() {
+            disc.read_into(e.lsn + n as u32, chunk).ok()?;
+        }
+        data.truncate(e.size as usize);
+        Some(data)
+    }
+
     /// Prepare file patches for the PC version (memory card wording).
     pub fn patch_disc_files(&mut self) {
         let Some(disc) = self.disc.as_mut() else { return };

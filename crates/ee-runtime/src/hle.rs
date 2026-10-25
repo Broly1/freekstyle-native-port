@@ -283,27 +283,116 @@ fn jst_datetime(t: std::time::SystemTime) -> [u8; 8] {
     [0, (rem % 60) as u8, (rem / 60 % 60) as u8, (rem / 3600) as u8, day, month, y[0], y[1]]
 }
 
-// ---- EA audio driver (AUDIO.IRX) ----
+// ---- SIF commands and IOP modules ----
 //
-// Each frame the game sends an audio command packet to EA's IOP driver
-// (0x192f00) and then waits for the driver's reply callback (0x192d20)
-// to set a flag. Until the driver is implemented natively, the wait
-// completes at once with no events, as if the IOP acknowledged silently.
+// The IOP is emulated by `ps2_iop` on its own thread. Commands and DMA go
+// to it through the link; commands from it are delivered by
+// `sif_receive` at the next interrupt check, as the SIF0 interrupt would.
 
-const GP: usize = 28;
-/// gp-relative flags: request outstanding, reply received.
-const EA_AUDIO_PENDING: u32 = 2732;
-const EA_AUDIO_REPLIED: u32 = 2736;
-/// Driver ready for the next packet (set by the reply callback).
-const EA_AUDIO_READY: u32 = 3080;
+/// libkernel's software register array (sceSifGetSreg reads it).
+const EE_SREG: u32 = 0x0024_6e00;
+/// libkernel's user command table: pointer, then entry count.
+const EE_CMD_TABLE: u32 = 0x0024_6cec;
+/// Packets from the IOP are placed here (unused kernel memory).
+const EE_CMD_BUF: u32 = 0x000f_f000;
+const CMD_SLOT: u32 = 128;
 
-pub fn ea_audio_sync(c: &mut Cpu) {
-    let gp = c.r32(GP);
-    c.mem.w32(gp + EA_AUDIO_PENDING, 0);
-    c.mem.w32(gp + EA_AUDIO_REPLIED, 0);
-    c.mem.w32(gp + EA_AUDIO_READY, 1);
-    c.kernel.warn_once("EA audio driver not implemented: running silent");
+/// sceSifSendCmd / isceSifSendCmd(cid, packet, psize, src, dest, size)
+pub fn sif_send_cmd(c: &mut Cpu) {
+    let (cid, pkt, psize, src) = (c.r32(A0), c.r32(A1), c.r32(A2).min(CMD_SLOT), c.r32(A3));
+    let (dest, size) = (c.r32(T0), c.r32(T1));
+    // Header: psize:8 dsize:24, dest, cid; opt is the sender's.
+    c.mem.w32(pkt, psize | size << 8);
+    c.mem.w32(pkt + 4, dest);
+    c.mem.w32(pkt + 8, cid);
+    let packet: Vec<u8> = (0..psize).map(|i| c.mem.r8(pkt + i)).collect();
+    let extra = (size > 0).then(|| (dest, (0..size).map(|i| c.mem.r8(src + i)).collect()));
+    match &c.iop.link {
+        Some(link) => link.send(ps2_iop::ToIop::Cmd { cid, packet, extra }),
+        None => c.kernel.warn_once("SIF command to the IOP dropped: audio disabled"),
+    }
+    c.ws(V0, 1);
+}
+
+/// sceSifLoadModule(path, arglen, args). The sound modules run on the
+/// emulated IOP; other modules' services are native and always present.
+pub fn sif_load_module(c: &mut Cpu) {
+    let (path_addr, arglen, args) = (c.r32(A0), c.r32(A1), c.r32(A2));
+    let path: String = (0..256).map(|i| c.mem.r8(path_addr + i)).take_while(|&b| b != 0).map(|b| b as char).collect();
+    let file = path.rsplit(['\\', '/', ':']).next().unwrap_or("").split(';').next().unwrap_or("").to_ascii_uppercase();
+    if matches!(file.as_str(), "LIBSD.IRX" | "AUDIO.IRX") {
+        if let Some(link) = c.iop.link.clone() {
+            match c.iop.read_file(&format!("\\MODULES\\{file}")) {
+                Some(image) => {
+                    let args = (0..arglen).map(|i| c.mem.r8(args + i)).collect();
+                    let target = link.loaded() + 1;
+                    link.send(ps2_iop::ToIop::Load { name: file.clone(), image, args });
+                    // LoadModule returns after the module has started.
+                    let start = std::time::Instant::now();
+                    while link.loaded() < target && start.elapsed() < std::time::Duration::from_secs(5) {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }
+                None => eprintln!("[iop] {path}: not found on the disc"),
+            }
+        }
+    }
+    if c.kernel.trace {
+        eprintln!("[sif] load module {path}");
+    }
     c.ws(V0, 0);
+}
+
+impl Cpu {
+    /// Deliver messages from the IOP: DMA writes and SIF commands.
+    pub fn sif_receive(&mut self) -> bool {
+        let Some(link) = self.iop.link.clone() else { return false };
+        if !link.has_mail() {
+            return false;
+        }
+        let msgs = link.take();
+        let n = msgs.len();
+        for m in msgs {
+            match m {
+                ps2_iop::ToEe::Dma { dest, data } => self.write_bytes(dest, &data),
+                ps2_iop::ToEe::Cmd { cid, packet, extra } => {
+                    if let Some((dest, data)) = extra {
+                        self.write_bytes(dest, &data);
+                    }
+                    self.sif_command(cid, &packet);
+                }
+            }
+        }
+        link.handled(n);
+        true
+    }
+
+    fn write_bytes(&mut self, dest: u32, data: &[u8]) {
+        for (i, &b) in data.iter().enumerate() {
+            self.mem.w8(dest + i as u32, b);
+        }
+    }
+
+    fn sif_command(&mut self, cid: u32, packet: &[u8]) {
+        let word = |o: usize| packet.get(o..o + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
+        if cid & 0x8000_0000 != 0 {
+            // SIF_CMD_SET_SREG; the others concern the SIF's own setup.
+            if cid == 0x8000_0001 {
+                self.mem.w32(EE_SREG + (word(16) & 31) * 4, word(20));
+            }
+            return;
+        }
+        let (table, n) = (self.mem.r32(EE_CMD_TABLE), self.mem.r32(EE_CMD_TABLE + 4));
+        let (func, data) = if table != 0 && cid < n { (self.mem.r32(table + cid * 8), self.mem.r32(table + cid * 8 + 4)) } else { (0, 0) };
+        if func == 0 {
+            self.kernel.warn_once(&format!("SIF command {cid:#x} from the IOP has no handler"));
+            return;
+        }
+        let slot = EE_CMD_BUF + (self.iop.cmd_slot % 16) * CMD_SLOT;
+        self.iop.cmd_slot += 1;
+        self.write_bytes(slot, &packet[..packet.len().min(CMD_SLOT as usize)]);
+        self.run_handler(slot, func, (data, 0));
+    }
 }
 
 // ---- Movies ----

@@ -54,6 +54,8 @@ pub struct Cpu {
     recent_pos: usize,
     calls: u64,
     in_interrupt: bool,
+    /// Loop back-edges taken, for `backedge` polling.
+    spins: u32,
     started: std::time::Instant,
 }
 
@@ -78,6 +80,7 @@ impl Cpu {
             recent_pos: 0,
             calls: 0,
             in_interrupt: false,
+            spins: 0,
             started: std::time::Instant::now(),
         }
     }
@@ -141,6 +144,23 @@ impl Cpu {
         }
     }
 
+    /// Loop back-edge in recompiled code: spin-waits must still see
+    /// interrupts (and IOP replies), so poll now and then.
+    #[inline(always)]
+    pub fn backedge(&mut self) {
+        self.spins = self.spins.wrapping_add(1);
+        if self.spins & 0x3fff == 0 {
+            self.spin_poll();
+        }
+    }
+
+    #[cold]
+    fn spin_poll(&mut self) {
+        if (self.poll_interrupts() || self.kernel.need_resched) && !self.in_interrupt {
+            crate::kernel::reschedule(self);
+        }
+    }
+
     pub fn save_context(&self) -> Context {
         Context { gpr: self.gpr, hi: self.hi, lo: self.lo, sa: self.sa, fpr: self.fpr, acc: self.acc, fcr31: self.fcr31 }
     }
@@ -159,7 +179,7 @@ impl Cpu {
         if self.in_interrupt || self.cop0[12] & (1 << 16) == 0 {
             return false;
         }
-        let mut ran = false;
+        let mut ran = self.sif_receive();
         for a in crate::kernel::due_alarms(&mut self.kernel) {
             // Alarm handlers take (alarm id, time, arg).
             self.run_handler(a.id, a.func, (a.ticks as u32, a.arg));

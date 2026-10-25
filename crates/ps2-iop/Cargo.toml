@@ -1,0 +1,6 @@
+[package]
+name = "ps2-iop"
+description = "PS2 I/O processor for Freekstyle: runs the game's IOP sound driver (AUDIO.IRX, LIBSD.IRX) on an HLE kernel, with an SPU2"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

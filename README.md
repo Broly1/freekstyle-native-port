@@ -20,7 +20,8 @@ go in `game/`, which git ignores.
 | `ee-recomp`  | working | Emits one Rust function per guest function; HLE overrides via `freekstyle/hle.txt` |
 | `ee-runtime` | partial | CPU state, memory map, MMI/FPU/VU0 helpers, HLE kernel, vblank + interrupt delivery, SPR DMA, SIF RPC layer |
 | `freekstyle` | boots   | The game binary: generated code + runtime, with a hang watchdog |
-| IOP services | partial | CD/DVD from the disc image; padman (controller frames each vblank); saves as files instead of memory cards. Todo: EA audio |
+| IOP services | partial | CD/DVD from the disc image; padman (controller frames each vblank); saves as files instead of memory cards |
+| `ps2-iop`    | working | Sound: the game's own IOP driver (EA's AUDIO.IRX on Sony's LIBSD.IRX) runs on an R3000 interpreter over a native IOP kernel (threads, interrupts, SIF commands), with an SPU2 (ADPCM voices, ADSR, DMA) feeding the host audio device at 48 kHz |
 | `gs`         | working | GS core: registers, GIF PACKED/REGLIST/IMAGE, 4 MB VRAM with all swizzled formats (verified against hardware tables), transfers, CLUT, primitive assembly |
 | `gs-vulkan`  | working | Vulkan renderer: render targets at N x resolution (3x 1080p, 5x 4K), GS blend modes, texture cache, display output, screenshots |
 | VU0/VU1      | working | VIF unpack/MPG/DIRECT, VU micro-mode interpreter with pipeline timing (Q/P latency, flag delay, hazard stalls); recorded programs are recompiled to Rust from `freekstyle/vu_dumps` |
@@ -33,7 +34,7 @@ go in `game/`, which git ignores.
 # 1. Copy SLUS_203.67 from your own disc into game/.
 # 2. Generate Rust from it, then build and run.
 cargo run --release -p ee-recomp -- game/SLUS_203.67 freekstyle/src/gen freekstyle/hle.txt freekstyle/seeds.txt
-cargo run --release -p freekstyle -- [--res 1080|1440|4k] [--scale N] [--fullscreen] [--stretch]
+cargo run --release -p freekstyle -- [--res 1080|1440|4k] [--scale N] [--fullscreen] [--stretch] [--mute]
 ```
 
 `--res` picks the window size and a matching internal resolution (3x, 4x
@@ -87,6 +88,8 @@ Debugging switches (environment variables):
 | `FREEK_SHOT_EVERY=K` | With `FREEK_SHOT`, save every K frames from N on |
 | `FREEK_PAD_SCRIPT`   | Scripted taps, e.g. `300:start,600:a+down` (Xbox names) |
 | `FREEK_DUMP_TEXTURES=dir` | Write every decoded texture as PNG |
+| `IOP_TRACE=1` / `=2` | Log SIF traffic and SPU2 state each second / also every IOP kernel call |
+| `IOP_WAV=out.wav`    | Record the sound output |
 
 When guest code calls an address the analyzer missed, the runtime says so.
 Add the address to `freekstyle/seeds.txt` and regenerate.
@@ -102,12 +105,13 @@ Temporarily skipped:
 - Intro movies (`.FLM`) and IPU-compressed backgrounds. The IPU (MPEG
   decoder) is not emulated, so movie open/play/close are no-ops and some
   backgrounds (e.g. the title screen) show undecoded data.
-- Sound: EA's IOP audio driver is acknowledged silently each frame.
+- SPU2 reverb, noise and pitch modulation, so sound is drier than the
+  original.
 
 Next steps, in order:
 1. Get into races, and speed up VU1 (busy 3D scenes run at about 20 fps).
 2. The IPU decoder for backgrounds, and `.mkv` movie playback in game.
-3. EA audio (`AUDIO.IRX` protocol) through the host audio device.
+3. SPU2 reverb.
 4. 60 fps and widescreen patches.
 
 ## Analysis results (SLUS_203.67, sha256 debcb4b0…6d80a)

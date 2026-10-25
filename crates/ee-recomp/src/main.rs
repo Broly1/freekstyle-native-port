@@ -150,7 +150,12 @@ fn control(i: &Insn, pc: u32, f: &Function, ctx: &mut Ctx, body: &mut String) ->
     // function, or a tail call.
     let goto = |t: u32, ctx: &Ctx| {
         if f.insns.contains(&t) && !(ctx.starts.contains(&t) && t != f.start) {
-            format!("pc = {t:#x};")
+            // Backward jumps may be spin-waits; let them see interrupts.
+            if t <= pc {
+                format!("c.backedge(); pc = {t:#x};")
+            } else {
+                format!("pc = {t:#x};")
+            }
         } else {
             format!("{} return;", ctx.call(t))
         }

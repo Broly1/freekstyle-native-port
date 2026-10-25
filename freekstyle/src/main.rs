@@ -12,6 +12,7 @@
 //!   --stretch            fill the window instead of keeping 4:3
 //!   --headless           no window; print GS statistics
 //!   --ps2-icons          keep the original PlayStation button icons
+//!   --mute               no sound (the sound driver still runs)
 //!
 //! Controls: any gamepad (Xbox layout: A/B/X/Y = Cross/Circle/Square/
 //! Triangle by position), or the keyboard: arrows = D-pad, Z/Space = A,
@@ -20,6 +21,7 @@
 //!
 //! The disc image (raw .bin or .iso) defaults to game/Freekstyle.bin.
 
+mod audio;
 #[allow(clippy::all)]
 mod gen;
 
@@ -47,6 +49,7 @@ struct Options {
     stretch: bool,
     headless: bool,
     ps2_icons: bool,
+    mute: bool,
 }
 
 fn options() -> Options {
@@ -59,6 +62,7 @@ fn options() -> Options {
         stretch: false,
         headless: false,
         ps2_icons: false,
+        mute: false,
     };
     let mut positional = Vec::new();
     let mut scale: Option<u32> = None;
@@ -80,6 +84,7 @@ fn options() -> Options {
             "--stretch" => o.stretch = true,
             "--headless" => o.headless = true,
             "--ps2-icons" => o.ps2_icons = true,
+            "--mute" => o.mute = true,
             _ if a.starts_with("--") => {
                 eprintln!("unknown option {a}");
                 process::exit(2);
@@ -119,6 +124,13 @@ fn main() {
         process::exit(1);
     }
 
+    // The IOP (sound driver and SPU2) runs on its own thread, paced by the
+    // audio device.
+    let link = std::sync::Arc::new(ps2_iop::Link::default());
+    let ring = std::sync::Arc::new(ps2_iop::AudioRing::default());
+    ps2_iop::spawn(link.clone(), ring.clone(), audio::LATENCY);
+    let _stream = audio::start(ring, opts.mute);
+
     let (gs_tx, gs_rx) = std::sync::mpsc::channel();
     thread::Builder::new()
         .name("ee-main".into())
@@ -126,6 +138,7 @@ fn main() {
         .spawn(move || {
             let mut c = Cpu::new(&gen::FUNCS);
             c.iop.disc = Some(disc);
+            c.iop.link = Some(link);
             c.iop.patch_disc_files();
             c.mem.io.gs = Some(gs_tx);
             c.mem.vu_programs = ee_runtime::vumicro::Programs(&gen::vu_programs::VU_PROGRAMS);

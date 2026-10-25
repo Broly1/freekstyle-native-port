@@ -9,6 +9,9 @@
 0010be00 sif_init        # sceSifInitRpc
 0010c470 sif_bind_rpc    # sceSifBindRpc
 0010c640 sif_call_rpc    # sceSifCallRpc
+0010bba8 sif_send_cmd    # sceSifSendCmd
+0010bbe8 sif_send_cmd    # isceSifSendCmd
+00110df8 sif_load_module # sceSifLoadModule
 
 # libmc: saves go to a host folder instead of a memory card (ee_runtime::mc).
 # sceMcInit (0x114a90) runs natively against the mcserv version reply.
@@ -29,9 +32,6 @@
 00115fb0 mc_set_file_info
 00116118 mc_unformat
 001161e0 mc_get_ent_space
-
-# EA audio driver: complete the per-frame IOP handshake silently.
-00192d20 ea_audio_sync
 
 # Movie open / play / close: skip until the IPU is emulated.
 001ac580 movie_play

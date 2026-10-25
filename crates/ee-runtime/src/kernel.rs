@@ -663,7 +663,17 @@ pub fn syscall(c: &mut Cpu, pc: u32) {
         }
         0x76 => u32::MAX, // SifDmaStat: transfer already complete.
         0x77 => {
-            log(c, "SifSetDma", &format!("transfers={:#x} count={}", arg(c, 0), arg(c, 1)));
+            // SifSetDma(transfers, count): { src, dest (IOP), size, attr }.
+            let (list, count) = (arg(c, 0), arg(c, 1));
+            log(c, "SifSetDma", &format!("transfers={list:#x} count={count}"));
+            for i in 0..count {
+                let t = list + i * 16;
+                let (src, dest, size) = (c.mem.r32(t), c.mem.r32(t + 4), c.mem.r32(t + 8));
+                let data = (0..size).map(|n| c.mem.r8(src + n)).collect();
+                if let Some(link) = &c.iop.link {
+                    link.send(ps2_iop::ToIop::Dma { dest, data });
+                }
+            }
             1
         }
         0x78 => 0,
