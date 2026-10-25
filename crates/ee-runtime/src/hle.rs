@@ -514,6 +514,37 @@ pub fn camera_scale(c: &mut Cpu) {
     }
 }
 
+/// The VIF1 DMA-end handler (0x12f9f0) times each frame's rendering
+/// from the frame start (gp-6064) and stores it at gp-6056; past 90% of
+/// a field the frame loop raises a load factor (gp-6052) that lowers
+/// detail, like `frame_time` below. Here VU1 runs as slow code on the EE
+/// thread, which a PS2 does in parallel, so the time means nothing:
+/// report the rendering as instant.
+pub fn render_done(c: &mut Cpu) {
+    let gp = c.r32(GP);
+    if c.mem.r32(gp.wrapping_sub(6048)) != 0 {
+        c.mfc0(V0, 9);
+        let now = c.r32(V0);
+        c.mem.w32(gp.wrapping_sub(6056), 0);
+        c.mem.w32(gp.wrapping_sub(6060), now);
+        c.mem.w32(gp.wrapping_sub(6048), 0);
+    }
+    c.ei();
+    c.ws(V0, 0);
+}
+
+/// The race's frame timer (0x1b1300, just before the vsync wait):
+/// averages the EE time since the last flip over 16 frames into gp+5548,
+/// in percent of a 60 Hz frame. Past 80% the game cuts detail: opponents
+/// drop to their lowest model without bikes, scenery switches to simpler
+/// models and back. Here that time includes the VU1 microcode, which a
+/// PS2 runs alongside the EE, so it reads 150-200% in races: report 50%,
+/// the value the game starts from.
+pub fn frame_time(c: &mut Cpu) {
+    let gp = c.r32(GP);
+    c.mem.w32(gp.wrapping_add(5548), 50);
+}
+
 // ---- Movies ----
 
 /// The game's movie API (EA .FLM via the IPU): open (0x1ac580), blocking

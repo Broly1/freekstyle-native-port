@@ -218,6 +218,8 @@ pub struct Hw {
     verts: Vec<GpuVertex>,
     texture_bytes: u64,
     pub stats: Stats,
+    /// Target shown at the last vblank, to count flips.
+    shown: Option<u32>,
     /// FREEK_SHOT=<file.png>:<frame>: save the displayed picture.
     shot: Option<(u64, String)>,
     /// FREEK_RECORD=<file.mkv>:<start vblank>:<seconds>: video capture.
@@ -236,6 +238,8 @@ pub struct Hw {
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Stats {
     pub draws: u64,
+    /// Times the displayed frame buffer changed (game frames shown).
+    pub flips: u64,
     pub batches: u64,
     pub texture_uploads: u64,
     pub target_uploads: u64,
@@ -310,6 +314,7 @@ impl Hw {
                 verts: Vec::new(),
                 texture_bytes: 0,
                 stats: Stats::default(),
+                shown: None,
                 shot_every: std::env::var("FREEK_SHOT_EVERY").ok().and_then(|v| v.parse().ok()),
                 record: std::env::var("FREEK_RECORD").ok().and_then(|v| {
                     let mut it = v.rsplitn(3, ':');
@@ -1046,6 +1051,10 @@ impl Hw {
                 if let Ok(key) = self.target(bp, bw, psm, dby + h, self.vertical_scale(gs)) {
                     if fresh {
                         let _ = self.upload_to_target(&gs.vram, gs.texa, key, 0, 0, bw * 64, dby + h);
+                    }
+                    if self.shown != Some(key) {
+                        self.shown = Some(key);
+                        self.stats.flips += 1;
                     }
                     src = Some((key, dbx, dby, w, h));
                 }

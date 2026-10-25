@@ -21,6 +21,11 @@ pub struct Renderer {
     hw: hw::Hw,
     /// Time spent in GS processing and in presenting, for FREEK_GS_LOG.
     timing: (std::time::Duration, std::time::Duration, u32),
+    /// Vblanks that brought new draws (game frames), and the draw count
+    /// at the last vblank, for FREEK_GS_LOG.
+    game_frames: u32,
+    last_draws: u64,
+    last_flips: u64,
     since: std::time::Instant,
     last_flip: Option<std::time::Instant>,
 }
@@ -32,7 +37,7 @@ impl Renderer {
             "[gs] Vulkan on {} | {}x{} window | {}x internal resolution",
             vk.device_name, vk.swapchain.extent.width, vk.swapchain.extent.height, cfg.scale
         );
-        Ok(Renderer { gs: gs::Gs::new(), hw: hw::Hw::new(vk, cfg)?, timing: Default::default(), since: std::time::Instant::now(), last_flip: None })
+        Ok(Renderer { gs: gs::Gs::new(), hw: hw::Hw::new(vk, cfg)?, timing: Default::default(), game_frames: 0, last_draws: 0, last_flips: 0, since: std::time::Instant::now(), last_flip: None })
     }
 
     /// Process one message from the EE. Returns true after presenting.
@@ -65,6 +70,10 @@ impl Renderer {
                     eprintln!("[hitch] renderer {} vblanks behind at vblank {n}", n - self.hw.vblank);
                 }
                 self.hw.vblank = n;
+                if self.hw.stats.draws != self.last_draws {
+                    self.game_frames += 1;
+                    self.last_draws = self.hw.stats.draws;
+                }
                 let tp = std::time::Instant::now();
                 self.hw.present(&self.gs);
                 if std::env::var_os("FREEK_FRAME_GAPS").is_some() && tp.elapsed().as_millis() > 50 {
@@ -75,8 +84,12 @@ impl Renderer {
                 if self.timing.2 == 120 && std::env::var_os("FREEK_GS_LOG").is_some() {
                     let (g, p, n) = self.timing;
                     let fps = n as f64 / self.since.elapsed().as_secs_f64();
-                    eprintln!("[gs] {fps:.1} fps; per frame: GS {:.2} ms, present {:.2} ms; vblank {}", g.as_secs_f64() * 1e3 / n as f64, p.as_secs_f64() * 1e3 / n as f64, self.hw.vblank);
+                    let secs = self.since.elapsed().as_secs_f64();
+                    let (game, flips) = (self.game_frames as f64 / secs, (self.hw.stats.flips - self.last_flips) as f64 / secs);
+                    self.last_flips = self.hw.stats.flips;
+                    eprintln!("[gs] {fps:.1} fps, drawn {game:.1}/s, shown {flips:.1}/s; per frame: GS {:.2} ms, present {:.2} ms; vblank {}", g.as_secs_f64() * 1e3 / n as f64, p.as_secs_f64() * 1e3 / n as f64, self.hw.vblank);
                     self.timing = Default::default();
+                    self.game_frames = 0;
                     self.since = std::time::Instant::now();
                 }
                 return true;

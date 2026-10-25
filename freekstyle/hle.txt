@@ -44,3 +44,8 @@
 
 # Camera projection scale: the widescreen option widens the race camera.
 00145210 camera_scale
+
+# Frame timing that lowers race detail when over budget: report it as
+# within budget, since the EE time here includes VU1 work.
+0012f9f0 render_done
+001b1300 frame_time
