@@ -338,14 +338,14 @@ impl App {
         let merge = |pad: u8, key: u8| if (key as i32 - 128).abs() > (pad as i32 - 128).abs() { key } else { pad };
         input.sticks[2] = merge(input.sticks[2], dir(button::LEFT, button::RIGHT));
         input.sticks[3] = merge(input.sticks[3], dir(button::UP, button::DOWN));
-        // FREEK_TRACE_BUTTON=<mask>: trace the frames just after that pad
-        // button is pressed (effects too quick to catch with F10), up to
-        // five times.
+        // FREEK_TRACE_BUTTON=<mask>: half a second after that pad button is
+        // pressed, trace a frame and save its picture (effects too quick to
+        // catch by hand), up to ten times.
         if let Some(mask) = std::env::var("FREEK_TRACE_BUTTON").ok().and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok()) {
-            if input.buttons & mask != 0 && self.last_buttons & mask == 0 && self.traces < 5 {
+            if input.buttons & mask != 0 && self.last_buttons & mask == 0 && self.traces < 10 {
                 if let Some(r) = &mut self.renderer {
                     self.traces += 1;
-                    r.trace_in(15);
+                    r.trace_shot(30);
                 }
             }
         }

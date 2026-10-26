@@ -776,10 +776,19 @@ pub fn pair<const FLAGS: bool>(c: &mut Ctx, pc: u32, lo: u32, hi: u32, m: M) -> 
     }
 
     // Lower VF results land after the upper's, unless both target the
-    // same register.
+    // same register. They go through the same four-cycle pipeline, so a
+    // reader stalls for them too; Freekstyle's streak program relies on
+    // that stall to let a DIV finish before it reads Q.
     if let Some((reg, dest, v)) = lower_vf {
         if upper_fd != Some(reg) {
             r.vw(reg, dest, v);
+            if reg != 0 {
+                for f in 0..4 {
+                    if dest & (8 >> f) != 0 {
+                        ready[reg][f] = *cycle + FMAC_LATENCY;
+                    }
+                }
+            }
         }
     }
     if let Some(i) = new_i {
@@ -1192,6 +1201,39 @@ mod tests {
             &mut r,
         );
         assert_eq!(r.vf[3][0], 32.0);
+    }
+
+    #[test]
+    fn lower_vf_write_stalls_reader() {
+        // The game's streak program: DIV, then MR32 (a lower op) writes a
+        // register the MULQ two pairs later reads. The read stalls until
+        // the MR32 result lands, by which time the new Q is there; without
+        // the stall a trail point is projected with a stale Q.
+        let mut data = vec![0u8; 16 << 10];
+        put(&mut data, 0, [8.0, 2.0, 0.0, 0.0]);
+        let mut r = VuRegs::new();
+        r.q = 100.0;
+        let mr32 = |ft: u32, fs: u32| 0x40 << 25 | 0xf << 21 | ft << 16 | fs << 11 | 0x33d;
+        exec(
+            &[
+                (NOP, lq(1, 0, 0, 0xf)),
+                (NOP, NOPL),
+                (NOP, NOPL),
+                (NOP, NOPL),
+                (NOP, NOPL),
+                (NOP, div(1, 0, 1, 1)), // Q = 4 after 7 cycles
+                (NOP, NOPL),
+                (NOP, NOPL),
+                (NOP, mr32(5, 1)), // vf5 = [2, 0, 0, 8]
+                (NOP, NOPL),
+                (vmulq(3, 5), NOPL), // stalls 2 cycles on vf5: new Q
+                (NOP | E, NOPL),
+                (NOP, NOPL),
+            ],
+            &mut data,
+            &mut r,
+        );
+        assert_eq!(r.vf[3][0], 8.0);
     }
 
     #[test]

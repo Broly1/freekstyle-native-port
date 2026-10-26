@@ -106,6 +106,10 @@ impl Renderer {
         self.hw.stats
     }
 
+    pub fn trace_shot(&mut self, delay: u64) {
+        self.hw.trace_shot(delay);
+    }
+
     pub fn trace_in(&mut self, delay: u64) {
         self.hw.trace_in(delay);
     }

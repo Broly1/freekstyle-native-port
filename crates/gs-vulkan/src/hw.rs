@@ -1384,6 +1384,19 @@ impl Hw {
         self.trace_left = 4;
     }
 
+    /// Log every draw of the frame `delay` vblanks from now and save that
+    /// frame's picture to `captures/`, to match a glitch on screen with its
+    /// draws.
+    pub fn trace_shot(&mut self, delay: u64) {
+        let at = self.vblank + delay.max(1);
+        let _ = std::fs::create_dir_all("captures");
+        // Draws logged from `at` on are shown at the next present.
+        eprintln!("[draw] --- trace and shot of vblank {} ---", at + 1);
+        self.trace_frame = Some(at);
+        self.trace_left = 2;
+        self.shot = Some((at + 1, format!("captures/trace_{:06}.png", at + 1)));
+    }
+
     /// F12: start recording to `captures/`, or stop. For glitches seen
     /// while playing; frame n of the video is vblank start + n (see the
     /// FREEK_PAD_LOG button log for the same numbering).

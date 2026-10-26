@@ -779,13 +779,18 @@ impl<'a> Compiler<'a> {
                 }
             }
             // Lower VF results land after the upper's unless both write the
-            // same register.
+            // same register, and readers stall for them as for FMAC results.
             if let Some((r, d)) = lower_vf {
                 if upper_reg != Some(r) && r != 0 {
                     code.push_str(&assign(r, d, "lv"));
                     code.push('\n');
                     if let Some((_, used)) = emit.as_mut() {
                         used.vf_w |= 1 << r;
+                    }
+                    for f in 0..4 {
+                        if d & (8 >> f) != 0 {
+                            s.ready[r as usize][f] = s.t + FMAC_LATENCY;
+                        }
                     }
                 }
             }
