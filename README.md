@@ -53,8 +53,8 @@ Esc quits.
 - **Controllers**: any gamepad (SDL-style mapping through gilrs). Buttons
   map by position, so Xbox A/B/X/Y act as Cross/Circle/Square/Triangle.
   Keyboard and gamepad work together. Default keys: WASD or arrows = D-pad
-  and left stick, J/Space = A, K = B, U = X, I = Y, Y/O = LB/RB, H/L =
-  LT/RT, Enter = Start, Backspace = Back.
+  and left stick, J/Space/Enter = A (menus confirm with A), K = B, U = X,
+  I = Y, P/O = LB/RB, ;/L = LT/RT, T = Start (pause), Backspace = Back.
 - **Sharp textures**: textures drawn as 2D sprites (menus, text, HUD) are
   upscaled with xBRZ to the internal resolution on a worker thread
   (`--no-sharp-textures` turns it off). 3D surfaces keep their originals.

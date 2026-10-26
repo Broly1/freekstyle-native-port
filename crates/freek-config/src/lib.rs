@@ -70,18 +70,19 @@ pub fn button_bit(name: &str) -> Option<u16> {
 
 pub fn default_bindings() -> Vec<Binding> {
     let table: [(&str, &[&str], &[&str]); 16] = [
-        // Right hand, two rows: Y U I O = LB X Y RB, H J K L = LT A B RT.
-        ("cross", &["KeyJ", "Space"], &["South"]),
+        // Right hand, two rows: U I O P = X Y RB LB, J K L ; = A B RT LT.
+        // Enter also selects, as menus confirm with Cross.
+        ("cross", &["KeyJ", "Space", "Enter"], &["South"]),
         ("circle", &["KeyK"], &["East"]),
         ("square", &["KeyU"], &["West"]),
         ("triangle", &["KeyI"], &["North"]),
-        ("l1", &["KeyY"], &["LeftTrigger"]),
+        ("l1", &["KeyP"], &["LeftTrigger"]),
         ("r1", &["KeyO"], &["RightTrigger"]),
-        ("l2", &["KeyH"], &["LeftTrigger2"]),
+        ("l2", &["Semicolon"], &["LeftTrigger2"]),
         ("r2", &["KeyL"], &["RightTrigger2"]),
         ("l3", &[], &["LeftThumb"]),
         ("r3", &[], &["RightThumb"]),
-        ("start", &["Enter"], &["Start"]),
+        ("start", &["KeyT"], &["Start"]),
         ("select", &["Backspace"], &["Select"]),
         // Left hand: WASD, arrows too. The game also turns these into the
         // left stick.

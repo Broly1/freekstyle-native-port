@@ -103,7 +103,13 @@ impl Vk {
         let device = unsafe {
             instance.create_device(
                 physical,
-                &vk::DeviceCreateInfo::default().queue_create_infos(&queues).enabled_extension_names(&dev_exts).push_next(&mut v13),
+                // Dual-source blending: the blend factor (alpha / 0x80) and
+                // the stored alpha byte differ.
+                &vk::DeviceCreateInfo::default()
+                    .queue_create_infos(&queues)
+                    .enabled_extension_names(&dev_exts)
+                    .enabled_features(&vk::PhysicalDeviceFeatures::default().dual_src_blend(true))
+                    .push_next(&mut v13),
                 None,
             )
         }

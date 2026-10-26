@@ -106,6 +106,10 @@ impl Renderer {
         self.hw.stats
     }
 
+    pub fn trace_in(&mut self, delay: u64) {
+        self.hw.trace_in(delay);
+    }
+
     pub fn toggle_recording(&mut self) {
         self.hw.toggle_recording();
     }

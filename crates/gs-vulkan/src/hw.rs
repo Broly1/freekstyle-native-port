@@ -52,7 +52,8 @@ struct Push {
     flags: u32,
     aref: f32,
     fix: f32,
-    _pad: f32,
+    /// Alpha bits the frame mask protects (with F_AMERGE).
+    amask: u32,
 }
 
 // Push flag bits (mirrored in gs.frag).
@@ -60,8 +61,22 @@ const F_TME: u32 = 1;
 const F_TCC: u32 = 8;
 const F_FGE: u32 = 16;
 const F_ATE: u32 = 32;
-/// Texture is a render-target snapshot: its alpha is stored as a/128.
+/// Texture is a render-target snapshot.
 const F_RTTEX: u32 = 1 << 13;
+/// Destination alpha test: draw only where the target's alpha bit (alpha
+/// >= 0x80) equals F_DATM.
+const F_DATE: u32 = 1 << 14;
+const F_DATM: u32 = 1 << 15;
+/// FBA: written alpha gets bit 7 set.
+const F_FBA: u32 = 1 << 16;
+/// Alpha bits in Push::amask (or all of them, when an RGB_ONLY alpha test
+/// fails) keep the target's value: Freekstyle writes single alpha bits.
+const F_AMERGE: u32 = 1 << 17;
+/// T8h texture on a render target: its alpha byte indexes the palette.
+const F_PAL8H: u32 = 1 << 18;
+/// Blend with destination alpha (C = 1), done in the shader; A, B and D
+/// selectors in bits 19-20, 21-22 and 23-24.
+const F_DBLEND: u32 = 1 << 25;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct PipeKey {
@@ -126,6 +141,7 @@ struct BatchKey {
     push: Push,
     scissor: vk::Rect2D,
     depth: (bool, vk::CompareOp),
+    palette: Option<u64>,
 }
 
 struct Target {
@@ -247,6 +263,9 @@ pub struct Hw {
     /// Hash of the CLUT entries a texture uses: (GS CLUT generation,
     /// offset, entries, hash), recomputed only after a CLUT load.
     clut_hash: (u64, usize, usize, u64),
+    /// Palettes for T8h reads of render targets, and the last one used.
+    palettes: HashMap<u64, Image>,
+    palette: u64,
     pictures: Option<crate::pictures::Pictures>,
     /// A wide picture fills the screen (set by drawing one, cleared by 3D
     /// or another background), so overlays follow its stretch curve.
@@ -299,7 +318,7 @@ impl Hw {
                 .map_err(e("command buffers"))?;
             let mut frames = Vec::new();
             for (n, &cmd) in cmds.iter().enumerate() {
-                let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: MAX_SETS }];
+                let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: MAX_SETS * 3 }];
                 frames.push(Frame {
                     cmd,
                     fence: dev.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None).map_err(e("fence"))?,
@@ -312,11 +331,16 @@ impl Hw {
                     garbage: Vec::new(),
                 });
             }
-            let bindings = [vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
+            // 0: the texture; 1: a snapshot of the target being drawn, read
+            // by the destination alpha test and blends; 2: a palette.
+            let binding = |n| {
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(n)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+            };
+            let bindings = [binding(0), binding(1), binding(2)];
             let set_layout = dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None).map_err(e("set layout"))?;
             let ranges = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, offset: 0, size: std::mem::size_of::<Push>() as u32 }];
             let sets = [set_layout];
@@ -347,6 +371,8 @@ impl Hw {
                 textures: FastMap::default(),
                 sharpen: cfg.sharp_textures.then(Sharpener::spawn),
                 clut_hash: (u64::MAX, 0, 0, 0),
+                palettes: HashMap::new(),
+                palette: 0,
                 pictures: cfg.pictures.as_deref().map(crate::pictures::Pictures::load),
                 on_wide_picture: false,
                 cfg,
@@ -568,12 +594,7 @@ impl Hw {
         if w == 0 || h == 0 {
             return Ok(());
         }
-        let mut px = gs::tex::decode_rect(vram, psm, bp, bw, x, y, w, h, texa);
-        for p in &mut px {
-            // Targets store alpha as a/128.
-            let a = (*p >> 24).min(128) * 255 / 128;
-            *p = (*p & 0xff_ffff) | a << 24;
-        }
+        let px = gs::tex::decode_rect(vram, psm, bp, bw, x, y, w, h, texa);
         self.end_rendering();
         let tmp = self.upload_image(w, h, &px, vk::ImageUsageFlags::TRANSFER_SRC, "target upload")?;
         let s = self.cfg.scale_x as i32;
@@ -650,6 +671,26 @@ impl Hw {
         } else {
             0
         };
+        // Freekstyle's shadows read the outline it drew into a target's
+        // alpha (T8h): look the alpha byte up in the palette on the GPU.
+        if t.psm() == Psm::T8h {
+            if let Some(k) = self.targets.get_key_value(&target_key(t.tbp0(), t.tbw())).map(|(&k, _)| k) {
+                let pk = clut ^ (gs.texa.0 * (gs.clut_psm != Psm::Ct32) as u64).rotate_left(7);
+                if !self.palettes.contains_key(&pk) {
+                    let pal: Vec<u32> = gs.clut.iter().map(|&c| if gs.clut_psm == Psm::Ct32 { c } else { gs::tex::rgba16(c, gs.texa) }).collect();
+                    if self.palettes.len() >= 64 {
+                        let old: Vec<Image> = self.palettes.drain().map(|(_, i)| i).collect();
+                        self.frames[self.slot].garbage.extend(old.into_iter().map(Garbage::Image));
+                    }
+                    self.end_rendering();
+                    let img = self.upload_image(256, 1, &pal, vk::ImageUsageFlags::SAMPLED, "palette")?;
+                    self.palettes.insert(pk, img);
+                }
+                self.palette = pk;
+                let rt = &self.targets[&k];
+                return Ok((TexRef::Target(k), [tw as f32 / rt.w as f32, th as f32 / rt.h as f32], true));
+            }
+        }
         let uses_texa = !matches!(t.psm(), Psm::Ct32 | Psm::Z32) || (indexed && gs.clut_psm != Psm::Ct32);
         let pages = Vram::pages_of(t.psm(), t.tbp0(), t.tbw(), tw, th);
         let key = TexKey {
@@ -698,18 +739,54 @@ impl Hw {
     }
 
     /// View to sample for a texture reference, snapshotting targets.
+    fn ensure_snapshot(&mut self, bp: u32) -> Result<()> {
+        if self.targets[&bp].snapshot.is_none() {
+            let (w, h) = (self.targets[&bp].color.extent.width, self.targets[&bp].color.extent.height);
+            let img = self.vk.create_image(w, h, COLOR, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST, "snapshot")?;
+            transition(&self.vk.device, self.cmd(), img.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
+            self.targets.get_mut(&bp).unwrap().snapshot = Some(img);
+        }
+        Ok(())
+    }
+
+    /// Snapshot of the target with the area a batch covers brought up to
+    /// date, for shaders that read the destination. Copying only that area
+    /// keeps the many small masked draws cheap.
+    fn snapshot_rect(&mut self, bp: u32, verts: &[GpuVertex], scissor: vk::Rect2D) -> Result<vk::ImageView> {
+        self.ensure_snapshot(bp)?;
+        let t = &self.targets[&bp];
+        if !t.snapshot_valid {
+            let (s, sy) = (self.cfg.scale_x as f32, t.sy as f32);
+            let (x0, y0, x1, y1) = verts.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |(a, b, c, d), v| (a.min(v.x), b.min(v.y), c.max(v.x), d.max(v.y)));
+            let ext = t.color.extent;
+            let x0 = ((x0 * s).floor() as i32 - 1).max(scissor.offset.x).max(0);
+            let y0 = ((y0 * sy).floor() as i32 - 1).max(scissor.offset.y).max(0);
+            let x1 = ((x1 * s).ceil() as i32 + 1).min(scissor.offset.x + scissor.extent.width as i32).min(ext.width as i32);
+            let y1 = ((y1 * sy).ceil() as i32 + 1).min(scissor.offset.y + scissor.extent.height as i32).min(ext.height as i32);
+            if x1 > x0 && y1 > y0 {
+                self.end_rendering();
+                let t = &self.targets[&bp];
+                let off = vk::Offset3D { x: x0, y: y0, z: 0 };
+                let copy = vk::ImageCopy::default()
+                    .src_subresource(layers(vk::ImageAspectFlags::COLOR))
+                    .dst_subresource(layers(vk::ImageAspectFlags::COLOR))
+                    .src_offset(off)
+                    .dst_offset(off)
+                    .extent(vk::Extent3D { width: (x1 - x0) as u32, height: (y1 - y0) as u32, depth: 1 });
+                unsafe { self.vk.device.cmd_copy_image(self.cmd(), t.color.image, vk::ImageLayout::GENERAL, t.snapshot.as_ref().unwrap().image, vk::ImageLayout::GENERAL, &[copy]) };
+                barrier(&self.vk.device, self.cmd());
+            }
+        }
+        Ok(self.targets[&bp].snapshot.as_ref().unwrap().view)
+    }
+
     fn texture_view(&mut self, r: TexRef) -> Result<vk::ImageView> {
         match r {
             TexRef::None => Ok(self.white.view),
             TexRef::Cache(k) => Ok(self.textures[&k].image.view),
             TexRef::Target(bp) => {
                 if !self.targets[&bp].snapshot_valid {
-                    if self.targets[&bp].snapshot.is_none() {
-                        let (w, h) = (self.targets[&bp].color.extent.width, self.targets[&bp].color.extent.height);
-                        let img = self.vk.create_image(w, h, COLOR, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST, "snapshot")?;
-                        transition(&self.vk.device, self.cmd(), img.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
-                        self.targets.get_mut(&bp).unwrap().snapshot = Some(img);
-                    }
+                    self.ensure_snapshot(bp)?;
                     // Copying needs to happen outside rendering; the caller
                     // flushed the batch already.
                     let was = self.rendering;
@@ -841,6 +918,10 @@ impl Hw {
                 self.white.view
             }
         };
+        // The destination alpha test and masked alpha writes read the
+        // target as it was before this batch.
+        let dst = if k.push.flags & (F_DATE | F_AMERGE | F_DBLEND) != 0 { self.snapshot_rect(k.target, &verts, k.scissor).unwrap_or(self.white.view) } else { self.white.view };
+        let pal = k.palette.and_then(|p| self.palettes.get(&p)).map_or(self.white.view, |i| i.view);
         self.begin_rendering(k.target);
         let pipeline = self.pipeline(k.pipe);
         let sampler = self.sampler(k.sampler);
@@ -853,8 +934,14 @@ impl Hw {
                 return;
             };
             let img = [vk::DescriptorImageInfo { sampler, image_view: view, image_layout: vk::ImageLayout::GENERAL }];
-            let write = vk::WriteDescriptorSet::default().dst_set(sets[0]).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&img);
-            dev.update_descriptor_sets(&[write], &[]);
+            let dst_img = [vk::DescriptorImageInfo { sampler, image_view: dst, image_layout: vk::ImageLayout::GENERAL }];
+            let pal_img = [vk::DescriptorImageInfo { sampler, image_view: pal, image_layout: vk::ImageLayout::GENERAL }];
+            let writes = [
+                vk::WriteDescriptorSet::default().dst_set(sets[0]).dst_binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&img),
+                vk::WriteDescriptorSet::default().dst_set(sets[0]).dst_binding(1).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&dst_img),
+                vk::WriteDescriptorSet::default().dst_set(sets[0]).dst_binding(2).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&pal_img),
+            ];
+            dev.update_descriptor_sets(&writes, &[]);
             let t = &self.targets[&k.target];
             let s = self.cfg.scale_x as f32;
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
@@ -888,10 +975,10 @@ impl Hw {
         if self.trace_frame.is_some_and(|f| self.vblank >= f) {
             let (f, z, t) = (ctx.frame, ctx.zbuf, ctx.test);
             eprintln!(
-                "[draw] {shape:?} v0=({:.1},{:.1},z={:#x}) v1=({:.1},{:.1}) rgba={:?} tme={} psm={:?} tbp={:#x} fb={:#x}/{:?} mask={:#x} zb={:#x}/{:?} zmsk={} zte={} ztst={} ate={} atst={} aref={} afail={} date={} abe={} alpha={:?} sc={:?} prim={:#x}",
-                v[0].x, v[0].y, v[0].z, v.get(1).map_or(0.0, |x| x.x), v.get(1).map_or(0.0, |x| x.y), v[0].rgba,
+                "[draw] {shape:?} v0=({:.1},{:.1},z={:#x}) v1=({:.1},{:.1}) rgba={:?}/{:?} tme={} psm={:?} tbp={:#x} fb={:#x}/{:?} mask={:#x} zb={:#x}/{:?} zmsk={} zte={} ztst={} ate={} atst={} aref={} afail={} date={} datm={} fba={} abe={} alpha={:?} sc={:?} prim={:#x}",
+                v[0].x, v[0].y, v[0].z, v.get(1).map_or(0.0, |x| x.x), v.get(1).map_or(0.0, |x| x.y), v[0].rgba, v.last().map_or([0; 4], |x| x.rgba),
                 attrs.textured(), ctx.tex0.psm(), ctx.tex0.tbp0(), f.bp(), f.psm(), f.mask(), z.bp(), z.psm(), z.masked(),
-                t.zte(), t.ztst(), t.alpha_test(), t.atst(), t.aref(), t.afail(), t.date(), attrs.blend(), ctx.alpha.abcd(), ctx.scissor.rect(), attrs.0
+                t.zte(), t.ztst(), t.alpha_test(), t.atst(), t.aref(), t.afail(), t.date(), t.datm(), ctx.fba, attrs.blend(), ctx.alpha.abcd(), ctx.scissor.rect(), attrs.0
             );
         }
         let (fb, zb, test) = (ctx.frame, ctx.zbuf, ctx.test);
@@ -909,7 +996,11 @@ impl Hw {
         // Texture first: it may need transfers outside rendering.
         let (tex, tex_scale, rt_tex) = if attrs.textured() { self.texture(gs, shape == Shape::Sprite)? } else { (TexRef::None, [1.0, 1.0], false) };
 
-        let blend = if attrs.blend() { blend::map(ctx.alpha.abcd()) } else { Blend::OFF };
+        let (ba, bb, bc, bd) = ctx.alpha.abcd();
+        // Destination alpha as the factor goes through the shader: targets
+        // keep the alpha byte, the factor is byte / 0x80.
+        let dst_blend = attrs.blend() && bc == 1;
+        let blend = if attrs.blend() && !dst_blend { blend::map(ctx.alpha.abcd()) } else { Blend::OFF };
         let fm = fb.mask();
         let mut write_mask = 0;
         for (n, bit) in [vk::ColorComponentFlags::R, vk::ColorComponentFlags::G, vk::ColorComponentFlags::B, vk::ColorComponentFlags::A].iter().enumerate() {
@@ -937,6 +1028,26 @@ impl Hw {
         if test.alpha_test() {
             flags |= F_ATE | test.atst() << 6 | test.afail() << 9;
         }
+        // 24-bit targets have no alpha to test.
+        if test.date() && fb.psm() != Psm::Ct24 {
+            flags |= F_DATE | if test.datm() { F_DATM } else { 0 };
+        }
+        let amask = (fm >> 24) & 0xff;
+        if write_mask & vk::ColorComponentFlags::A.as_raw() != 0 {
+            if ctx.fba {
+                flags |= F_FBA;
+            }
+            if amask != 0 || (test.alpha_test() && test.afail() == 3) {
+                flags |= F_AMERGE;
+            }
+        }
+        if dst_blend {
+            flags |= F_DBLEND | ba << 19 | bb << 21 | bd << 23;
+        }
+        let palette = (rt_tex && tex0.psm() == Psm::T8h).then_some(self.palette);
+        if palette.is_some() {
+            flags |= F_PAL8H;
+        }
         flags |= blend.shader_scale << 11;
         let fogcol = gs.fogcol;
         let t = &self.targets[&bp];
@@ -947,7 +1058,7 @@ impl Hw {
             flags,
             aref: test.aref() as f32,
             fix: ctx.alpha.fix() as f32 / 128.0,
-            _pad: 0.0,
+            amask,
         };
         let s = self.cfg.scale_x;
         let scissor = vk::Rect2D {
@@ -974,6 +1085,7 @@ impl Hw {
             push,
             scissor,
             depth: (!zb.masked(), ztst),
+            palette,
         };
         if self.batch != Some(key) {
             self.flush();
@@ -1262,6 +1374,14 @@ impl Hw {
             }
             eprintln!("[capture] recording stopped at vblank {}", self.vblank);
         }
+    }
+
+    /// Log every draw of four frames starting `delay` vblanks from now (for
+    /// glitches seen while playing).
+    pub fn trace_in(&mut self, delay: u64) {
+        eprintln!("[draw] --- trace requested at vblank {} for vblank {} ---", self.vblank, self.vblank + delay);
+        self.trace_frame = Some(self.vblank + delay);
+        self.trace_left = 4;
     }
 
     /// F12: start recording to `captures/`, or stop. For glitches seen

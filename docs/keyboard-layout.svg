@@ -71,11 +71,11 @@
 <text x="294.0" y="288" font-size="15" fill="#7d8496">E</text>
 <rect x="355.0" y="264" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
 <text x="364.0" y="288" font-size="15" fill="#7d8496">R</text>
-<rect x="425.0" y="264" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
-<text x="434.0" y="288" font-size="15" fill="#7d8496">T</text>
-<rect x="495.0" y="264" width="64" height="64" rx="9" fill="#7b5cc4" stroke="#ffffff33" stroke-width="1.5"/>
-<text x="504.0" y="289" font-size="20" font-weight="700" fill="#ffffff">Y</text>
-<text x="527.0" y="318" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">LB  L1</text>
+<rect x="425.0" y="264" width="64" height="64" rx="9" fill="#4a5568" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="434.0" y="289" font-size="20" font-weight="700" fill="#ffffff">T</text>
+<text x="457.0" y="318" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">Pause</text>
+<rect x="495.0" y="264" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="504.0" y="288" font-size="15" fill="#7d8496">Y</text>
 <rect x="565.0" y="264" width="64" height="64" rx="9" fill="#2f6fd1" stroke="#ffffff33" stroke-width="1.5"/>
 <text x="574.0" y="289" font-size="20" font-weight="700" fill="#ffffff">U</text>
 <text x="597.0" y="318" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">X  Square</text>
@@ -85,8 +85,9 @@
 <rect x="705.0" y="264" width="64" height="64" rx="9" fill="#7b5cc4" stroke="#ffffff33" stroke-width="1.5"/>
 <text x="714.0" y="289" font-size="20" font-weight="700" fill="#ffffff">O</text>
 <text x="737.0" y="318" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">RB  R1</text>
-<rect x="775.0" y="264" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
-<text x="784.0" y="288" font-size="15" fill="#7d8496">P</text>
+<rect x="775.0" y="264" width="64" height="64" rx="9" fill="#7b5cc4" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="784.0" y="289" font-size="20" font-weight="700" fill="#ffffff">P</text>
+<text x="807.0" y="318" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">LB  L1</text>
 <rect x="845.0" y="264" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
 <text x="854.0" y="288" font-size="15" fill="#7d8496">[</text>
 <rect x="915.0" y="264" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
@@ -108,9 +109,8 @@
 <text x="381.5" y="358" font-size="15" fill="#7d8496">F</text>
 <rect x="442.5" y="334" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
 <text x="451.5" y="358" font-size="15" fill="#7d8496">G</text>
-<rect x="512.5" y="334" width="64" height="64" rx="9" fill="#7b5cc4" stroke="#ffffff33" stroke-width="1.5"/>
-<text x="521.5" y="359" font-size="20" font-weight="700" fill="#ffffff">H</text>
-<text x="544.5" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">LT  L2</text>
+<rect x="512.5" y="334" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="521.5" y="358" font-size="15" fill="#7d8496">H</text>
 <rect x="582.5" y="334" width="64" height="64" rx="9" fill="#3fa34d" stroke="#ffffff33" stroke-width="1.5"/>
 <text x="591.5" y="359" font-size="20" font-weight="700" fill="#ffffff">J</text>
 <text x="614.5" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">A  Cross</text>
@@ -120,13 +120,14 @@
 <rect x="722.5" y="334" width="64" height="64" rx="9" fill="#7b5cc4" stroke="#ffffff33" stroke-width="1.5"/>
 <text x="731.5" y="359" font-size="20" font-weight="700" fill="#ffffff">L</text>
 <text x="754.5" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">RT  R2</text>
-<rect x="792.5" y="334" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
-<text x="801.5" y="358" font-size="15" fill="#7d8496">;</text>
+<rect x="792.5" y="334" width="64" height="64" rx="9" fill="#7b5cc4" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="801.5" y="359" font-size="20" font-weight="700" fill="#ffffff">;</text>
+<text x="824.5" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">LT  L2</text>
 <rect x="862.5" y="334" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
 <text x="871.5" y="358" font-size="15" fill="#7d8496">'</text>
-<rect x="932.5" y="334" width="151.5" height="64" rx="9" fill="#4a5568" stroke="#ffffff33" stroke-width="1.5"/>
+<rect x="932.5" y="334" width="151.5" height="64" rx="9" fill="#3fa34d" stroke="#ffffff33" stroke-width="1.5"/>
 <text x="941.5" y="359" font-size="20" font-weight="700" fill="#ffffff">Enter</text>
-<text x="1008.25" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">Start</text>
+<text x="1008.25" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">A  Select</text>
 <rect x="40" y="404" width="151.5" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
 <text x="49" y="428" font-size="15" fill="#7d8496">Shift</text>
 <rect x="197.5" y="404" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
@@ -183,7 +184,7 @@
 <rect x="40" y="584" width="22" height="22" rx="5" fill="#e07a2d"/>
 <text x="72" y="601" font-size="16" fill="#d7dbe4">Movement: D-pad and left stick</text>
 <rect x="340" y="584" width="22" height="22" rx="5" fill="#3fa34d"/>
-<text x="372" y="601" font-size="16" fill="#d7dbe4">A / Cross</text>
+<text x="372" y="601" font-size="16" fill="#d7dbe4">A / Cross: select</text>
 <rect x="640" y="584" width="22" height="22" rx="5" fill="#d64541"/>
 <text x="672" y="601" font-size="16" fill="#d7dbe4">B / Circle</text>
 <rect x="940" y="584" width="22" height="22" rx="5" fill="#2f6fd1"/>
@@ -193,7 +194,7 @@
 <rect x="340" y="620" width="22" height="22" rx="5" fill="#7b5cc4"/>
 <text x="372" y="637" font-size="16" fill="#d7dbe4">Shoulders and triggers</text>
 <rect x="640" y="620" width="22" height="22" rx="5" fill="#4a5568"/>
-<text x="672" y="637" font-size="16" fill="#d7dbe4">Start / Back</text>
+<text x="672" y="637" font-size="16" fill="#d7dbe4">Start (pause) / Back</text>
 <rect x="940" y="620" width="22" height="22" rx="5" fill="#2c7a7b"/>
 <text x="972" y="637" font-size="16" fill="#d7dbe4">Window</text>
 </svg>

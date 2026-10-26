@@ -62,7 +62,8 @@ pub fn map(abcd: (u32, u32, u32, u32)) -> Blend {
     let src = coef(a == CS, b == CS, d == CS);
     let dst = coef(a == CD, b == CD, d == CD);
     let (fc, fc1) = match c {
-        0 => (vk::BlendFactor::SRC_ALPHA, vk::BlendFactor::ONE_MINUS_SRC_ALPHA),
+        // The shader's second output carries As / 0x80.
+        0 => (vk::BlendFactor::SRC1_ALPHA, vk::BlendFactor::ONE_MINUS_SRC1_ALPHA),
         1 => (vk::BlendFactor::DST_ALPHA, vk::BlendFactor::ONE_MINUS_DST_ALPHA),
         _ => (vk::BlendFactor::CONSTANT_ALPHA, vk::BlendFactor::ONE_MINUS_CONSTANT_ALPHA),
     };
@@ -107,10 +108,10 @@ mod tests {
     fn common_modes() {
         // (Cs - Cd) * As + Cd: standard alpha blending.
         let b = map((0, 1, 0, 1));
-        assert_eq!((b.op, b.src, b.dst), (vk::BlendOp::ADD, F::SRC_ALPHA, F::ONE_MINUS_SRC_ALPHA));
+        assert_eq!((b.op, b.src, b.dst), (vk::BlendOp::ADD, F::SRC1_ALPHA, F::ONE_MINUS_SRC1_ALPHA));
         // (Cs - 0) * As + Cd: additive.
         let b = map((0, 2, 0, 1));
-        assert_eq!((b.op, b.src, b.dst), (vk::BlendOp::ADD, F::SRC_ALPHA, F::ONE));
+        assert_eq!((b.op, b.src, b.dst), (vk::BlendOp::ADD, F::SRC1_ALPHA, F::ONE));
         // (0 - Cs) * FIX + Cd: subtractive with a constant.
         let b = map((2, 0, 2, 1));
         assert_eq!((b.op, b.src, b.dst), (vk::BlendOp::REVERSE_SUBTRACT, F::CONSTANT_ALPHA, F::ONE));

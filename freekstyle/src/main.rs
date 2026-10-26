@@ -24,8 +24,8 @@
 //!
 //! Controls: any gamepad (Xbox layout: A/B/X/Y = Cross/Circle/Square/
 //! Triangle by position), or the keyboard: WASD/arrows = D-pad and left
-//! stick, J/Space = A, K = B, U = X, I = Y, Y/O = LB/RB, H/L = LT/RT,
-//! Enter = Start, Backspace = Back; both remappable in freekstyle.toml. F11 toggles
+//! stick, J/Space/Enter = A, K = B, U = X, I = Y, P/O = LB/RB, ;/L =
+//! LT/RT, T = Start, Backspace = Back; both remappable in freekstyle.toml. F11 toggles
 //! fullscreen, F12 captures a frame, Esc quits.
 //!
 //! The disc image (raw .bin or .iso) defaults to game/Freekstyle.bin.
@@ -206,7 +206,7 @@ fn main() {
         }
     }
     let (key_map, pad_map) = input_maps(&opts.bindings);
-    let mut app = App { opts, rx: gs_rx, window: None, renderer: None, last_title: Instant::now(), last_frame: 0, gilrs, keys: Vec::new(), key_map, pad_map };
+    let mut app = App { opts, rx: gs_rx, window: None, renderer: None, last_title: Instant::now(), last_frame: 0, gilrs, keys: Vec::new(), last_buttons: 0, traces: 0, key_map, pad_map };
     profile::start_if_requested("FREEK_PROFILE_GS", "profile_gs.txt");
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("event loop: {e}");
@@ -224,6 +224,8 @@ struct App {
     gilrs: Option<Gilrs>,
     /// Mapped keys held down; several keys can share a button.
     keys: Vec<KeyCode>,
+    last_buttons: u16,
+    traces: u32,
     /// Bound keys (winit KeyCode names) and gamepad buttons, with the PS2
     /// buttons each one presses.
     key_map: HashMap<String, u16>,
@@ -336,6 +338,18 @@ impl App {
         let merge = |pad: u8, key: u8| if (key as i32 - 128).abs() > (pad as i32 - 128).abs() { key } else { pad };
         input.sticks[2] = merge(input.sticks[2], dir(button::LEFT, button::RIGHT));
         input.sticks[3] = merge(input.sticks[3], dir(button::UP, button::DOWN));
+        // FREEK_TRACE_BUTTON=<mask>: trace the frames just after that pad
+        // button is pressed (effects too quick to catch with F10), up to
+        // five times.
+        if let Some(mask) = std::env::var("FREEK_TRACE_BUTTON").ok().and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok()) {
+            if input.buttons & mask != 0 && self.last_buttons & mask == 0 && self.traces < 5 {
+                if let Some(r) = &mut self.renderer {
+                    self.traces += 1;
+                    r.trace_in(15);
+                }
+            }
+        }
+        self.last_buttons = input.buttons;
         ee_runtime::pad::set_input(input);
     }
 }
