@@ -1,0 +1,199 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1375" height="694" font-family="Noto Sans, DejaVu Sans, sans-serif">
+<rect width="1375" height="694" fill="#14161c"/>
+<text x="40" y="58" font-size="30" font-weight="800" fill="#ffffff">Freekstyle: keyboard controls</text>
+<text x="40" y="86" font-size="16" fill="#9aa1b2">Default layout. Keyboard and controller work together; remap in the launcher's Controls tab.</text>
+<rect x="40" y="110" width="64" height="64" rx="9" fill="#2c7a7b" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="49" y="135" font-size="20" font-weight="700" fill="#ffffff">Esc</text>
+<text x="72.0" y="164" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">Quit</text>
+<rect x="145.0" y="110" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="154.0" y="134" font-size="15" fill="#7d8496">F1</text>
+<rect x="215.0" y="110" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="224.0" y="134" font-size="15" fill="#7d8496">F2</text>
+<rect x="285.0" y="110" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="294.0" y="134" font-size="15" fill="#7d8496">F3</text>
+<rect x="355.0" y="110" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="364.0" y="134" font-size="15" fill="#7d8496">F4</text>
+<rect x="442.5" y="110" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="451.5" y="134" font-size="15" fill="#7d8496">F5</text>
+<rect x="512.5" y="110" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="521.5" y="134" font-size="15" fill="#7d8496">F6</text>
+<rect x="582.5" y="110" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="591.5" y="134" font-size="15" fill="#7d8496">F7</text>
+<rect x="652.5" y="110" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="661.5" y="134" font-size="15" fill="#7d8496">F8</text>
+<rect x="740.0" y="110" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="749.0" y="134" font-size="15" fill="#7d8496">F9</text>
+<rect x="810.0" y="110" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="819.0" y="134" font-size="15" fill="#7d8496">F10</text>
+<rect x="880.0" y="110" width="64" height="64" rx="9" fill="#2c7a7b" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="889.0" y="135" font-size="20" font-weight="700" fill="#ffffff">F11</text>
+<text x="912.0" y="164" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">Fullscreen</text>
+<rect x="950.0" y="110" width="64" height="64" rx="9" fill="#2c7a7b" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="959.0" y="135" font-size="20" font-weight="700" fill="#ffffff">F12</text>
+<text x="982.0" y="164" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">Record</text>
+<rect x="40" y="194" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="49" y="218" font-size="15" fill="#7d8496">`</text>
+<rect x="110" y="194" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="119" y="218" font-size="15" fill="#7d8496">1</text>
+<rect x="180" y="194" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="189" y="218" font-size="15" fill="#7d8496">2</text>
+<rect x="250" y="194" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="259" y="218" font-size="15" fill="#7d8496">3</text>
+<rect x="320" y="194" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="329" y="218" font-size="15" fill="#7d8496">4</text>
+<rect x="390" y="194" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="399" y="218" font-size="15" fill="#7d8496">5</text>
+<rect x="460" y="194" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="469" y="218" font-size="15" fill="#7d8496">6</text>
+<rect x="530" y="194" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="539" y="218" font-size="15" fill="#7d8496">7</text>
+<rect x="600" y="194" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="609" y="218" font-size="15" fill="#7d8496">8</text>
+<rect x="670" y="194" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="679" y="218" font-size="15" fill="#7d8496">9</text>
+<rect x="740" y="194" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="749" y="218" font-size="15" fill="#7d8496">0</text>
+<rect x="810" y="194" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="819" y="218" font-size="15" fill="#7d8496">-</text>
+<rect x="880" y="194" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="889" y="218" font-size="15" fill="#7d8496">=</text>
+<rect x="950" y="194" width="134" height="64" rx="9" fill="#4a5568" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="959" y="219" font-size="20" font-weight="700" fill="#ffffff">Backspace</text>
+<text x="1017.0" y="248" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">Back  Select</text>
+<rect x="40" y="264" width="99.0" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="49" y="288" font-size="15" fill="#7d8496">Tab</text>
+<rect x="145.0" y="264" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="154.0" y="288" font-size="15" fill="#7d8496">Q</text>
+<rect x="215.0" y="264" width="64" height="64" rx="9" fill="#e07a2d" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="224.0" y="289" font-size="20" font-weight="700" fill="#ffffff">W</text>
+<text x="247.0" y="318" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">D-pad ↑</text>
+<rect x="285.0" y="264" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="294.0" y="288" font-size="15" fill="#7d8496">E</text>
+<rect x="355.0" y="264" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="364.0" y="288" font-size="15" fill="#7d8496">R</text>
+<rect x="425.0" y="264" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="434.0" y="288" font-size="15" fill="#7d8496">T</text>
+<rect x="495.0" y="264" width="64" height="64" rx="9" fill="#7b5cc4" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="504.0" y="289" font-size="20" font-weight="700" fill="#ffffff">Y</text>
+<text x="527.0" y="318" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">LB  L1</text>
+<rect x="565.0" y="264" width="64" height="64" rx="9" fill="#2f6fd1" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="574.0" y="289" font-size="20" font-weight="700" fill="#ffffff">U</text>
+<text x="597.0" y="318" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">X  Square</text>
+<rect x="635.0" y="264" width="64" height="64" rx="9" fill="#d9a521" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="644.0" y="289" font-size="20" font-weight="700" fill="#ffffff">I</text>
+<text x="667.0" y="318" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">Y  Triangle</text>
+<rect x="705.0" y="264" width="64" height="64" rx="9" fill="#7b5cc4" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="714.0" y="289" font-size="20" font-weight="700" fill="#ffffff">O</text>
+<text x="737.0" y="318" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">RB  R1</text>
+<rect x="775.0" y="264" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="784.0" y="288" font-size="15" fill="#7d8496">P</text>
+<rect x="845.0" y="264" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="854.0" y="288" font-size="15" fill="#7d8496">[</text>
+<rect x="915.0" y="264" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="924.0" y="288" font-size="15" fill="#7d8496">]</text>
+<rect x="985.0" y="264" width="99.0" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="994.0" y="288" font-size="15" fill="#7d8496">\</text>
+<rect x="40" y="334" width="116.5" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="49" y="358" font-size="15" fill="#7d8496">Caps</text>
+<rect x="162.5" y="334" width="64" height="64" rx="9" fill="#e07a2d" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="171.5" y="359" font-size="20" font-weight="700" fill="#ffffff">A</text>
+<text x="194.5" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">D-pad ←</text>
+<rect x="232.5" y="334" width="64" height="64" rx="9" fill="#e07a2d" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="241.5" y="359" font-size="20" font-weight="700" fill="#ffffff">S</text>
+<text x="264.5" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">D-pad ↓</text>
+<rect x="302.5" y="334" width="64" height="64" rx="9" fill="#e07a2d" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="311.5" y="359" font-size="20" font-weight="700" fill="#ffffff">D</text>
+<text x="334.5" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">D-pad →</text>
+<rect x="372.5" y="334" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="381.5" y="358" font-size="15" fill="#7d8496">F</text>
+<rect x="442.5" y="334" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="451.5" y="358" font-size="15" fill="#7d8496">G</text>
+<rect x="512.5" y="334" width="64" height="64" rx="9" fill="#7b5cc4" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="521.5" y="359" font-size="20" font-weight="700" fill="#ffffff">H</text>
+<text x="544.5" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">LT  L2</text>
+<rect x="582.5" y="334" width="64" height="64" rx="9" fill="#3fa34d" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="591.5" y="359" font-size="20" font-weight="700" fill="#ffffff">J</text>
+<text x="614.5" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">A  Cross</text>
+<rect x="652.5" y="334" width="64" height="64" rx="9" fill="#d64541" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="661.5" y="359" font-size="20" font-weight="700" fill="#ffffff">K</text>
+<text x="684.5" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">B  Circle</text>
+<rect x="722.5" y="334" width="64" height="64" rx="9" fill="#7b5cc4" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="731.5" y="359" font-size="20" font-weight="700" fill="#ffffff">L</text>
+<text x="754.5" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">RT  R2</text>
+<rect x="792.5" y="334" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="801.5" y="358" font-size="15" fill="#7d8496">;</text>
+<rect x="862.5" y="334" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="871.5" y="358" font-size="15" fill="#7d8496">'</text>
+<rect x="932.5" y="334" width="151.5" height="64" rx="9" fill="#4a5568" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="941.5" y="359" font-size="20" font-weight="700" fill="#ffffff">Enter</text>
+<text x="1008.25" y="388" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">Start</text>
+<rect x="40" y="404" width="151.5" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="49" y="428" font-size="15" fill="#7d8496">Shift</text>
+<rect x="197.5" y="404" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="206.5" y="428" font-size="15" fill="#7d8496">Z</text>
+<rect x="267.5" y="404" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="276.5" y="428" font-size="15" fill="#7d8496">X</text>
+<rect x="337.5" y="404" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="346.5" y="428" font-size="15" fill="#7d8496">C</text>
+<rect x="407.5" y="404" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="416.5" y="428" font-size="15" fill="#7d8496">V</text>
+<rect x="477.5" y="404" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="486.5" y="428" font-size="15" fill="#7d8496">B</text>
+<rect x="547.5" y="404" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="556.5" y="428" font-size="15" fill="#7d8496">N</text>
+<rect x="617.5" y="404" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="626.5" y="428" font-size="15" fill="#7d8496">M</text>
+<rect x="687.5" y="404" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="696.5" y="428" font-size="15" fill="#7d8496">,</text>
+<rect x="757.5" y="404" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="766.5" y="428" font-size="15" fill="#7d8496">.</text>
+<rect x="827.5" y="404" width="64" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="836.5" y="428" font-size="15" fill="#7d8496">/</text>
+<rect x="897.5" y="404" width="186.5" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="906.5" y="428" font-size="15" fill="#7d8496">Shift</text>
+<rect x="40" y="474" width="81.5" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="49" y="498" font-size="15" fill="#7d8496">Ctrl</text>
+<rect x="127.5" y="474" width="81.5" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="136.5" y="498" font-size="15" fill="#7d8496">Super</text>
+<rect x="215.0" y="474" width="81.5" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="224.0" y="498" font-size="15" fill="#7d8496">Alt</text>
+<rect x="302.5" y="474" width="431.5" height="64" rx="9" fill="#3fa34d" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="311.5" y="499" font-size="20" font-weight="700" fill="#ffffff">Space</text>
+<text x="518.25" y="528" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">A  Cross</text>
+<rect x="740.0" y="474" width="81.5" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="749.0" y="498" font-size="15" fill="#7d8496">Alt</text>
+<rect x="827.5" y="474" width="81.5" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="836.5" y="498" font-size="15" fill="#7d8496">Super</text>
+<rect x="915.0" y="474" width="81.5" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="924.0" y="498" font-size="15" fill="#7d8496">Menu</text>
+<rect x="1002.5" y="474" width="81.5" height="64" rx="9" fill="#2a2d36" stroke="#3a3e4a" stroke-width="1.5"/>
+<text x="1011.5" y="498" font-size="15" fill="#7d8496">Ctrl</text>
+<rect x="1195.0" y="404" width="64" height="64" rx="9" fill="#e07a2d" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="1204.0" y="429" font-size="20" font-weight="700" fill="#ffffff">↑</text>
+<text x="1227.0" y="458" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">D-pad ↑</text>
+<rect x="1125.0" y="474" width="64" height="64" rx="9" fill="#e07a2d" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="1134.0" y="499" font-size="20" font-weight="700" fill="#ffffff">←</text>
+<text x="1157.0" y="528" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">D-pad ←</text>
+<rect x="1195.0" y="474" width="64" height="64" rx="9" fill="#e07a2d" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="1204.0" y="499" font-size="20" font-weight="700" fill="#ffffff">↓</text>
+<text x="1227.0" y="528" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">D-pad ↓</text>
+<rect x="1265.0" y="474" width="64" height="64" rx="9" fill="#e07a2d" stroke="#ffffff33" stroke-width="1.5"/>
+<text x="1274.0" y="499" font-size="20" font-weight="700" fill="#ffffff">→</text>
+<text x="1297.0" y="528" font-size="12.5" font-weight="600" fill="#ffffffdd" text-anchor="middle">D-pad →</text>
+<rect x="40" y="584" width="22" height="22" rx="5" fill="#e07a2d"/>
+<text x="72" y="601" font-size="16" fill="#d7dbe4">Movement: D-pad and left stick</text>
+<rect x="340" y="584" width="22" height="22" rx="5" fill="#3fa34d"/>
+<text x="372" y="601" font-size="16" fill="#d7dbe4">A / Cross</text>
+<rect x="640" y="584" width="22" height="22" rx="5" fill="#d64541"/>
+<text x="672" y="601" font-size="16" fill="#d7dbe4">B / Circle</text>
+<rect x="940" y="584" width="22" height="22" rx="5" fill="#2f6fd1"/>
+<text x="972" y="601" font-size="16" fill="#d7dbe4">X / Square</text>
+<rect x="40" y="620" width="22" height="22" rx="5" fill="#d9a521"/>
+<text x="72" y="637" font-size="16" fill="#d7dbe4">Y / Triangle</text>
+<rect x="340" y="620" width="22" height="22" rx="5" fill="#7b5cc4"/>
+<text x="372" y="637" font-size="16" fill="#d7dbe4">Shoulders and triggers</text>
+<rect x="640" y="620" width="22" height="22" rx="5" fill="#4a5568"/>
+<text x="672" y="637" font-size="16" fill="#d7dbe4">Start / Back</text>
+<rect x="940" y="620" width="22" height="22" rx="5" fill="#2c7a7b"/>
+<text x="972" y="637" font-size="16" fill="#d7dbe4">Window</text>
+</svg>
