@@ -20,6 +20,8 @@ pub mod pad;
 pub mod text;
 pub mod vu;
 pub mod vumicro;
+#[cfg(target_arch = "x86_64")]
+pub mod vux;
 
 pub use cpu::{Cpu, Func};
 

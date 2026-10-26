@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff5a3c"/><stop offset="0.5" stop-color="#ec2a1f"/><stop offset="1" stop-color="#9d0c0c"/>
+    </linearGradient>
+    <radialGradient id="field" cx="0.5" cy="0.4" r="0.6">
+      <stop offset="0" stop-color="#8a1018"/><stop offset="1" stop-color="#4f0710"/>
+    </radialGradient>
+  </defs>
+  <g transform="translate(256 256) scale(1.12) translate(-256 -270)">
+    <circle cx="256" cy="270" r="214" fill="url(#rim)" stroke="#4f0710" stroke-width="12"/>
+    <circle cx="256" cy="270" r="184" fill="#fff6ee"/>
+    <circle cx="256" cy="270" r="166" fill="url(#field)"/>
+    <!-- face -->
+    <path d="M256 140 C340 140 382 200 382 268 C382 346 324 398 256 398 C188 398 130 346 130 268 C130 200 172 140 256 140 Z" fill="#fff6ee"/>
+    <!-- brows and slanted eyes -->
+    <path d="M154 214 L238 252 L232 268 L150 234 Z" fill="#4f0710"/>
+    <path d="M358 214 L274 252 L280 268 L362 234 Z" fill="#4f0710"/>
+    <path d="M168 250 C190 246 222 262 236 280 C212 296 182 292 166 270 Z" fill="#9d0c0c"/>
+    <path d="M344 250 C322 246 290 262 276 280 C300 296 330 292 346 270 Z" fill="#9d0c0c"/>
+    <circle cx="214" cy="274" r="9" fill="#fff6ee"/>
+    <circle cx="298" cy="274" r="9" fill="#fff6ee"/>
+    <!-- grin with zigzag teeth -->
+    <path d="M168 312 C210 342 302 342 344 312 C334 364 298 386 256 386 C214 386 178 364 168 312 Z" fill="#4f0710"/>
+    <path d="M178 320 L196 346 L212 330 L230 352 L246 334 L256 356 L266 334 L282 352 L300 330 L316 346 L334 320 C300 338 212 338 178 320 Z" fill="#fff6ee"/>
+    <!-- gloss -->
+    <path d="M110 210 C150 110 290 70 390 140 C300 108 190 130 128 222 Z" fill="#ffffff" opacity="0.28"/>
+  </g>
+</svg>

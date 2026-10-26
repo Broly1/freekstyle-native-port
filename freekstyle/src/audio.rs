@@ -44,6 +44,10 @@ fn open(ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
     let mut config: cpal::StreamConfig = supported.with_sample_rate(rate).into();
     config.buffer_size = cpal::BufferSize::Fixed(period);
     let mut last = [0f32; 2];
+    // FREEK_HEARTBEAT: report missing samples (heard as crackle) each second.
+    let report = std::env::var_os("FREEK_HEARTBEAT").is_some();
+    let (mut missing, mut since) = (0usize, Instant::now());
+    let (mut last_call, mut worst_gap) = (Instant::now(), Duration::ZERO);
     let stream = device
         .build_output_stream(
             &config,
@@ -56,8 +60,20 @@ fn open(ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
                     // On underrun, hold the last sample rather than click.
                     if let Some([l, r]) = q.pop_front() {
                         last = [l as f32 / 32768.0, r as f32 / 32768.0];
+                    } else {
+                        missing += 1;
                     }
                     frame.copy_from_slice(&last);
+                }
+                if report {
+                    worst_gap = worst_gap.max(last_call.elapsed());
+                    last_call = Instant::now();
+                    if since.elapsed() >= Duration::from_secs(1) {
+                        // A long gap between callbacks means the device
+                        // itself ran dry (heard as a click), not our queue.
+                        eprintln!("[audio] last second: {missing} samples missing, longest callback gap {:.1} ms, {} frames per callback", worst_gap.as_secs_f64() * 1e3, out.len() / 2);
+                        (missing, since, worst_gap) = (0, Instant::now(), Duration::ZERO);
+                    }
                 }
             },
             |e| eprintln!("[audio] {e}"),

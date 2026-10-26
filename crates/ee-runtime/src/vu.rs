@@ -6,6 +6,7 @@ use crate::fpu::{fdiv, ps2f};
 
 pub type V4 = [f32; 4];
 
+#[derive(Clone)]
 pub struct Vu0 {
     pub vf: [V4; 32],
     pub vi: [u16; 16],

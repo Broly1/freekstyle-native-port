@@ -14,6 +14,7 @@
 
 mod emit;
 mod vu;
+mod vuc;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;

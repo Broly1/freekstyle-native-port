@@ -87,12 +87,15 @@ pub fn vif(m: &mut Memory, d: &DmaStart) {
     let mut words = Vec::new();
     gather(m, d, &mut |m, c| match c {
         Chunk::TagWords(w) => words.extend_from_slice(&w),
-        Chunk::Data(src, qwc) => {
-            for q in 0..qwc {
-                let v = m.r128(src + q * 16);
-                words.extend((0..4).map(|n| (v >> (32 * n)) as u32));
+        Chunk::Data(src, qwc) => match m.backing(src, qwc as usize * 16) {
+            Some(b) => words.extend(b.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap()))),
+            None => {
+                for q in 0..qwc {
+                    let v = m.r128(src + q * 16);
+                    words.extend((0..4).map(|n| (v >> (32 * n)) as u32));
+                }
             }
-        }
+        },
     });
     let mut vif = std::mem::take(&mut m.vif[unit]);
     vif.run(m, unit, &words);
@@ -130,6 +133,9 @@ pub struct Vif {
     pub mpg_addr: u32,
     /// DIRECT data collected for the GIF.
     direct: Vec<u128>,
+    /// GIF output of this transfer (XGKICK and DIRECT, in order), sent to
+    /// the GS in one piece when the transfer ends.
+    gif: Vec<u128>,
     /// Position within the current qword, for DIRECT alignment.
     word_pos: usize,
 }
@@ -138,6 +144,15 @@ impl Vif {
     fn run(&mut self, m: &mut Memory, unit: usize, words: &[u32]) {
         let mut i = 0;
         while i < words.len() {
+            if self.left > 0 && self.cmd >= 0x60 {
+                // UNPACK data: as many words as it still takes at once.
+                let k = self.left.min(words.len() - i);
+                self.unpack_words(m, unit, &words[i..i + k]);
+                i += k;
+                self.word_pos = (self.word_pos + k) % 4;
+                self.left -= k;
+                continue;
+            }
             if self.left == 0 {
                 self.code = words[i];
                 i += 1;
@@ -155,6 +170,9 @@ impl Vif {
             }
         }
         self.flush_direct(m);
+        if !self.gif.is_empty() {
+            m.io.send_gif(std::mem::take(&mut self.gif));
+        }
     }
 
     fn begin(&mut self, m: &mut Memory, unit: usize) {
@@ -204,15 +222,11 @@ impl Vif {
             m.io.warn_once("VIF0: MSCAL to VU0 is not supported yet");
             return;
         }
-        let Memory { vu1, vu1_code, vu1_data, io, vu_cache, vu_code_gen, vu_programs, .. } = m;
+        let Memory { vu1, vu1_code, vu1_data, vu_cache, vu_code_gen, vu_programs, .. } = m;
         let start = if addr == u32::MAX { vu1.tpc } else { addr / 8 };
-        let mut kick = |p: Vec<u128>| {
-            PATH1_PACKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            io.send_gif(p)
-        };
         VU1_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         vu_cache[1].sync(vu_code_gen[1], vu1_code.len() / 8);
-        let env = crate::vumicro::Env { code: vu1_code, data: vu1_data, top: self.tops, itop: self.itop, kick: Some(&mut kick) };
+        let env = crate::vumicro::Env { code: vu1_code, data: vu1_data, top: self.tops, itop: self.itop, kick: Some(&mut self.gif) };
         crate::vumicro::run(vu1, env, &mut vu_cache[1], 1, vu_programs, start);
     }
 
@@ -253,10 +267,8 @@ impl Vif {
         }
     }
 
-    fn flush_direct(&mut self, m: &mut Memory) {
-        if !self.direct.is_empty() {
-            m.io.send_gif(std::mem::take(&mut self.direct));
-        }
+    fn flush_direct(&mut self, _m: &mut Memory) {
+        self.gif.append(&mut self.direct);
     }
 
     // ---- UNPACK ----
@@ -295,6 +307,76 @@ impl Vif {
         let words = (reads * self.element_bits()).div_ceil(32);
         self.left = words as usize;
         self.unpack_target = num;
+    }
+
+    /// UNPACK data words. Whole elements starting on a word boundary are
+    /// decoded in bulk when no addition mode or fill applies; the rest
+    /// goes through `unpack_word`.
+    fn unpack_words(&mut self, m: &mut Memory, unit: usize, ws: &[u32]) {
+        let (vn, vl) = self.unpack_format();
+        let eb = self.element_bits() as usize;
+        let masked = self.cmd & 0x10 != 0;
+        let (cl, wl) = (self.cl.max(1), self.wl.max(1));
+        let mut used = 0;
+        if self.unpack_nbits == 0 && self.mode == 0 && wl <= cl && vl < 3 {
+            // STMASK selection per cycle row and field: 0 data, 1 row,
+            // 2 col, 3 keep (see `write_element`).
+            let sel: [[u32; 4]; 4] = std::array::from_fn(|r| std::array::from_fn(|n| if masked { (self.mask >> (r * 8 + n * 2)) & 3 } else { 0 }));
+            let (row, col) = (self.row, self.col);
+            let left = (self.unpack_target - self.unpack_done) as usize;
+            let mut k = (ws.len() * 32 / eb).min(left);
+            if k < left {
+                // Stop on a word boundary so `unpack_word` can go on.
+                while k * eb % 32 != 0 {
+                    k -= 1;
+                }
+            }
+            let bits = 32usize >> vl;
+            let usn = self.code & 0x4000 != 0;
+            // Component c of element j (bits, offset all multiples of 8).
+            let comp = |j: usize, c: usize| -> u32 {
+                let at = j * eb + c * bits;
+                let raw = ws[at / 32] >> (at % 32);
+                match bits {
+                    32 => raw,
+                    16 if usn => raw & 0xffff,
+                    16 => raw as i16 as i32 as u32,
+                    _ if usn => raw & 0xff,
+                    _ => raw as i8 as i32 as u32,
+                }
+            };
+            let data = if unit == 0 { &mut m.vu0_data } else { &mut m.vu1_data };
+            let qwords = data.len() / 16;
+            for j in 0..k {
+                let done = self.unpack_done + j as u32;
+                let cycle = done % wl;
+                let addr = self.unpack_addr + (done / wl) * cl + cycle;
+                let v = match vn {
+                    0 => [comp(j, 0); 4],
+                    1 => [comp(j, 0), comp(j, 1), comp(j, 0), comp(j, 1)],
+                    2 => [comp(j, 0), comp(j, 1), comp(j, 2), 0],
+                    _ => [comp(j, 0), comp(j, 1), comp(j, 2), comp(j, 3)],
+                };
+                let base = (addr as usize % qwords) * 16;
+                let q = &mut data[base..base + 16];
+                let r = cycle.min(3) as usize;
+                for (n, x) in v.iter().enumerate() {
+                    let value = match sel[r][n] {
+                        0 => *x,
+                        1 => row[n],
+                        2 => col[r],
+                        _ => continue,
+                    };
+                    q[n * 4..n * 4 + 4].copy_from_slice(&value.to_le_bytes());
+                }
+            }
+            self.unpack_done += k as u32;
+            self.unpack_cycle = self.unpack_done % wl;
+            used = (k * eb).div_ceil(32);
+        }
+        for &w in &ws[used..] {
+            self.unpack_word(m, unit, w);
+        }
     }
 
     fn unpack_word(&mut self, m: &mut Memory, unit: usize, w: u32) {
@@ -407,6 +489,38 @@ mod tests {
         assert_eq!(&unpack(&w, 1)[..3], &[4, 5, 6]);
         let w = [0x0100_0101, 0x6401_0000, 9, 10];
         assert_eq!(&unpack(&w, 0)[..2], &[9, 10]);
+    }
+
+    /// The bulk path matches the word-at-a-time path for every format,
+    /// sign mode, mask and a skipping write cycle, with odd element counts.
+    #[test]
+    fn bulk_unpack_matches_word_path() {
+        for fmt in 0..16u32 {
+            for usn in [0, 0x4000] {
+                for (cl, wl) in [(1, 1), (4, 2)] {
+                    let num = 7u32;
+                    let eb = if fmt == 15 { 16 } else { (32 >> (fmt & 3)) * ((fmt >> 2) + 1) };
+                    let n = (num * eb).div_ceil(32);
+                    for mask in [0u32, 0xe4e4_1b39] {
+                        // STMASK, STROW, STCOL, STCYCL, UNPACK (masked when mask != 0).
+                        let mut w = vec![0x2000_0000, mask, 0x3000_0000, 11, 12, 13, 14, 0x3100_0000, 21, 22, 23, 24];
+                        let mk = if mask != 0 { 0x10 } else { 0 };
+                        w.extend([wl << 8 | cl | 0x0100_0000, (0x60 | mk | fmt) << 24 | num << 16 | usn | 3]);
+                        w.extend((0..n).map(|k| 0x8f3a_c561u32.wrapping_mul(k + 1).rotate_left(k)));
+                        let mut bulk = Memory::new();
+                        let mut vif = Vif::default();
+                        vif.run(&mut bulk, 1, &w);
+                        let mut single = Memory::new();
+                        let mut vif = Vif::default();
+                        for x in &w {
+                            vif.run(&mut single, 1, std::slice::from_ref(x));
+                        }
+                        assert!(bulk.vu1_data.iter().any(|&b| b != 0));
+                        assert!(bulk.vu1_data == single.vu1_data, "format {fmt:#x} usn {usn:#x} cl {cl} wl {wl} mask {mask:#x}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

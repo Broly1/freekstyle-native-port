@@ -24,7 +24,7 @@ go in `game/`, which git ignores.
 | `ps2-iop`    | working | Sound: the game's own IOP driver (EA's AUDIO.IRX on Sony's LIBSD.IRX) runs on an R3000 interpreter over a native IOP kernel (threads, interrupts, SIF commands), with an SPU2 (ADPCM voices, ADSR, DMA) feeding the host audio device at 48 kHz |
 | `gs`         | working | GS core: registers, GIF PACKED/REGLIST/IMAGE, 4 MB VRAM with all swizzled formats (verified against hardware tables), transfers, CLUT, primitive assembly |
 | `gs-vulkan`  | working | Vulkan renderer: render targets at N x resolution (3x 1080p, 5x 4K), GS blend modes, texture cache, display output, screenshots |
-| VU0/VU1      | working | VIF unpack/MPG/DIRECT, VU micro-mode interpreter with pipeline timing (Q/P latency, flag delay, hazard stalls); recorded programs are recompiled to Rust from `freekstyle/vu_dumps` |
+| VU0/VU1      | working | VIF unpack/MPG/DIRECT, VU micro-mode interpreter with pipeline timing (Q/P latency, flag delay, hazard stalls); recorded programs are compiled to native SSE code from `freekstyle/vu_dumps` (see below) |
 | `flm`        | working | EA `.FLM` movie demuxer and PS2 ADPCM decoder; `flm2mkv` converts movies to VP9 + Opus `.mkv` |
 | pictures     | working | No IPU emulation: `lsc2png` converts the 21 MPEG-2 still pictures (.LSC: title, menu, loading screens) to PNG once, and the game's picture decoder is replaced by a native function that loads them. The converter's decoder matches FFmpeg to 45-60 dB |
 
@@ -33,21 +33,32 @@ go in `game/`, which git ignores.
 ```sh
 # 1. Copy SLUS_203.67 from your own disc into game/.
 # 2. Generate Rust from it, then build and run.
-cargo run --release -p ee-recomp -- game/SLUS_203.67 freekstyle/src/gen freekstyle/hle.txt freekstyle/seeds.txt
+cargo run --release -p ee-recomp -- game/SLUS_203.67 freekstyle/src/gen freekstyle/hle.txt freekstyle/seeds.txt freekstyle/vu_dumps
 cargo run --release -p freekstyle -- [--res 1080|1440|4k] [--scale N] [--fullscreen] [--widescreen] [--stretch] [--blur-bars] [--mute]
 ```
 
 `--res` picks the window size and a matching internal resolution (3x, 4x
 or 5x the PS2's 512x448; vertical scale is doubled again in interlaced
-field mode). `--scale` overrides the multiplier. F11 toggles fullscreen
-and Esc quits.
+field mode). `--scale` overrides the multiplier. F11 toggles fullscreen,
+F12 starts and stops recording video into `captures/` and
+Esc quits.
 
 ## PC conveniences
 
+- **Launcher**: `cargo run --release -p freekstyle-launcher` sets display
+  options and remaps keys and gamepad buttons, saved to `freekstyle.toml`
+  (which the game reads at startup; command-line options override it), then
+  starts the game. It also installs app-menu entries and icons under
+  `~/.local/share` so Wayland desktops show the right icons.
 - **Controllers**: any gamepad (SDL-style mapping through gilrs). Buttons
   map by position, so Xbox A/B/X/Y act as Cross/Circle/Square/Triangle.
-  Keyboard: arrows = D-pad, Z/Space = A, X = B, A = X, S = Y, Q/E = LB/RB,
-  1/3 = LT/RT, Enter = Start, Backspace = Back.
+  Keyboard and gamepad work together. Default keys: WASD or arrows = D-pad
+  and left stick, J/Space = A, K = B, U = X, I = Y, Y/O = LB/RB, H/L =
+  LT/RT, Enter = Start, Backspace = Back.
+- **Sharp textures**: textures drawn as 2D sprites (menus, text, HUD) are
+  upscaled with xBRZ to the internal resolution on a worker thread
+  (`--no-sharp-textures` turns it off). 3D surfaces keep their originals.
+  xBRZ comes from `xbrz-rs`, which is GPL-3.0.
 - **Xbox button prompts**: the game's PlayStation button icons are
   recognised by content and redrawn as high-resolution Xbox A/B/X/Y
   buttons (`--ps2-icons` keeps the originals).
@@ -113,6 +124,29 @@ cargo run --release -p flm --bin flm2mkv -- <extracted OPENING dir> game/movies
 In-game playback of the `.mkv` files is not wired up yet, so the game still
 skips its movies.
 
+## VU microprograms
+
+VU0/VU1 microcode is uploaded by the game at run time, so it is recorded
+rather than read from the ELF: `FREEK_VU_DUMP=freekstyle/vu_dumps` saves
+each program image the interpreter runs (`.bin`), its entry points
+(`.entries`) and the JR/JALR targets compiled code did not know
+(`.jumps`). Regenerating then compiles them (`ee-recomp`'s `vuc`):
+
+- The VU's pipeline timing (hazard stalls, Q latency, flags visible 4
+  cycles late, branches seeing a VI register's old value) depends only on
+  the path taken, so it is simulated at build time. Each block is
+  compiled once per pipeline state it is entered in; the code that remains
+  is plain arithmetic.
+- VF registers live in SSE registers (`ee_runtime::vux`, bit-identical to
+  the interpreter's scalar helpers).
+- MAC flags are computed only where a later FMAND/FMEQ/FMOR can see them.
+- BAL/JR return addresses are tracked as constants; computed jumps use the
+  recorded targets and otherwise continue in the interpreter.
+
+`FREEK_VU_CHECK=1` reruns every compiled program on the interpreter from
+the same state and reports any difference. Entries that were never
+recorded run on the interpreter (`FREEK_VU_MISS=1` lists them).
+
 Generation takes under a second. The release build of about 460k generated
 lines takes about a minute on 12 cores.
 
@@ -122,19 +156,22 @@ Debugging switches (environment variables):
 |----------------------|--------|
 | `FREEK_SYSCALL_LOG`  | Log every syscall and SIF RPC |
 | `FREEK_IO_LOG`       | Log every hardware register access |
-| `FREEK_HEARTBEAT`    | Every 2 s, print the current guest function and call rate |
+| `FREEK_HEARTBEAT`    | Every 2 s, print the current guest function and call rate, VU time and idle (polling) time |
 | `FREEK_QUIET`        | Hide routine kernel messages |
 | `FREEK_RPC_DUMP`     | Hex-dump every IOP request |
 | `FREEK_GS_LOG`       | Renderer state every 2 s, privileged register writes |
 | `FREEK_SHOT=f.png:N` | Save the displayed frame N at internal resolution |
 | `FREEK_SHOT_EVERY=K` | With `FREEK_SHOT`, save every K frames from N on |
-| `FREEK_PAD_SCRIPT`   | Scripted taps, e.g. `300:start,600:a+down` (Xbox names) |
+| `FREEK_PAD_SCRIPT`   | Scripted taps, e.g. `300:start,600:a+down,900-1500:a` (Xbox names; a range holds) |
 | `FREEK_DUMP_TEXTURES=dir` | Write every decoded texture as PNG |
 | `IOP_TRACE=1` / `=2` | Log SIF traffic and SPU2 state each second / also every IOP kernel call |
 | `IOP_WAV=out.wav`    | Record the sound output |
 | `FREEK_PROFILE=N`    | After N seconds, sample the EE thread for 10 s into `profile.txt` (addresses for `addr2line -f -C -e target/release/freekstyle`) |
 | `FREEK_AUDIO_LOG`    | Log each audio device callback and the queue depth |
 | `FREEK_VU_INTERP`    | Interpret all VU microcode (to tell recompiler bugs from VU semantics bugs) |
+| `FREEK_VU_CHECK`     | Check every compiled VU program against the interpreter |
+| `FREEK_VU_DUMP=dir`  | Record VU programs, entry points and jump targets for compiling |
+| `FREEK_VU_MISS`      | List VU entry points that have no compiled code |
 | `FREEK_VU_TOP`       | Periodically list the most-run VU microprogram entry points |
 | `FREEK_RECORD=out.mkv:V:S` | Record S seconds of video from vblank V (needs ffmpeg) |
 | `FREEK_FRAME_GAPS`   | Report hitches: long gaps between game frames, slow presents |
@@ -148,7 +185,9 @@ The game reaches its main menu natively and is controllable: profile name
 entry, main menu (Circuit, Single Race, Freestyle, Freeride, Record Book,
 Options), at up to 5x resolution with Xbox prompts. The rider select
 screen renders the 3D rider models (VU1) and the animated flames, and
-races are playable (the game runs them at its own 30 fps cap).
+races run at 60 fps. (They used to run at 30: the game has no cap, but a
+frame that misses one vblank waits for the next, and emulating VU1 and the
+VIF used to cost about 20 ms a frame. `--headless` prints the frame rate.)
 
 Temporarily skipped:
 - Intro movies (`.FLM`): movie open/play/close are no-ops.
@@ -156,11 +195,9 @@ Temporarily skipped:
   original.
 
 Next steps, in order:
-1. A 60 fps patch for races.
-2. Movies: the `.mkv` conversions played in game (or the IPU's movie
+1. Movies: the `.mkv` conversions played in game (or the IPU's movie
    commands).
-3. SPU2 reverb.
-4. 60 fps and widescreen patches.
+2. SPU2 reverb.
 
 ## Analysis results (SLUS_203.67, sha256 debcb4b0…6d80a)
 

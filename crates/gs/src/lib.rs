@@ -141,6 +141,8 @@ pub struct Gs {
     /// CLUT buffer: 256 entries, raw 32-bit or 16-bit colours.
     pub clut: [u32; 256],
     pub clut_psm: Psm,
+    /// Bumped on every CLUT load, so renderers can cache work on it.
+    pub clut_gen: u64,
     cbp_cache: [u32; 2],
     pub display: Display,
     queue: Vec<Vertex>,
@@ -188,6 +190,7 @@ impl Gs {
             trxreg: 0,
             clut: [0; 256],
             clut_psm: Psm::Ct32,
+            clut_gen: 0,
             cbp_cache: [u32::MAX; 2],
             display: Display::default(),
             queue: Vec::with_capacity(4),
@@ -514,6 +517,7 @@ impl Gs {
             self.clut[(offset + i) % 256] = self.vram.read(cpsm, t.cbp(), bw, x, y);
         }
         self.clut_psm = cpsm;
+        self.clut_gen += 1;
     }
 
     // ---- transfers ----

@@ -1,6 +1,8 @@
 //! FREEK_PROFILE=<seconds after start>: sample the EE thread's program
 //! counter for 10 s with SIGPROF and write `profile.txt` (raw addresses,
-//! relative to the executable, ready for addr2line). A debugging aid.
+//! relative to the executable, ready for addr2line). FREEK_PROFILE_GS does
+//! the same for the render thread into `profile_gs.txt`. Use one at a time.
+//! A debugging aid.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::time::Duration;
@@ -18,9 +20,9 @@ extern "C" fn on_prof(_: libc::c_int, _: *mut libc::siginfo_t, ctx: *mut libc::c
     }
 }
 
-/// Call from the thread to profile.
-pub fn start_if_requested() {
-    let Some(delay) = std::env::var("FREEK_PROFILE").ok().and_then(|v| v.parse::<u64>().ok()) else { return };
+/// Call from the thread to profile: `var` holds the delay, samples go to `out`.
+pub fn start_if_requested(var: &str, out: &'static str) {
+    let Some(delay) = std::env::var(var).ok().and_then(|v| v.parse::<u64>().ok()) else { return };
     // SAFETY: plain libc calls; the handler only touches atomics.
     let target = unsafe { libc::pthread_self() };
     unsafe {
@@ -29,6 +31,7 @@ pub fn start_if_requested() {
         sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
         libc::sigaction(libc::SIGPROF, &sa, std::ptr::null_mut());
     }
+    let path = out;
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(delay));
         eprintln!("[profile] sampling for 10 s");
@@ -42,8 +45,8 @@ pub fn start_if_requested() {
             .and_then(|m| m.lines().find(|l| l.contains("freekstyle")).and_then(|l| u64::from_str_radix(l.split('-').next()?, 16).ok()))
             .unwrap_or(0);
         let n = COUNT.load(Relaxed).min(N);
-        let out: String = (0..n).map(|i| format!("{:#x}\n", SAMPLES[i].load(Relaxed).wrapping_sub(base))).collect();
-        let _ = std::fs::write("profile.txt", out);
-        eprintln!("[profile] wrote {n} samples to profile.txt");
+        let text: String = (0..n).map(|i| format!("{:#x}\n", SAMPLES[i].load(Relaxed).wrapping_sub(base))).collect();
+        let _ = std::fs::write(path, text);
+        eprintln!("[profile] wrote {n} samples to {path}");
     });
 }

@@ -6,6 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+xbrz-rs = "=0.1.0"
 gs = { path = "../gs" }
 ash = "=0.38.0"
 ash-window = "=0.13.0"

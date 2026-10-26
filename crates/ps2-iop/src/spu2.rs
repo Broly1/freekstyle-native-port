@@ -410,6 +410,11 @@ impl Spu2 {
                 self.mask24(b + reg::VMIXR),
                 self.get(b + 0x198)
             );
+            // Active voices: number, volume L/R, envelope level, pitch.
+            for (vi, v) in self.cores[c as usize].voices.iter().enumerate().filter(|(_, v)| v.phase != Phase::Off) {
+                let vb = b + vi as u32 * 0x10;
+                s += &format!(" v{vi}:{:04x}/{:04x}/{:04x}/{:04x}", self.get(vb), self.get(vb + 2), v.level, self.get(vb + 4));
+            }
         }
         s
     }

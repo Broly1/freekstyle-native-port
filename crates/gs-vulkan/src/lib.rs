@@ -106,6 +106,10 @@ impl Renderer {
         self.hw.stats
     }
 
+    pub fn toggle_recording(&mut self) {
+        self.hw.toggle_recording();
+    }
+
     pub fn frame(&self) -> u64 {
         self.hw.frame_no
     }

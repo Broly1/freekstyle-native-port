@@ -10,8 +10,10 @@ ee-runtime = { path = "../crates/ee-runtime" }
 gs = { path = "../crates/gs" }
 r5900 = { path = "../crates/r5900" }
 gs-vulkan = { path = "../crates/gs-vulkan" }
-winit = "=0.30.5"
+winit = "=0.30.13"
 gilrs = "=0.11.0"
 cpal = "=0.15.3"
 libc = "0.2"
 ps2-iop = { path = "../crates/ps2-iop" }
+freek-config = { path = "../crates/freek-config" }
+png = "0.17.16"

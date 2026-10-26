@@ -29,8 +29,8 @@ pub struct Env<'a> {
     /// VIF1 TOP and ITOP, read by XTOP/XITOP.
     pub top: u32,
     pub itop: u32,
-    /// Receives XGKICKed GIF packets (VU1).
-    pub kick: Option<&'a mut dyn FnMut(Vec<u128>)>,
+    /// XGKICKed GIF packets are appended here (VU1).
+    pub kick: Option<&'a mut Vec<u128>>,
 }
 
 /// Decoded upper instructions, filled lazily and dropped when the
@@ -103,6 +103,23 @@ fn record(unit: u8, hash: u64, entry: u32, code: &[u8]) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(base.with_extension("entries")) {
         let _ = writeln!(f, "{entry:04x}");
+    }
+}
+
+/// FREEK_VU_DUMP: save a JR/JALR target compiled code did not know, as
+/// "site target" lines in <image>.jumps.
+fn record_jump((unit, hash): (u8, u64), site: u32, target: u32) {
+    let Some(dir) = std::env::var_os("FREEK_VU_DUMP") else { return };
+    static SEEN: std::sync::Mutex<Option<std::collections::HashSet<(u8, u64, u32, u32)>>> = std::sync::Mutex::new(None);
+    if !SEEN.lock().unwrap().get_or_insert_with(Default::default).insert((unit, hash, site, target)) {
+        return;
+    }
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("vu{unit}_{hash:016x}.jumps"));
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{site:04x} {target:04x}");
     }
 }
 
@@ -269,20 +286,25 @@ pub struct Mem<'a> {
 }
 
 impl Mem<'_> {
+    #[inline(always)]
     fn qwords(&self) -> usize {
         self.data.len() / 16
     }
+    #[inline(always)]
     fn word(&self, q: usize, n: usize) -> u32 {
         let a = (q & (self.qwords() - 1)) * 16 + n * 4;
         u32::from_le_bytes(self.data[a..a + 4].try_into().unwrap())
     }
+    #[inline(always)]
     fn set_word(&mut self, q: usize, n: usize, v: u32) {
         let a = (q & (self.qwords() - 1)) * 16 + n * 4;
         self.data[a..a + 4].copy_from_slice(&v.to_le_bytes());
     }
+    #[inline(always)]
     fn vec(&self, q: usize) -> V4 {
         std::array::from_fn(|n| f32::from_bits(self.word(q, n)))
     }
+    #[inline(always)]
     fn store(&mut self, q: usize, dest: u8, v: V4) {
         for (n, x) in v.iter().enumerate() {
             if dest & (8 >> n) != 0 {
@@ -290,6 +312,7 @@ impl Mem<'_> {
             }
         }
     }
+    #[inline(always)]
     fn qword(&self, q: usize) -> u128 {
         (0..4).fold(0u128, |a, n| a | (self.word(q, n) as u128) << (32 * n))
     }
@@ -332,19 +355,24 @@ pub fn run<'a>(r: &'a mut VuRegs, env: Env<'a>, cache: &mut DecodeCache, unit: u
     let start = start & (n as u32 - 1);
     let hash = *cache.hash.get_or_insert_with(|| image_hash(env.code));
     let native = programs.find(unit, hash, start);
-    if std::env::var_os("FREEK_VU_TOP").is_some() {
+    static TOP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *TOP.get_or_init(|| std::env::var_os("FREEK_VU_TOP").is_some()) {
         vu_top(unit, hash, start);
     }
     if native.is_none() {
         record(unit, hash, start, env.code);
         if std::env::var_os("FREEK_VU_MISS").is_some() {
-            static MISSES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            if MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+            static MISSES: std::sync::Mutex<Option<std::collections::HashSet<(u8, u64, u32)>>> = std::sync::Mutex::new(None);
+            if MISSES.lock().unwrap().get_or_insert_with(Default::default).insert((unit, hash, start)) {
                 eprintln!("[vu] no native code for vu{unit} {hash:016x} entry {start:#x}");
             }
         }
     }
+    if let (Some(f), true) = (native, check_enabled()) {
+        return check(f, r, env, cache, unit, hash, start);
+    }
     let mut c = Ctx::new(r, env);
+    c.id = (unit, hash);
     match native {
         Some(f) => {
             NATIVE_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -368,7 +396,7 @@ pub struct Ctx<'a> {
     mem: Mem<'a>,
     top: u32,
     itop: u32,
-    kick: Option<&'a mut dyn FnMut(Vec<u128>)>,
+    kick: Option<&'a mut Vec<u128>>,
     pipe: Pipe,
     pub cycle: u64,
     /// Cycle at which each VF register field's pending FMAC result is
@@ -377,6 +405,8 @@ pub struct Ctx<'a> {
     /// VI register written by the previous pair, with its old value.
     last_vi: Option<(usize, u16)>,
     mask: u32,
+    /// (unit, image hash), for recording jump targets.
+    id: (u8, u64),
 }
 
 impl<'a> Ctx<'a> {
@@ -394,6 +424,7 @@ impl<'a> Ctx<'a> {
             ready: [[0; 4]; 32],
             last_vi: None,
             mask,
+            id: (0, 0),
         }
     }
 
@@ -407,6 +438,84 @@ impl<'a> Ctx<'a> {
         let at = (pc & self.mask) as usize * 8;
         (u32::from_le_bytes(self.code[at..at + 4].try_into().unwrap()), u32::from_le_bytes(self.code[at + 4..at + 8].try_into().unwrap()))
     }
+}
+
+/// Data memory and outside state for compiled programs (ee-recomp's VU
+/// compiler keeps registers in locals and the pipeline timing static).
+impl Ctx<'_> {
+    #[inline(always)]
+    pub fn lq(&self, q: usize) -> V4 {
+        self.mem.vec(q)
+    }
+    #[inline(always)]
+    pub fn sq(&mut self, q: usize, dest: u8, v: V4) {
+        self.mem.store(q, dest, v)
+    }
+    #[inline(always)]
+    pub fn lw(&self, q: usize, n: usize) -> u32 {
+        self.mem.word(q, n)
+    }
+    #[inline(always)]
+    pub fn sw(&mut self, q: usize, n: usize, v: u32) {
+        self.mem.set_word(q, n, v)
+    }
+    pub fn top(&self) -> u32 {
+        self.top
+    }
+    pub fn itop(&self) -> u32 {
+        self.itop
+    }
+    pub fn xgkick(&mut self, q: usize) {
+        if let Some(k) = self.kick.as_deref_mut() {
+            gif_packet(&self.mem, q, k);
+        }
+    }
+
+    /// Continue in the interpreter at `pc`, the target of the JR/JALR at
+    /// `site` that compiled code has no version for. The registers must
+    /// already be in `r`; the pipeline state is given as cycles from now:
+    /// pending FMAC results (reg, field, cycles), Q, MAC and clip writes
+    /// (oldest first), and the VI register the previous pair wrote with its
+    /// old value. FREEK_VU_DUMP records the target for the next build.
+    #[cold]
+    pub fn resume(&mut self, site: u32, pc: u32, ready: &[(usize, usize, u64)], q: Option<(u64, f32)>, mac: &[(u64, u32)], clip: &[(u64, u32)], last_vi: Option<(usize, u16)>) {
+        let now = self.cycle;
+        for &(reg, f, d) in ready {
+            self.ready[reg][f] = now + d;
+        }
+        self.pipe.q = q.map(|(d, v)| (now + d, v));
+        for &(d, v) in mac {
+            self.pipe.mac.push(now + d, v, &mut self.r.mac);
+        }
+        for &(d, v) in clip {
+            self.pipe.clip.push(now + d, v, &mut self.r.clip);
+        }
+        self.last_vi = last_vi;
+        record_jump(self.id, site, pc);
+        interpret_from(self, pc);
+    }
+}
+
+/// MAC flags of an FMAC result in the fields of `dest`.
+#[inline(always)]
+pub fn mac_flags(v: V4, dest: u8) -> u32 {
+    fmac_flags(v, dest, 0).0
+}
+
+/// CLIP judgement bits of fs.xyz against +/-|ft.w|.
+#[inline(always)]
+pub fn clip_judge(s: V4, t: V4) -> u32 {
+    let w = t[3].abs();
+    let mut f = 0;
+    for n in 0..3 {
+        if s[n] > w {
+            f |= 1 << (n * 2);
+        }
+        if s[n] < -w {
+            f |= 2 << (n * 2);
+        }
+    }
+    f
 }
 
 /// Execute one instruction pair at `pc` (upper decoded as `m`). Returns
@@ -642,9 +751,8 @@ pub fn pair<const FLAGS: bool>(c: &mut Ctx, pc: u32, lo: u32, hi: u32, m: M) -> 
                         0x68 => write_vi(r, it16, *top as u16),
                         0x69 => write_vi(r, it16, *itop as u16),
                         0x6c => {
-                            let p = gif_packet(&mem, vi(r, is) as usize);
-                            if let Some(k) = kick.as_mut() {
-                                k(p);
+                            if let Some(k) = kick.as_deref_mut() {
+                                gif_packet(mem, vi(r, is) as usize, k);
                             }
                         }
                         0x70..=0x7e => r.p = efu(((lo >> 6) & 31) << 2 | (funct & 3), fs, fsf),
@@ -798,17 +906,7 @@ fn upper<const FLAGS: bool>(r: &mut VuRegs, pipe: &mut Pipe, hi: u32, cycle: u64
         M::Vftoi12 => (Out::Ft(vu::ftoi(s, 12)), false),
         M::Vftoi15 => (Out::Ft(vu::ftoi(s, 15)), false),
         M::Vclipw => {
-            let w = t[3].abs();
-            let mut f = 0;
-            for n in 0..3 {
-                if s[n] > w {
-                    f |= 1 << (n * 2);
-                }
-                if s[n] < -w {
-                    f |= 2 << (n * 2);
-                }
-            }
-            let clip = ((pipe.clip.latest(r.clip) << 6) | f) & 0xff_ffff;
+            let clip = ((pipe.clip.latest(r.clip) << 6) | clip_judge(s, t)) & 0xff_ffff;
             pipe.clip.push(cycle + FLAG_LATENCY, clip, &mut r.clip);
             (Out::None, false)
         }
@@ -840,13 +938,17 @@ fn upper<const FLAGS: bool>(r: &mut VuRegs, pipe: &mut Pipe, hi: u32, cycle: u64
 
 /// The VU's 23-bit random number generator.
 fn rnext(r: &mut VuRegs) {
-    let x = r.r & 0x7f_ffff;
+    r.r = rnext_value(r.r);
+}
+
+pub fn rnext_value(r: u32) -> u32 {
+    let x = r & 0x7f_ffff;
     let bit = ((x >> 4) ^ (x >> 22)) & 1;
-    r.r = 0x3f80_0000 | (((x << 1) | bit) & 0x7f_ffff);
+    0x3f80_0000 | (((x << 1) | bit) & 0x7f_ffff)
 }
 
 /// Elementary function unit; results go to P.
-fn efu(op: u32, s: V4, fsf: usize) -> f32 {
+pub fn efu(op: u32, s: V4, fsf: usize) -> f32 {
     let len2 = s[0] * s[0] + s[1] * s[1] + s[2] * s[2];
     ps2f(match op {
         0x70 => len2,
@@ -866,9 +968,10 @@ fn efu(op: u32, s: V4, fsf: usize) -> f32 {
     })
 }
 
-/// Collect a GIF packet (up to EOP) from VU memory for XGKICK.
-fn gif_packet(mem: &Mem, start: usize) -> Vec<u128> {
-    let mut out = Vec::new();
+/// Append a GIF packet (up to EOP) from VU memory for XGKICK.
+fn gif_packet(mem: &Mem, start: usize, out: &mut Vec<u128>) {
+    crate::dma::PATH1_PACKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let len0 = out.len();
     let mut q = start;
     loop {
         let tag = mem.qword(q);
@@ -890,8 +993,8 @@ fn gif_packet(mem: &Mem, start: usize) -> Vec<u128> {
             out.push(mem.qword(q));
             q += 1;
         }
-        if eop || out.len() > mem.qwords() {
-            return out;
+        if eop || out.len() - len0 > mem.qwords() {
+            return;
         }
     }
 }
@@ -935,12 +1038,11 @@ mod tests {
         code
     }
 
-    fn exec(pairs: &[(u32, u32)], data: &mut [u8], r: &mut VuRegs) -> Vec<Vec<u128>> {
+    fn exec(pairs: &[(u32, u32)], data: &mut [u8], r: &mut VuRegs) -> Vec<u128> {
         let code = program(pairs);
         let mut kicked = Vec::new();
-        let mut kick = |p: Vec<u128>| kicked.push(p);
         let mut cache = DecodeCache::default();
-        let env = Env { code: &code, data, top: 0, itop: 0, kick: Some(&mut kick) };
+        let env = Env { code: &code, data, top: 0, itop: 0, kick: Some(&mut kicked) };
         run(r, env, &mut cache, 1, &Programs(&[]), 0);
         kicked
     }
@@ -1114,9 +1216,8 @@ mod tests {
         let xgkick = 0x40 << 25 | (0x6c >> 2) << 6 | 0x3c | (0x6c & 3);
         let mut r = VuRegs::new();
         let kicked = exec(&[(NOP | E, xgkick), (NOP, NOPL)], &mut data, &mut r);
-        assert_eq!(kicked.len(), 1);
-        assert_eq!(kicked[0].len(), 3);
-        assert_eq!(kicked[0][2] & 0xff, 0xbb);
+        assert_eq!(kicked.len(), 3);
+        assert_eq!(kicked[2] & 0xff, 0xbb);
     }
 }
 
@@ -1200,6 +1301,72 @@ mod bench_parts {
             black_box(decode(black_box(0x4a00_0000 | (hi & 0x01ff_ffff))));
         });
     }
+}
+
+fn check_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FREEK_VU_CHECK").is_some())
+}
+
+/// FREEK_VU_CHECK: run each compiled program, then the interpreter from the
+/// same registers and memory, and report any difference in registers, data
+/// memory or XGKICKed packets. The status flag is not compared (compiled
+/// code skips it; this game never reads it), nor MAC for programs that never
+/// read MAC. The compiled results are kept.
+#[cold]
+fn check(f: NativeFn, r: &mut VuRegs, env: Env, cache: &mut DecodeCache, unit: u8, hash: u64, start: u32) -> u64 {
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static BAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    use std::sync::atomic::Ordering::Relaxed;
+    let Env { code, data, top, itop, mut kick } = env;
+    let (r0, d0) = (r.clone(), data.to_vec());
+    let (mut got, mut want) = (Vec::new(), Vec::new());
+    let mut c = Ctx::new(&mut *r, Env { code, data: &mut *data, top, itop, kick: Some(&mut got) });
+    f(&mut c);
+    let cycles = c.cycle;
+    let (mut ri, mut di) = (r0, d0);
+    let mut ci = Ctx::new(&mut ri, Env { code, data: &mut di, top, itop, kick: Some(&mut want) });
+    interpret(&mut ci, cache, start);
+    let mut diffs = Vec::new();
+    let reads_mac = code.chunks_exact(8).any(|p| p[7] >> 7 == 0 && matches!(p[3] >> 1, 0x18 | 0x1a | 0x1b));
+    for n in 1..32 {
+        if r.vf[n].map(f32::to_bits) != ri.vf[n].map(f32::to_bits) {
+            diffs.push(format!("vf{n} {:?} want {:?}", r.vf[n], ri.vf[n]));
+        }
+    }
+    for n in 1..16 {
+        if r.vi[n] != ri.vi[n] {
+            diffs.push(format!("vi{n} {:#x} want {:#x}", r.vi[n], ri.vi[n]));
+        }
+    }
+    let scalars = [
+        ("acc", r.acc.map(f32::to_bits) != ri.acc.map(f32::to_bits)),
+        ("q", r.q.to_bits() != ri.q.to_bits()),
+        ("i", r.i.to_bits() != ri.i.to_bits()),
+        ("p", r.p.to_bits() != ri.p.to_bits()),
+        ("r", r.r != ri.r),
+        ("clip", r.clip != ri.clip),
+        ("mac", reads_mac && r.mac != ri.mac),
+        ("tpc", r.tpc != ri.tpc),
+    ];
+    diffs.extend(scalars.iter().filter(|s| s.1).map(|s| s.0.to_string()));
+    if let Some(q) = (0..data.len() / 16).find(|&q| data[q * 16..q * 16 + 16] != di[q * 16..q * 16 + 16]) {
+        diffs.push(format!("data qword {q:#x}"));
+    }
+    if got != want {
+        diffs.push(format!("XGKICK packets ({} vs {} qwords)", got.len(), want.len()));
+    }
+    let runs = RUNS.fetch_add(1, Relaxed) + 1;
+    if !diffs.is_empty() && BAD.fetch_add(1, Relaxed) < 30 {
+        eprintln!("[vu-check] vu{unit} {hash:016x}@{start:#x}: {}", diffs.join(", "));
+    }
+    if runs.is_power_of_two() && runs >= 1024 {
+        eprintln!("[vu-check] {runs} runs checked, {} differed", BAD.load(Relaxed));
+    }
+    if let Some(k) = kick.as_deref_mut() {
+        k.extend(got);
+    }
+    cycles
 }
 
 /// FREEK_VU_TOP: count runs per entry point; print the busiest every

@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "freekstyle"]
+members = ["crates/*", "freekstyle", "launcher"]
 # `freekstyle` needs generated code from ee-recomp; build it explicitly with -p.
-default-members = ["crates/*"]
+default-members = ["crates/*", "launcher"]
 
 [workspace.package]
 version = "0.1.0"

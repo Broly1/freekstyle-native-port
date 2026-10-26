@@ -77,13 +77,18 @@ pub struct Pad {
     ports: Vec<Port>,
     counter: u32,
     analog: bool,
-    /// FREEK_PAD_SCRIPT taps: (frame, buttons), for automated testing.
-    script: Option<Vec<(u32, u16)>>,
+    /// Buttons at the last FREEK_PAD_LOG report.
+    logged: u16,
+    /// FREEK_PAD_SCRIPT taps: (first frame, last frame, buttons), for
+    /// automated testing.
+    script: Option<Vec<(u32, u32, u16)>>,
 }
 
-/// Parse "600:a,900:start+up" into (frame, buttons) taps. Button names use
-/// the Xbox layout (a b x y lb rb lt rt back start up down left right).
-fn parse_script(s: &str) -> Vec<(u32, u16)> {
+/// Parse "600:a,900:start+up,1200-1800:a" into (first, last frame,
+/// buttons): a tap holds for 6 frames, a range for its whole length. Button
+/// names use the Xbox layout (a b x y lb rb lt rt back start up down left
+/// right).
+fn parse_script(s: &str) -> Vec<(u32, u32, u16)> {
     use button::*;
     s.split(',')
         .filter_map(|tap| {
@@ -108,7 +113,14 @@ fn parse_script(s: &str) -> Vec<(u32, u16)> {
                     _ => 0,
                 };
             }
-            Some((frame.trim().parse().ok()?, b))
+            let (first, last) = match frame.split_once('-') {
+                Some((a, z)) => (a.trim().parse().ok()?, z.trim().parse().ok()?),
+                None => {
+                    let f: u32 = frame.trim().parse().ok()?;
+                    (f, f + 5)
+                }
+            };
+            Some((first, last, b))
         })
         .collect()
 }
@@ -150,18 +162,23 @@ impl Pad {
     }
 
     /// Fill one frame for every open port with the current input.
-    pub fn vblank(&mut self, write: &mut dyn FnMut(u32, &[u8])) {
+    /// `vblank` numbers FREEK_PAD_LOG's button reports, the same count
+    /// that F12 recordings start from.
+    pub fn vblank(&mut self, vblank: u64, write: &mut dyn FnMut(u32, &[u8])) {
         if self.ports.is_empty() {
             return;
         }
         self.counter = self.counter.wrapping_add(1);
         let mut input = *INPUT.lock().unwrap();
         let script = self.script.get_or_insert_with(|| std::env::var("FREEK_PAD_SCRIPT").map(|s| parse_script(&s)).unwrap_or_default());
-        // Each scripted tap holds its buttons for 6 frames.
-        for &(frame, b) in script.iter() {
-            if (frame..frame + 6).contains(&self.counter) {
+        for &(first, last, b) in script.iter() {
+            if (first..=last).contains(&self.counter) {
                 input.buttons |= b;
             }
+        }
+        if input.buttons != self.logged && std::env::var_os("FREEK_PAD_LOG").is_some() {
+            eprintln!("[pad] vblank {vblank}: buttons {:#06x} (pressed {:#06x})", input.buttons, input.buttons & !self.logged);
+            self.logged = input.buttons;
         }
         for p in &self.ports {
             let connected = p.port == 0 && p.slot == 0;

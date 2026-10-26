@@ -76,6 +76,32 @@ struct SamplerKey {
     repeat_v: bool,
 }
 
+/// FxHash-style hasher for the renderer's maps: their keys are a few
+/// integers, and SipHash cost about 10% of the render thread.
+#[derive(Default)]
+struct Fx(u64);
+
+impl std::hash::Hasher for Fx {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for c in bytes.chunks(8) {
+            let mut b = [0u8; 8];
+            b[..c.len()].copy_from_slice(c);
+            self.write_u64(u64::from_le_bytes(b));
+        }
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    fn write_u32(&mut self, v: u32) {
+        self.write_u64(v as u64);
+    }
+}
+
+type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct TexKey {
     tex0: u64,
@@ -125,12 +151,16 @@ fn target_key(bp: u32, bw: u32) -> u32 {
     bp | bw << 16
 }
 
+#[derive(Default)]
 struct Recording {
     path: String,
     start: u64,
     end: u64,
     size: Option<(u32, u32)>,
-    encoder: Option<std::process::Child>,
+    /// Scaled copy of the displayed picture.
+    image: Option<Image>,
+    encoder: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    failed: bool,
 }
 
 struct Texture {
@@ -154,6 +184,8 @@ enum Overlay {
 enum Garbage {
     Image(Image),
     Buffer(Buffer),
+    /// A recorded frame, read back once the frame's fence has passed.
+    Recorded(Buffer),
 }
 
 struct Frame {
@@ -183,6 +215,9 @@ pub struct Config {
     pub blur_bars: bool,
     /// Replace PlayStation button icons with Xbox ones.
     pub xbox_icons: bool,
+    /// Upscale game textures with xBRZ to the internal resolution, so menu
+    /// text and artwork stay sharp instead of showing stretched texels.
+    pub sharp_textures: bool,
     /// Converted pictures (`game/images`); replacements in its `hd`.
     pub pictures: Option<std::path::PathBuf>,
 }
@@ -202,10 +237,16 @@ pub struct Hw {
     layout: vk::PipelineLayout,
     vert: vk::ShaderModule,
     frag: vk::ShaderModule,
-    pipelines: HashMap<PipeKey, vk::Pipeline>,
-    samplers: HashMap<SamplerKey, vk::Sampler>,
-    targets: HashMap<u32, Target>,
-    textures: HashMap<TexKey, Texture>,
+    pipelines: FastMap<PipeKey, vk::Pipeline>,
+    samplers: FastMap<SamplerKey, vk::Sampler>,
+    targets: FastMap<u32, Target>,
+    textures: FastMap<TexKey, Texture>,
+    /// xBRZ upscaling runs on a worker thread; textures show at their
+    /// original size until the sharp version is swapped in between frames.
+    sharpen: Option<Sharpener>,
+    /// Hash of the CLUT entries a texture uses: (GS CLUT generation,
+    /// offset, entries, hash), recomputed only after a CLUT load.
+    clut_hash: (u64, usize, usize, u64),
     pictures: Option<crate::pictures::Pictures>,
     /// A wide picture fills the screen (set by drawing one, cleared by 3D
     /// or another background), so overlays follow its stretch curve.
@@ -300,10 +341,12 @@ impl Hw {
                 layout,
                 vert,
                 frag,
-                pipelines: HashMap::new(),
-                samplers: HashMap::new(),
-                targets: HashMap::new(),
-                textures: HashMap::new(),
+                pipelines: FastMap::default(),
+                samplers: FastMap::default(),
+                targets: FastMap::default(),
+                textures: FastMap::default(),
+                sharpen: cfg.sharp_textures.then(Sharpener::spawn),
+                clut_hash: (u64::MAX, 0, 0, 0),
                 pictures: cfg.pictures.as_deref().map(crate::pictures::Pictures::load),
                 on_wide_picture: false,
                 cfg,
@@ -321,7 +364,7 @@ impl Hw {
                     let secs: u64 = it.next()?.parse().ok()?;
                     let start: u64 = it.next()?.parse().ok()?;
                     let path = it.next()?.to_string();
-                    Some(Recording { path, start, end: start + secs * 60, size: None, encoder: None })
+                    Some(Recording { path, start, end: start + secs * 60, ..Default::default() })
                 }),
                 trace_frame: std::env::var("FREEK_GS_TRACE").ok().and_then(|v| v.split(':').next()?.parse().ok()),
                 trace_left: std::env::var("FREEK_GS_TRACE").ok().and_then(|v| v.rsplit(':').next()?.parse().ok().filter(|_| v.matches(':').count() == 1 + v.starts_with("tex:") as usize)).unwrap_or(1),
@@ -361,6 +404,7 @@ impl Hw {
             match g {
                 Garbage::Image(i) => self.vk.destroy_image(i),
                 Garbage::Buffer(b) => self.vk.destroy_buffer(b),
+                Garbage::Recorded(b) => self.record_ready(b),
             }
         }
     }
@@ -566,7 +610,10 @@ impl Hw {
 
     // ---- textures ----
 
-    fn texture(&mut self, gs: &Gs) -> Result<(TexRef, [f32; 2], bool)> {
+    /// `sprite`: drawn as a 2D rectangle (menus, text, HUD), the only
+    /// textures worth xBRZ; on 3D surfaces it turns photo-like detail into
+    /// flat blobs.
+    fn texture(&mut self, gs: &Gs, sprite: bool) -> Result<(TexRef, [f32; 2], bool)> {
         let ctx = gs.context();
         let t = ctx.tex0;
         let (tw, th) = (1u32 << t.tw(), 1u32 << t.th());
@@ -575,6 +622,18 @@ impl Hw {
             // Prefer the target drawn with the texture's own width.
             let found = self.targets.get_key_value(&target_key(t.tbp0(), t.tbw())).or_else(|| self.targets.iter().find(|(_, rt)| rt.bp == t.tbp0()));
             if let Some((&k, rt)) = found {
+                if std::env::var_os("FREEK_TARGET_LOG").is_some() {
+                    // Each kind of render-to-texture effect once, when first
+                    // seen: line these up with what happened on screen.
+                    static SEEN: std::sync::Mutex<Vec<(u32, u32, u64)>> = std::sync::Mutex::new(Vec::new());
+                    let f = ctx.frame;
+                    let id = (k, f.bp(), t.0 & ((1 << 34) - 1));
+                    let mut seen = SEEN.lock().unwrap();
+                    if !seen.contains(&id) {
+                        seen.push(id);
+                        eprintln!("[sample] vblank {}: draw into {:#x}/{:?} samples target {k:#x} ({}x{}) as tbp {:#x} tbw {} {:?} {tw}x{th}", self.vblank, f.bp(), f.psm(), rt.w, rt.h, t.tbp0(), t.tbw(), t.psm());
+                    }
+                }
                 let scale = [tw as f32 / rt.w as f32, th as f32 / rt.h as f32];
                 return Ok((TexRef::Target(k), scale, true));
             }
@@ -583,7 +642,11 @@ impl Hw {
         let clut = if indexed {
             let n = if matches!(t.psm(), gs::mem::Psm::T8 | gs::mem::Psm::T8h) { 256 } else { 16 };
             let off = if n == 16 { t.csa() as usize * 16 % 256 } else { 0 };
-            (0..n).fold(0xcbf2_9ce4_8422_2325u64, |h, i| (h ^ gs.clut[(off + i) % 256] as u64).wrapping_mul(0x100_0000_01b3)) ^ (gs.clut_psm == Psm::Ct32) as u64
+            if self.clut_hash.0 != gs.clut_gen || self.clut_hash.1 != off || self.clut_hash.2 != n {
+                let h = (0..n).fold(0xcbf2_9ce4_8422_2325u64, |h, i| (h ^ gs.clut[(off + i) % 256] as u64).wrapping_mul(0x100_0000_01b3));
+                self.clut_hash = (gs.clut_gen, off, n, h);
+            }
+            self.clut_hash.3 ^ (gs.clut_psm == Psm::Ct32) as u64
         } else {
             0
         };
@@ -613,11 +676,15 @@ impl Hw {
         };
         let (w, h, px, wide_picture) = match picture {
             Some(r) => r,
-            None if self.cfg.xbox_icons => match crate::icons::replace(w, h, &px) {
+            None => match self.cfg.xbox_icons.then(|| crate::icons::replace(w, h, &px)).flatten() {
                 Some((w, h, px)) => (w, h, px, false),
-                None => (w, h, px, false),
+                None => {
+                    if let Some(s) = self.sharpen.as_mut().filter(|_| sprite) {
+                        s.queue(key, self.cfg.scale, w, h, &px);
+                    }
+                    (w, h, px, false)
+                }
             },
-            None => (w, h, px, false),
         };
         self.end_rendering();
         let image = self.upload_image(w, h, &px, vk::ImageUsageFlags::SAMPLED, "texture")?;
@@ -840,7 +907,7 @@ impl Hw {
         let bp = self.target(fb.bp(), fb.bw(), fb.psm(), sy1 + 1, ysc)?;
 
         // Texture first: it may need transfers outside rendering.
-        let (tex, tex_scale, rt_tex) = if attrs.textured() { self.texture(gs)? } else { (TexRef::None, [1.0, 1.0], false) };
+        let (tex, tex_scale, rt_tex) = if attrs.textured() { self.texture(gs, shape == Shape::Sprite)? } else { (TexRef::None, [1.0, 1.0], false) };
 
         let blend = if attrs.blend() { blend::map(ctx.alpha.abcd()) } else { Blend::OFF };
         let fm = fb.mask();
@@ -1067,10 +1134,16 @@ impl Hw {
             let t = src.and_then(|s| self.targets.get(&s.0)).map(|t| (t.bw, t.psm, t.w, t.h));
             eprintln!("[display] vblank {} src {:?} target {:?} dispfb {:#x?} display {:#x?}", self.vblank, src, t, d.dispfb, d.display);
         }
-        let recording = match (&self.record, src) {
-            (Some(r), Some(src)) if (r.start..r.end).contains(&self.vblank) => self.record_readback(src).ok(),
-            _ => None,
-        };
+        if let (Some(r), Some(src)) = (&self.record, src) {
+            if self.vblank >= r.end {
+                self.stop_recording();
+            } else if self.vblank >= r.start {
+                if let Err(e) = self.record_capture(src) {
+                    eprintln!("[gs] recording: {e}");
+                    self.stop_recording();
+                }
+            }
+        }
         let readback = match (&self.shot, src) {
             (Some((frame, _)), Some(src)) if self.vblank >= *frame => match self.record_readback(src) {
                 Ok(r) => Some(r),
@@ -1084,9 +1157,6 @@ impl Hw {
         self.submit_and_present(src);
         if let Some((buf, w, h)) = readback {
             self.save_shot(buf, w, h);
-        }
-        if let Some((buf, w, h)) = recording {
-            self.record_frame(buf, w, h);
         }
         self.evict_textures();
     }
@@ -1108,52 +1178,105 @@ impl Hw {
         Ok((buf, w, h))
     }
 
-    /// Send one frame to the FREEK_RECORD encoder. Every frame is scaled
-    /// into the first frame's size, so display mode changes don't break
-    /// the stream.
-    fn record_frame(&mut self, mut buf: Buffer, w: u32, h: u32) {
-        unsafe {
-            let _ = self.vk.device.device_wait_idle();
+    /// Queue one recorded frame: the GPU scales the displayed region into
+    /// the recording's size (the first frame's, at most 1280 wide, so
+    /// display mode changes don't break the stream) and copies it to a
+    /// buffer read once this frame's fence has passed.
+    fn record_capture(&mut self, (bp, x, y, w, h): (u32, u32, u32, u32, u32)) -> Result<()> {
+        let s = self.cfg.scale_x;
+        let t = &self.targets[&bp];
+        let (sw, sh) = ((w * s).min(t.color.extent.width - x * s), (h * t.sy).min(t.color.extent.height - y * t.sy));
+        let (sx, sy, image) = (x * s, y * t.sy, t.color.image);
+        let Some(r) = self.record.as_mut() else { return Ok(()) };
+        let (ow, oh) = *r.size.get_or_insert(if sw > 1280 { (1280, (sh * 1280 / sw) & !1) } else { (sw & !1, sh & !1) });
+        if r.image.is_none() {
+            let img = self.vk.create_image(ow, oh, COLOR, vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST, "recording")?;
+            transition(&self.vk.device, self.frames[self.slot].cmd, img.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
+            self.record.as_mut().unwrap().image = Some(img);
         }
-        let src = buf.mapped()[..(w * h * 4) as usize].to_vec();
-        self.vk.destroy_buffer(buf);
-        let Some(r) = self.record.as_mut() else { return };
-        let (ow, oh) = *r.size.get_or_insert((w, h));
-        let mut frame = vec![0u8; (ow * oh * 4) as usize];
-        for y in 0..oh {
-            let sy = (y * h / oh) as usize;
-            for x in 0..ow {
-                let sx = (x * w / ow) as usize;
-                let o = ((y * ow + x) * 4) as usize;
-                let i = (sy * w as usize + sx) * 4;
-                frame[o..o + 3].copy_from_slice(&src[i..i + 3]);
-                frame[o + 3] = 255;
+        let small = self.record.as_ref().unwrap().image.as_ref().unwrap().image;
+        let cmd = self.cmd();
+        let o = |x: u32, y: u32| vk::Offset3D { x: x as i32, y: y as i32, z: 1 };
+        blit(&self.vk.device, cmd, (image, [vk::Offset3D { z: 0, ..o(sx, sy) }, o(sx + sw, sy + sh)]), (small, vk::ImageLayout::GENERAL, [vk::Offset3D::default(), o(ow, oh)]));
+        let buf = self.vk.create_buffer(ow as u64 * oh as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, "recording")?;
+        let region = vk::BufferImageCopy::default().image_subresource(layers(vk::ImageAspectFlags::COLOR)).image_extent(vk::Extent3D { width: ow, height: oh, depth: 1 });
+        unsafe { self.vk.device.cmd_copy_image_to_buffer(cmd, small, vk::ImageLayout::GENERAL, buf.buffer, &[region]) };
+        barrier(&self.vk.device, cmd);
+        self.frames[self.slot].garbage.push(Garbage::Recorded(buf));
+        Ok(())
+    }
+
+    /// Start the encoder for a recording of `ow`x`oh` RGBA frames: a thread
+    /// feeding ffmpeg, so encoding never holds up the frame.
+    fn start_encoder(path: &str, (ow, oh): (u32, u32)) -> Option<std::sync::mpsc::Sender<Vec<u8>>> {
+        let child = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb0", "-s", &format!("{ow}x{oh}"), "-r", "60", "-i", "-"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-pix_fmt", "yuv420p", path])
+            .stdin(std::process::Stdio::piped())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[gs] recording: cannot start ffmpeg: {e}");
+                return None;
             }
-        }
-        if r.encoder.is_none() {
-            let child = std::process::Command::new("ffmpeg")
-                .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{ow}x{oh}"), "-r", "60", "-i", "-"])
-                .args(["-vf", "scale=1024:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", &r.path])
-                .stdin(std::process::Stdio::piped())
-                .spawn();
-            match child {
-                Ok(c) => r.encoder = Some(c),
-                Err(e) => {
-                    eprintln!("[gs] recording: cannot start ffmpeg: {e}");
-                    self.record = None;
-                    return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let path = path.to_string();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().unwrap();
+            while let Ok(frame) = rx.recv() {
+                if stdin.write_all(&frame).is_err() {
+                    break;
+                }
+            }
+            drop(stdin);
+            let _ = child.wait();
+            eprintln!("[gs] recording saved to {path}");
+        });
+        Some(tx)
+    }
+
+    /// A recorded frame's pixels are ready (its fence has passed).
+    fn record_ready(&mut self, mut buf: Buffer) {
+        if let Some(r) = &mut self.record {
+            if let Some(size) = r.size {
+                if r.encoder.is_none() && !r.failed {
+                    r.encoder = Self::start_encoder(&r.path, size);
+                    r.failed = r.encoder.is_none();
+                }
+                if let Some(tx) = &r.encoder {
+                    let _ = tx.send(buf.mapped()[..(size.0 * size.1 * 4) as usize].to_vec());
                 }
             }
         }
-        use std::io::Write;
-        let enc = r.encoder.as_mut().unwrap();
-        let ok = enc.stdin.as_mut().is_some_and(|i| i.write_all(&frame).is_ok());
-        if !ok || self.vblank + 1 >= r.end {
-            let mut r = self.record.take().unwrap();
-            drop(r.encoder.as_mut().and_then(|e| e.stdin.take()));
-            let _ = r.encoder.as_mut().map(|e| e.wait());
-            eprintln!("[gs] recording saved to {}", r.path);
+        self.vk.destroy_buffer(buf);
+    }
+
+    /// End the recording; the encoder thread finishes the file.
+    fn stop_recording(&mut self) {
+        if let Some(r) = self.record.take() {
+            if let Some(img) = r.image {
+                self.frames[self.slot].garbage.push(Garbage::Image(img));
+            }
+            eprintln!("[capture] recording stopped at vblank {}", self.vblank);
         }
+    }
+
+    /// F12: start recording to `captures/`, or stop. For glitches seen
+    /// while playing; frame n of the video is vblank start + n (see the
+    /// FREEK_PAD_LOG button log for the same numbering).
+    pub fn toggle_recording(&mut self) {
+        if self.record.is_some() {
+            self.stop_recording();
+            return;
+        }
+        let _ = std::fs::create_dir_all("captures");
+        let start = self.vblank + 1;
+        let path = format!("captures/clip_{start:06}.mkv");
+        eprintln!("[capture] recording from vblank {start} to {path}; F12 again to stop");
+        self.record = Some(Recording { path, start, end: u64::MAX, ..Default::default() });
     }
 
     fn save_shot(&mut self, mut buf: Buffer, w: u32, h: u32) {
@@ -1168,12 +1291,13 @@ impl Hw {
             }
             None => base,
         };
-        let png = crate::png::encode(w, h, &buf.mapped()[..(w * h * 4) as usize]);
-        match std::fs::write(&path, png) {
+        let pixels = buf.mapped()[..(w * h * 4) as usize].to_vec();
+        self.vk.destroy_buffer(buf);
+        // Encoding and writing take a while; keep the frame going.
+        std::thread::spawn(move || match std::fs::write(&path, crate::png::encode(w, h, &pixels)) {
             Ok(()) => eprintln!("[gs] saved {w}x{h} screenshot to {path}"),
             Err(e) => eprintln!("[gs] screenshot {path}: {e}"),
-        }
-        self.vk.destroy_buffer(buf);
+        });
     }
 
     fn submit_and_present(&mut self, src: Option<(u32, u32, u32, u32, u32)>) {
@@ -1269,6 +1393,7 @@ impl Hw {
         self.slot = (self.slot + 1) % FRAMES;
         self.frame_no += 1;
         self.begin_frame();
+        self.apply_sharpened();
     }
 
     pub fn resize(&mut self, size: (u32, u32)) {
@@ -1281,6 +1406,28 @@ impl Hw {
             unsafe { dev.destroy_semaphore(s, None) };
         }
         self.rendered = (0..self.vk.swapchain.images.len()).map(|_| unsafe { dev.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap() }).collect();
+    }
+
+    /// Swap in textures the xBRZ worker has finished, at the start of a
+    /// frame (nothing drawn yet). Old images are freed once the GPU is done.
+    fn apply_sharpened(&mut self) {
+        let done: Vec<Sharpened> = match &mut self.sharpen {
+            Some(s) => s.finished(),
+            None => return,
+        };
+        for d in done {
+            // Evicted or replaced meanwhile: nothing to update.
+            if !self.textures.contains_key(&d.key) {
+                continue;
+            }
+            let Ok(image) = self.upload_image(d.w, d.h, &d.px, vk::ImageUsageFlags::SAMPLED, "texture") else { continue };
+            let t = self.textures.get_mut(&d.key).unwrap();
+            let old = std::mem::replace(&mut t.image, image);
+            let bytes = d.w as u64 * d.h as u64 * 4;
+            self.texture_bytes = self.texture_bytes - t.bytes + bytes;
+            t.bytes = bytes;
+            self.frames[self.slot].garbage.push(Garbage::Image(old));
+        }
     }
 
     fn evict_textures(&mut self) {
@@ -1320,6 +1467,68 @@ fn blit(dev: &ash::Device, cmd: vk::CommandBuffer, (src, from): (vk::Image, [vk:
 }
 
 /// Write a decoded texture as PNG (alpha scaled to 0-255) for inspection.
+struct Sharpened {
+    key: TexKey,
+    w: u32,
+    h: u32,
+    px: Vec<u32>,
+}
+
+/// The xBRZ worker thread and its queues.
+struct Sharpener {
+    jobs: std::sync::mpsc::Sender<(TexKey, u32, u32, u32, Vec<u32>)>,
+    done: std::sync::mpsc::Receiver<Sharpened>,
+    /// Jobs queued and not yet collected.
+    pending: usize,
+}
+
+impl Sharpener {
+    fn spawn() -> Sharpener {
+        let (jobs, rx) = std::sync::mpsc::channel::<(TexKey, u32, u32, u32, Vec<u32>)>();
+        let (tx, done) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("xbrz".into())
+            .spawn(move || {
+                for (key, scale, w, h, px) in rx {
+                    let (w, h, px) = sharpen(scale, w, h, px);
+                    if tx.send(Sharpened { key, w, h, px }).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn xbrz thread");
+        Sharpener { jobs, done, pending: 0 }
+    }
+
+    /// Queue a texture worth upscaling. Textures rewritten every frame
+    /// would flood the worker, so new work waits while it is busy.
+    fn queue(&mut self, key: TexKey, scale: u32, w: u32, h: u32, px: &[u32]) {
+        if scale.min(2048 / w.max(h)) < 2 || w * h > 256 * 256 || self.pending >= 16 {
+            return;
+        }
+        if self.jobs.send((key, scale, w, h, px.to_vec())).is_ok() {
+            self.pending += 1;
+        }
+    }
+
+    fn finished(&mut self) -> Vec<Sharpened> {
+        let done: Vec<Sharpened> = self.done.try_iter().collect();
+        self.pending -= done.len();
+        done
+    }
+}
+
+/// xBRZ-upscale a texture by the internal resolution factor (at most 6, and
+/// within 2048 per side). Sampling uses normalized coordinates, so the
+/// bigger image drops in for the original unchanged.
+fn sharpen(scale: u32, w: u32, h: u32, px: Vec<u32>) -> (u32, u32, Vec<u32>) {
+    let f = scale.min(6).min(2048 / w.max(h));
+    let rgba: Vec<u8> = px.iter().flat_map(|p| p.to_le_bytes()).collect();
+    let out = xbrz::scale_rgba(&rgba, w as usize, h as usize, f as usize);
+    let px = out.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    (w * f, h * f, px)
+}
+
 fn dump_texture(dir: &std::path::Path, key: &TexKey, t: gs::regs::Tex0, w: u32, h: u32, px: &[u32]) {
     let _ = std::fs::create_dir_all(dir);
     let id = key.tex0 ^ key.clut.rotate_left(17) ^ key.texa.rotate_left(33);

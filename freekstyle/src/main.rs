@@ -5,6 +5,9 @@
 //! then:
 //!   cargo run --release -p freekstyle -- [options] [game/SLUS_203.67 [disc image]]
 //!
+//! Settings come from freekstyle.toml in the working directory (written by
+//! freekstyle-launcher; defaults if missing); options given here override it.
+//!
 //! Options:
 //!   --res 1080|1440|4k   window size and matching internal resolution (default 1080)
 //!   --scale N            internal resolution multiplier (overrides --res)
@@ -16,12 +19,14 @@
 //!                        copy of the picture instead of black
 //!   --headless           no window; print GS statistics
 //!   --ps2-icons          keep the original PlayStation button icons
+//!   --no-sharp-textures  original texture resolution (no xBRZ upscaling)
 //!   --mute               no sound (the sound driver still runs)
 //!
 //! Controls: any gamepad (Xbox layout: A/B/X/Y = Cross/Circle/Square/
-//! Triangle by position), or the keyboard: arrows = D-pad, Z/Space = A,
-//! X = B, A = X, S = Y, Q/E = LB/RB, 1/3 = LT/RT, Enter = Start,
-//! Backspace = Back. F11 toggles fullscreen, Esc quits.
+//! Triangle by position), or the keyboard: WASD/arrows = D-pad and left
+//! stick, J/Space = A, K = B, U = X, I = Y, Y/O = LB/RB, H/L = LT/RT,
+//! Enter = Start, Backspace = Back; both remappable in freekstyle.toml. F11 toggles
+//! fullscreen, F12 captures a frame, Esc quits.
 //!
 //! The disc image (raw .bin or .iso) defaults to game/Freekstyle.bin.
 
@@ -30,6 +35,7 @@ mod profile;
 #[allow(clippy::all)]
 mod gen;
 
+use std::collections::HashMap;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -37,7 +43,7 @@ use std::{env, fs, process, thread};
 
 use ee_runtime::pad::{button, Input};
 use ee_runtime::Cpu;
-use gilrs::{Axis, Button, Gilrs};
+use gilrs::{Axis, Button, EventType, Gilrs};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -56,22 +62,34 @@ struct Options {
     widescreen: bool,
     headless: bool,
     ps2_icons: bool,
+    sharp_textures: bool,
     mute: bool,
+    bindings: Vec<freek_config::Binding>,
 }
 
 fn options() -> Options {
+    let c = freek_config::Config::load(freek_config::FILE.as_ref()).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        process::exit(2);
+    });
+    let (window, scale) = c.display().unwrap_or_else(|| {
+        eprintln!("{}: res must be 1080, 1440 or 4k, got {:?}", freek_config::FILE, c.res);
+        process::exit(2);
+    });
     let mut o = Options {
-        elf: "game/SLUS_203.67".into(),
-        disc: "game/Freekstyle.bin".into(),
-        window: (1920, 1080),
-        scale: 3,
-        fullscreen: false,
-        stretch: false,
-        blur_bars: false,
-        widescreen: false,
+        elf: c.elf,
+        disc: c.disc,
+        window,
+        scale,
+        fullscreen: c.fullscreen,
+        stretch: c.stretch,
+        blur_bars: c.blur_bars,
+        widescreen: c.widescreen,
         headless: false,
-        ps2_icons: false,
-        mute: false,
+        ps2_icons: c.ps2_icons,
+        sharp_textures: c.sharp_textures,
+        mute: c.mute,
+        bindings: c.bindings,
     };
     let mut positional = Vec::new();
     let mut scale: Option<u32> = None;
@@ -95,6 +113,7 @@ fn options() -> Options {
             "--widescreen" => o.widescreen = true,
             "--headless" => o.headless = true,
             "--ps2-icons" => o.ps2_icons = true,
+            "--no-sharp-textures" => o.sharp_textures = false,
             "--mute" => o.mute = true,
             _ if a.starts_with("--") => {
                 eprintln!("unknown option {a}");
@@ -150,7 +169,7 @@ fn main() {
         .name("ee-main".into())
         .stack_size(STACK_SIZE)
         .spawn(move || {
-            profile::start_if_requested();
+            profile::start_if_requested("FREEK_PROFILE", "profile.txt");
             let mut c = Cpu::new(&gen::FUNCS);
             c.iop.disc = Some(disc);
             c.iop.link = Some(link);
@@ -186,7 +205,9 @@ fn main() {
             eprintln!("[input] gamepad: {}", pad.name());
         }
     }
-    let mut app = App { opts, rx: gs_rx, window: None, renderer: None, last_title: Instant::now(), last_frame: 0, gilrs, keys: 0 };
+    let (key_map, pad_map) = input_maps(&opts.bindings);
+    let mut app = App { opts, rx: gs_rx, window: None, renderer: None, last_title: Instant::now(), last_frame: 0, gilrs, keys: Vec::new(), key_map, pad_map };
+    profile::start_if_requested("FREEK_PROFILE_GS", "profile_gs.txt");
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("event loop: {e}");
     }
@@ -201,69 +222,98 @@ struct App {
     last_title: Instant,
     last_frame: u64,
     gilrs: Option<Gilrs>,
-    /// PS2 buttons held on the keyboard.
-    keys: u16,
+    /// Mapped keys held down; several keys can share a button.
+    keys: Vec<KeyCode>,
+    /// Bound keys (winit KeyCode names) and gamepad buttons, with the PS2
+    /// buttons each one presses.
+    key_map: HashMap<String, u16>,
+    pad_map: Vec<(Button, u16)>,
 }
 
-/// Keyboard fallback, Xbox-style names in comments.
-fn key_button(code: KeyCode) -> Option<u16> {
-    Some(match code {
-        KeyCode::ArrowUp => button::UP,
-        KeyCode::ArrowDown => button::DOWN,
-        KeyCode::ArrowLeft => button::LEFT,
-        KeyCode::ArrowRight => button::RIGHT,
-        KeyCode::KeyZ | KeyCode::Space => button::CROSS, // A
-        KeyCode::KeyX => button::CIRCLE,                 // B
-        KeyCode::KeyA => button::SQUARE,                 // X
-        KeyCode::KeyS => button::TRIANGLE,               // Y
-        KeyCode::KeyQ => button::L1,                     // LB
-        KeyCode::KeyE => button::R1,                     // RB
-        KeyCode::Digit1 => button::L2,                   // LT
-        KeyCode::Digit3 => button::R2,                   // RT
-        KeyCode::Enter => button::START,
-        KeyCode::Backspace => button::SELECT,            // Back
-        _ => return None,
-    })
+/// gilrs buttons by the names freekstyle.toml uses (their Debug names).
+const PAD_BUTTONS: [Button; 19] = [
+    Button::South,
+    Button::East,
+    Button::North,
+    Button::West,
+    Button::C,
+    Button::Z,
+    Button::LeftTrigger,
+    Button::LeftTrigger2,
+    Button::RightTrigger,
+    Button::RightTrigger2,
+    Button::Select,
+    Button::Start,
+    Button::Mode,
+    Button::LeftThumb,
+    Button::RightThumb,
+    Button::DPadUp,
+    Button::DPadDown,
+    Button::DPadLeft,
+    Button::DPadRight,
+];
+
+/// A key's name in freekstyle.toml: its winit KeyCode name, except that
+/// modifiers bind by either side ("Shift", not "ShiftLeft").
+fn key_name(code: KeyCode) -> String {
+    match code {
+        KeyCode::ShiftLeft | KeyCode::ShiftRight => "Shift".into(),
+        KeyCode::ControlLeft | KeyCode::ControlRight => "Control".into(),
+        KeyCode::AltLeft | KeyCode::AltRight => "Alt".into(),
+        _ => format!("{code:?}"),
+    }
+}
+
+/// Resolve the bindings into lookup tables; unknown names are reported
+/// and skipped.
+fn input_maps(bindings: &[freek_config::Binding]) -> (HashMap<String, u16>, Vec<(Button, u16)>) {
+    let mut keys = HashMap::new();
+    let mut pad = Vec::new();
+    for b in bindings {
+        let Some(bit) = freek_config::button_bit(&b.button) else { continue };
+        for k in &b.keys {
+            *keys.entry(k.clone()).or_insert(0) |= bit;
+        }
+        for name in &b.pad {
+            match PAD_BUTTONS.iter().find(|p| format!("{p:?}") == *name) {
+                Some(&p) => pad.push((p, bit)),
+                None => eprintln!("[input] {}: unknown gamepad button {name:?}", freek_config::FILE),
+            }
+        }
+    }
+    (keys, pad)
 }
 
 impl App {
     /// Combine gamepad and keyboard state into the PS2 controller.
     fn update_input(&mut self) {
-        let mut input = Input { buttons: self.keys, ..Input::default() };
+        let keys = self.keys.iter().filter_map(|&k| self.key_map.get(&key_name(k))).fold(0, |a, b| a | b);
+        let mut input = Input { buttons: keys, ..Input::default() };
         if let Some(g) = &mut self.gilrs {
-            while g.next_event().is_some() {}
+            while let Some(ev) = g.next_event() {
+                // Logged so a flaky controller shows up next to the game's output.
+                match ev.event {
+                    EventType::Connected => eprintln!("[input] gamepad connected: {}", g.gamepad(ev.id).name()),
+                    EventType::Disconnected => eprintln!("[input] gamepad disconnected: {}", g.gamepad(ev.id).name()),
+                    _ => {}
+                }
+            }
             if let Some((_, pad)) = g.gamepads().find(|(_, p)| p.is_connected()) {
-                // Xbox positions map onto the same PS2 positions.
-                let map = [
-                    (Button::South, button::CROSS),
-                    (Button::East, button::CIRCLE),
-                    (Button::West, button::SQUARE),
-                    (Button::North, button::TRIANGLE),
-                    (Button::LeftTrigger, button::L1),
-                    (Button::RightTrigger, button::R1),
-                    (Button::Select, button::SELECT),
-                    (Button::Start, button::START),
-                    (Button::LeftThumb, button::L3),
-                    (Button::RightThumb, button::R3),
-                    (Button::DPadUp, button::UP),
-                    (Button::DPadDown, button::DOWN),
-                    (Button::DPadLeft, button::LEFT),
-                    (Button::DPadRight, button::RIGHT),
-                ];
-                for (b, m) in map {
-                    if pad.is_pressed(b) {
+                // Analog triggers press past a quarter; whatever is bound to
+                // L2/R2 also gives their pressure.
+                for &(b, m) in &self.pad_map {
+                    let v = pad.button_data(b).map(|d| d.value()).unwrap_or(0.0);
+                    let analog = matches!(b, Button::LeftTrigger2 | Button::RightTrigger2);
+                    if if analog { v > 0.25 } else { pad.is_pressed(b) } {
                         input.buttons |= m;
                     }
-                }
-                let trigger = |b| pad.button_data(b).map(|d| d.value()).unwrap_or(0.0);
-                let (lt, rt) = (trigger(Button::LeftTrigger2), trigger(Button::RightTrigger2));
-                input.l2 = (lt * 255.0) as u8;
-                input.r2 = (rt * 255.0) as u8;
-                if lt > 0.25 {
-                    input.buttons |= button::L2;
-                }
-                if rt > 0.25 {
-                    input.buttons |= button::R2;
+                    let pressure = (v * 255.0) as u8;
+                    if m & button::L2 != 0 {
+                        input.l2 = input.l2.max(pressure);
+                    }
+                    if m & button::R2 != 0 {
+                        input.r2 = input.r2.max(pressure);
+                    }
                 }
                 // PS2 sticks: 0 = left/up, 0x80 = centre, 0xff = right/down.
                 let axis = |a, invert: bool| {
@@ -274,8 +324,28 @@ impl App {
                 input.sticks = [axis(Axis::RightStickX, false), axis(Axis::RightStickY, true), axis(Axis::LeftStickX, false), axis(Axis::LeftStickY, true)];
             }
         }
+        // D-pad keys (WASD, arrows) also push the left stick, so the keyboard
+        // steers whether the game reads the D-pad or the stick. Per axis the
+        // larger deflection wins: a resting or drifting gamepad stick never
+        // cancels a key.
+        let dir = |neg: u16, pos: u16| match (keys & neg != 0, keys & pos != 0) {
+            (true, false) => 0x00,
+            (false, true) => 0xff,
+            _ => 0x80,
+        };
+        let merge = |pad: u8, key: u8| if (key as i32 - 128).abs() > (pad as i32 - 128).abs() { key } else { pad };
+        input.sticks[2] = merge(input.sticks[2], dir(button::LEFT, button::RIGHT));
+        input.sticks[3] = merge(input.sticks[3], dir(button::UP, button::DOWN));
         ee_runtime::pad::set_input(input);
     }
+}
+
+fn window_icon() -> Option<winit::window::Icon> {
+    let mut reader = png::Decoder::new(&include_bytes!("../assets/icon/256.png")[..]).read_info().ok()?;
+    let mut rgba = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut rgba).ok()?;
+    rgba.truncate(info.buffer_size());
+    winit::window::Icon::from_rgba(rgba, info.width, info.height).ok()
 }
 
 impl ApplicationHandler for App {
@@ -284,7 +354,14 @@ impl ApplicationHandler for App {
             return;
         }
         let (w, h) = self.opts.window;
-        let mut attrs = Window::default_attributes().with_title("Freekstyle").with_inner_size(PhysicalSize::new(w, h));
+        // The app ID matches freekstyle.desktop, where Wayland desktops find
+        // the icon; X11 takes the pixels directly.
+        let mut attrs = Window::default_attributes()
+            .with_title("Freekstyle")
+            .with_inner_size(PhysicalSize::new(w, h))
+            .with_window_icon(window_icon());
+        attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(attrs, "freekstyle", "freekstyle");
+        attrs = winit::platform::x11::WindowAttributesExtX11::with_name(attrs, "freekstyle", "freekstyle");
         if self.opts.fullscreen {
             attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
         }
@@ -300,7 +377,9 @@ impl ApplicationHandler for App {
             scale: self.opts.scale,
             scale_x,
             widescreen: self.opts.widescreen,
-            stretch: self.opts.stretch, blur_bars: self.opts.blur_bars, xbox_icons: !self.opts.ps2_icons, pictures: Some(pictures),
+            stretch: self.opts.stretch, blur_bars: self.opts.blur_bars, xbox_icons: !self.opts.ps2_icons,
+            sharp_textures: self.opts.sharp_textures,
+            pictures: Some(pictures),
         };
         let renderer = gs_vulkan::Renderer::new(&window, (size.width, size.height), cfg).unwrap_or_else(|e| {
             eprintln!("Vulkan: {e}");
@@ -319,17 +398,22 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(code), state, repeat: false, .. }, .. }
-                if key_button(code).is_some() =>
+                if self.key_map.contains_key(&key_name(code)) =>
             {
-                let m = key_button(code).unwrap();
+                self.keys.retain(|&k| k != code);
                 if state == ElementState::Pressed {
-                    self.keys |= m;
-                } else {
-                    self.keys &= !m;
+                    self.keys.push(code);
                 }
             }
+            // Releases while unfocused never arrive: drop everything held.
+            WindowEvent::Focused(false) => self.keys.clear(),
             WindowEvent::KeyboardInput { event: KeyEvent { logical_key, state: ElementState::Pressed, .. }, .. } => match logical_key {
                 Key::Named(NamedKey::Escape) => el.exit(),
+                Key::Named(NamedKey::F12) => {
+                    if let Some(r) = &mut self.renderer {
+                        r.toggle_recording();
+                    }
+                }
                 Key::Named(NamedKey::F11) => {
                     if let Some(w) = &self.window {
                         let fs = if w.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) };
@@ -429,19 +513,26 @@ fn headless_gs(rx: Receiver<gs::Msg>) {
     let mut g = gs::Gs::new();
     let mut count = Count::default();
     let mut frames = 0u64;
+    // Displayed-buffer changes: the game's frame rate.
+    let (mut flips, mut shown) = (0u64, 0u64);
     while let Ok(msg) = rx.recv() {
         match msg {
             gs::Msg::Gif(d) => g.write_gif(&d, &mut count),
             gs::Msg::Priv(r, v) => g.write_priv(r, v),
             gs::Msg::Vsync(_) => {
                 frames += 1;
+                if g.display.dispfb[1] != shown {
+                    shown = g.display.dispfb[1];
+                    flips += 1;
+                }
                 if frames % 60 == 0 {
                     let d = &g.display;
                     eprintln!(
-                        "[gs] {}s: points/lines/tris/sprites {:?} textured {} uploads {} packets {} | pmode {:#x} dispfb1 {:#x} dispfb2 {:#x} display2 {:#x}",
+                        "[gs] {}s: {flips} fps, points/lines/tris/sprites {:?} textured {} uploads {} packets {} | pmode {:#x} dispfb1 {:#x} dispfb2 {:#x} display2 {:#x}",
                         frames / 60, count.shapes, count.textured, count.writes, g.stats.packets, d.pmode, d.dispfb[0], d.dispfb[1], d.display[1]
                     );
                     count = Count::default();
+                    flips = 0;
                 }
             }
         }

@@ -92,7 +92,7 @@ impl Memory {
     access!(r128, w128, u128);
 
     /// Resolve an address to backing storage, or None for I/O and holes.
-    fn backing(&mut self, addr: u32, n: usize) -> Option<&mut [u8]> {
+    pub(crate) fn backing(&mut self, addr: u32, n: usize) -> Option<&mut [u8]> {
         if (SPR_BASE..SPR_BASE + SPR_SIZE as u32).contains(&addr) {
             let a = (addr - SPR_BASE) as usize;
             return self.spr.get_mut(a..a + n);
@@ -132,7 +132,8 @@ impl Memory {
             return;
         }
         let mut pad = std::mem::take(&mut self.pad);
-        pad.vblank(&mut |addr, bytes| self.write_bytes(addr, bytes));
+        let n = self.io.vblanks;
+        pad.vblank(n, &mut |addr, bytes| self.write_bytes(addr, bytes));
         self.pad = pad;
     }
 
