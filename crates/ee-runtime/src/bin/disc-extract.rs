@@ -1,6 +1,7 @@
 //! Copy a file off the game disc image (raw .bin or .iso), for setting up
 //! from your own dump: disc-extract [disc image] [file] [out dir]
-//! (defaults: game/Freekstyle.bin SLUS_203.67 game)
+//! (defaults: game/Freekstyle.bin SLUS_203.67 game); `--list` as the file
+//! prints every file on the disc.
 use std::path::Path;
 
 use ee_runtime::disc::Disc;
@@ -14,6 +15,12 @@ fn main() {
         eprintln!("{disc_path}: {e}");
         std::process::exit(1);
     });
+    if name == "--list" {
+        for (path, e) in disc.walk() {
+            println!("{path} {}", e.size);
+        }
+        return;
+    }
     let Some(e) = disc.find(name) else {
         eprintln!("{disc_path}: no {name} on this disc (the port needs the NTSC-U release, SLUS-20367)");
         std::process::exit(1);
