@@ -533,6 +533,7 @@ fn headless_gs(rx: Receiver<gs::Msg>) {
         match msg {
             gs::Msg::Gif(d) => g.write_gif(&d, &mut count),
             gs::Msg::Priv(r, v) => g.write_priv(r, v),
+            gs::Msg::Movie(_) => {}
             gs::Msg::Vsync(_) => {
                 frames += 1;
                 if g.display.dispfb[1] != shown {

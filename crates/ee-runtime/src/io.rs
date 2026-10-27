@@ -196,6 +196,12 @@ impl Io {
         }
     }
 
+    /// Skip the vblanks that passed while the EE thread was busy outside
+    /// guest code (a movie), without reporting a stall.
+    pub fn resync(&mut self) {
+        self.vblanks = (self.start.elapsed().as_secs_f64() * VBLANK_HZ) as u64;
+    }
+
     /// Mark a DMA channel's transfer complete in D_STAT, raising the DMAC
     /// interrupt cause when that channel is unmasked.
     fn dma_done(&mut self, channel: usize) {

@@ -73,6 +73,16 @@ pub enum Msg {
     /// A vertical blank happened (with its number since boot): present
     /// the current display.
     Vsync(u64),
+    /// A full-screen movie frame, shown instead of the GS display until
+    /// `Movie(None)` ends the movie.
+    Movie(Option<Box<MovieFrame>>),
+}
+
+/// One decoded movie frame: `w` x `h` RGBA8 pixels, rows top to bottom.
+pub struct MovieFrame {
+    pub w: u32,
+    pub h: u32,
+    pub rgba: Vec<u32>,
 }
 
 /// Privileged (memory-mapped) registers that control video output.

@@ -143,14 +143,32 @@ On a wide window the 4:3 picture is centred with black bars;
 
 The intro and logo movies are EA `.FLM` files (MPEG-2 video at 512x448,
 29.97 fps, with PS2 ADPCM stereo audio). `flm2mkv` converts them to
-Linux-friendly Matroska (VP9 video, Opus audio) with ffmpeg:
+Linux-friendly Matroska (VP9 video, Opus audio) with ffmpeg. Copy them off
+the disc first, then convert:
 
 ```sh
-cargo run --release -p flm --bin flm2mkv -- <extracted OPENING dir> game/movies
+for m in OPENING/BIGLOGO OPENING/EAGAMES OPENING/EAS_BIG OPENING/INTRO ABOUTEA/PROD1; do
+  cargo run --release -p ee-runtime --bin disc-extract -- game/Freekstyle.bin "\\SXDATA\\${m%/*}\\${m#*/}.FLM" game/movies/flm
+done
+cargo run --release -p flm --bin flm2mkv -- game/movies/flm game/movies
 ```
 
-In-game playback of the `.mkv` files is not wired up yet, so the game still
-skips its movies.
+For an HD version that looks like a CRT TV (flat screen, scanlines, RGB
+phosphor stripes, a little glow) add `--crt`. It renders 1440x1080 at
+59.94 fps on the GPU through ffmpeg's libplacebo filter (`--height N` picks
+another size), and looks best fullscreen on a 1080p or 4K screen:
+
+```sh
+cargo run --release -p flm --bin flm2mkv -- --crt game/movies/flm game/movies/hd
+```
+
+The shader is `crates/flm/src/crt.glsl`; it also works live in mpv
+(`mpv --glsl-shaders=crates/flm/src/crt.glsl game/movies/intro.mkv`).
+
+The game plays them where the PS2 did (the intro and logos at boot),
+preferring `game/movies/hd/` and falling back to `game/movies/`; a movie
+with no conversion is skipped. ffmpeg decodes them while they play, so it
+must be installed to see them. Start or Cross skips a movie.
 
 ## VU microprograms
 

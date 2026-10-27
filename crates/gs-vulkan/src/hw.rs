@@ -280,6 +280,8 @@ pub struct Hw {
     pub stats: Stats,
     /// Target shown at the last vblank, to count flips.
     shown: Option<u32>,
+    /// The playing movie's current frame, shown instead of the GS display.
+    movie: Option<Image>,
     /// FREEK_SHOT=<file.png>:<frame>: save the displayed picture.
     shot: Option<(u64, String)>,
     /// FREEK_RECORD=<file.mkv>:<start vblank>:<seconds>: video capture.
@@ -384,6 +386,7 @@ impl Hw {
                 texture_bytes: 0,
                 stats: Stats::default(),
                 shown: None,
+                movie: None,
                 shot_every: std::env::var("FREEK_SHOT_EVERY").ok().and_then(|v| v.parse().ok()),
                 record: std::env::var("FREEK_RECORD").ok().and_then(|v| {
                     let mut it = v.rsplitn(3, ':');
@@ -1266,7 +1269,15 @@ impl Hw {
             },
             _ => None,
         };
-        self.submit_and_present(src);
+        let aspect = if self.cfg.widescreen { (16, 9) } else { (4, 3) };
+        let shown = src.map(|(bp, x, y, w, h)| {
+            let t = &self.targets[&bp];
+            let (s, ys) = (self.cfg.scale_x as i32, t.sy as i32);
+            let sx1 = ((x + w) as i32 * s).min(t.color.extent.width as i32);
+            let sy1 = ((y + h) as i32 * ys).min(t.color.extent.height as i32);
+            (t.color.image, [vk::Offset3D { x: x as i32 * s, y: y as i32 * ys, z: 0 }, vk::Offset3D { x: sx1, y: sy1, z: 1 }], aspect)
+        });
+        self.submit_and_present(shown);
         if let Some((buf, w, h)) = readback {
             self.save_shot(buf, w, h);
         }
@@ -1433,7 +1444,46 @@ impl Hw {
         });
     }
 
-    fn submit_and_present(&mut self, src: Option<(u32, u32, u32, u32, u32)>) {
+    /// Show a movie frame (4:3, whatever the game's display mode).
+    pub fn present_movie(&mut self, f: &gs::MovieFrame) {
+        self.end_rendering();
+        if self.movie.as_ref().is_none_or(|m| (m.extent.width, m.extent.height) != (f.w, f.h)) {
+            match self.vk.create_image(f.w, f.h, COLOR, vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST, "movie") {
+                Ok(img) => {
+                    transition(&self.vk.device, self.cmd(), img.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
+                    if let Some(old) = self.movie.replace(img) {
+                        self.frames[self.slot].garbage.push(Garbage::Image(old));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[gs] movie: {e}");
+                    return;
+                }
+            }
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(f.rgba.as_ptr() as *const u8, f.rgba.len() * 4) };
+        let Ok((buf, off)) = self.stage(bytes) else { return };
+        let image = self.movie.as_ref().unwrap().image;
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(off)
+            .image_subresource(layers(vk::ImageAspectFlags::COLOR))
+            .image_extent(vk::Extent3D { width: f.w, height: f.h, depth: 1 });
+        unsafe { self.vk.device.cmd_copy_buffer_to_image(self.cmd(), buf, image, vk::ImageLayout::GENERAL, &[region]) };
+        barrier(&self.vk.device, self.cmd());
+        let rect = [vk::Offset3D::default(), vk::Offset3D { x: f.w as i32, y: f.h as i32, z: 1 }];
+        self.submit_and_present(Some((image, rect, (4, 3))));
+    }
+
+    /// The movie is over: back to the GS display.
+    pub fn end_movie(&mut self) {
+        if let Some(img) = self.movie.take() {
+            self.frames[self.slot].garbage.push(Garbage::Image(img));
+        }
+    }
+
+    /// Show `src` (an image, the rectangle to show, its aspect ratio) in
+    /// the window, or just black.
+    fn submit_and_present(&mut self, src: Option<(vk::Image, [vk::Offset3D; 2], (i32, i32))>) {
         if self.cfg.blur_bars && !self.cfg.stretch && self.blur.is_empty() {
             for (w, h) in BLUR_CHAIN {
                 match self.vk.create_image(w, h, COLOR, vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST, "blur") {
@@ -1466,12 +1516,9 @@ impl Hw {
                 dev.cmd_clear_color_image(cmd, sw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &black, &[range(vk::ImageAspectFlags::COLOR)]);
             }
             barrier(&dev, cmd);
-            if let Some((bp, x, y, w, h)) = src {
-                let s = self.cfg.scale_x as i32;
-                let t = &self.targets[&bp];
-                // Fit 4:3 (16:9 in widescreen) into the window unless stretching.
+            if let Some((image, src_rect, (ax, ay))) = src {
+                // Fit the aspect ratio into the window unless stretching.
                 let (ww, wh) = (ext.width as i32, ext.height as i32);
-                let (ax, ay) = if self.cfg.widescreen { (16, 9) } else { (4, 3) };
                 let (dw, dh) = if self.cfg.stretch {
                     (ww, wh)
                 } else if ww * ay > wh * ax {
@@ -1480,13 +1527,9 @@ impl Hw {
                     (ww, ww * ay / ax)
                 };
                 let (dx, dy) = ((ww - dw) / 2, (wh - dh) / 2);
-                let ys = t.sy as i32;
-                let sx1 = ((x + w) as i32 * s).min(t.color.extent.width as i32);
-                let sy1 = ((y + h) as i32 * ys).min(t.color.extent.height as i32);
-                let src_rect = [vk::Offset3D { x: x as i32 * s, y: y as i32 * ys, z: 0 }, vk::Offset3D { x: sx1, y: sy1, z: 1 }];
                 if self.cfg.blur_bars && dw < ww {
                     // Blur by halving, then stretch the smallest over the window.
-                    let mut from = (t.color.image, src_rect);
+                    let mut from = (image, src_rect);
                     for img in &self.blur {
                         let to = [vk::Offset3D::default(), vk::Offset3D { x: img.extent.width as i32, y: img.extent.height as i32, z: 1 }];
                         blit(&dev, cmd, from, (img.image, vk::ImageLayout::GENERAL, to));
@@ -1495,7 +1538,7 @@ impl Hw {
                     blit(&dev, cmd, from, (sw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, [vk::Offset3D::default(), vk::Offset3D { x: ww, y: wh, z: 1 }]));
                 }
                 let to = [vk::Offset3D { x: dx, y: dy, z: 0 }, vk::Offset3D { x: dx + dw, y: dy + dh, z: 1 }];
-                blit(&dev, cmd, (t.color.image, src_rect), (sw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, to));
+                blit(&dev, cmd, (image, src_rect), (sw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, to));
             }
             transition(&dev, cmd, sw, vk::ImageAspectFlags::COLOR, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR);
         }

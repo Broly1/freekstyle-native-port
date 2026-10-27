@@ -110,6 +110,15 @@ pub struct AudioRing {
     pub buf: Mutex<VecDeque<[i16; 2]>>,
 }
 
+/// Sound of a playing movie, mixed over the SPU2 output by the audio
+/// device. `played` counts the samples it has taken: the movie's clock.
+pub struct MovieAudio {
+    pub buf: Mutex<VecDeque<[i16; 2]>>,
+    pub played: AtomicU64,
+}
+
+pub static MOVIE_AUDIO: MovieAudio = MovieAudio { buf: Mutex::new(VecDeque::new()), played: AtomicU64::new(0) };
+
 impl AudioRing {
     pub fn len(&self) -> usize {
         self.buf.lock().unwrap().len()

@@ -1,10 +1,13 @@
-//! Sound output: the emulated IOP's SPU2 samples to the host audio device.
+//! Sound output: the emulated IOP's SPU2 samples to the host audio device,
+//! with a playing movie's sound mixed in.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use ps2_iop::AudioRing;
+use std::sync::atomic::Ordering::Relaxed;
+
+use ps2_iop::{AudioRing, MOVIE_AUDIO};
 
 /// Samples kept queued ahead of the device: about 16 ms.
 pub const LATENCY: usize = 768;
@@ -56,6 +59,8 @@ fn open(ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
                     eprintln!("[audio] callback {} frames, queued {}", out.len() / 2, ring.len());
                 }
                 let mut q = ring.buf.lock().unwrap();
+                let mut movie = MOVIE_AUDIO.buf.lock().unwrap();
+                let mut played = 0;
                 for frame in out.chunks_exact_mut(2) {
                     // On underrun, hold the last sample rather than click.
                     if let Some([l, r]) = q.pop_front() {
@@ -64,7 +69,13 @@ fn open(ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
                         missing += 1;
                     }
                     frame.copy_from_slice(&last);
+                    if let Some([l, r]) = movie.pop_front() {
+                        frame[0] = (frame[0] + l as f32 / 32768.0).clamp(-1.0, 1.0);
+                        frame[1] = (frame[1] + r as f32 / 32768.0).clamp(-1.0, 1.0);
+                        played += 1;
+                    }
                 }
+                MOVIE_AUDIO.played.fetch_add(played, Relaxed);
                 if report {
                     worst_gap = worst_gap.max(last_call.elapsed());
                     last_call = Instant::now();
@@ -95,5 +106,10 @@ fn drain(ring: Arc<AudioRing>) {
         let n = (due - taken).min(q.len() as u64);
         q.drain(..n as usize);
         taken += n;
+        // A movie's sound keeps its clock running at the same rate.
+        let mut movie = MOVIE_AUDIO.buf.lock().unwrap();
+        let m = n.min(movie.len() as u64);
+        movie.drain(..m as usize);
+        MOVIE_AUDIO.played.fetch_add(m, Relaxed);
     }
 }

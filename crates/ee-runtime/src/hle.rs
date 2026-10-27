@@ -547,10 +547,35 @@ pub fn frame_time(c: &mut Cpu) {
 
 // ---- Movies ----
 
-/// The game's movie API (EA .FLM via the IPU): open (0x1ac580), blocking
-/// play (0x1ab670) and close (0x1ab620). The IPU is not emulated, so all
-/// three do nothing and movies end immediately.
+/// The game's movie API (EA .FLM via the IPU): open(path) (0x1ac580),
+/// blocking play (0x1ab670) and close (0x1ab620). The IPU is not
+/// emulated: play shows the movie's `.mkv` conversion instead (see
+/// [`crate::movie`]), or skips it when there is none.
+pub fn movie_open(c: &mut Cpu) {
+    let path = cstr(c, c.r32(A0));
+    *crate::movie::OPENED.lock().unwrap() = Some(path);
+    c.ws(V0, 0);
+}
+
 pub fn movie_play(c: &mut Cpu) {
-    c.kernel.warn_once("movies are skipped (in-game playback of the .mkv conversions is not done yet)");
+    let opened = crate::movie::OPENED.lock().unwrap().clone();
+    // Converted movies live next to the pictures (game/movies).
+    let dir = c.iop.images.parent().unwrap_or(std::path::Path::new(".")).join("movies");
+    match (opened.as_deref().and_then(|p| crate::movie::find(&dir, p)), c.mem.io.gs.clone()) {
+        (Some(file), Some(gs)) => {
+            if let Err(e) = crate::movie::play(&file, &gs) {
+                eprintln!("[movie] {e}");
+            }
+            // The game was blocked meanwhile, as on the PS2.
+            c.mem.io.resync();
+        }
+        (None, _) => eprintln!("[movie] no conversion of {} in {} (see flm2mkv); skipped", opened.as_deref().unwrap_or("?"), dir.display()),
+        _ => {}
+    }
+    c.ws(V0, 0);
+}
+
+pub fn movie_close(c: &mut Cpu) {
+    *crate::movie::OPENED.lock().unwrap() = None;
     c.ws(V0, 0);
 }

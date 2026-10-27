@@ -94,6 +94,11 @@ impl Renderer {
                 }
                 return true;
             }
+            gs::Msg::Movie(Some(frame)) => {
+                self.hw.present_movie(&frame);
+                return true;
+            }
+            gs::Msg::Movie(None) => self.hw.end_movie(),
         }
         false
     }

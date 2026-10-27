@@ -37,10 +37,11 @@
 # instead of being decoded by the IPU.
 00192090 lsc_decode
 
-# Movie open / play / close: skip until the IPU is emulated.
-001ac580 movie_play
+# Movie open / play / close: played from the .mkv conversions (flm2mkv)
+# instead of being decoded by the IPU.
+001ac580 movie_open
 001ab670 movie_play
-001ab620 movie_play
+001ab620 movie_close
 
 # Camera projection scale: the widescreen option widens the race camera.
 00145210 camera_scale

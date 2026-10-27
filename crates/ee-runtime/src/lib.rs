@@ -16,6 +16,7 @@ pub mod kernel;
 pub mod mc;
 pub mod mem;
 pub mod mmi;
+pub mod movie;
 pub mod pad;
 pub mod text;
 pub mod vu;
