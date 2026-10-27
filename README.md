@@ -28,14 +28,42 @@ go in `game/`, which git ignores.
 | `flm`        | working | EA `.FLM` movie demuxer and PS2 ADPCM decoder; `flm2mkv` converts movies to VP9 + Opus `.mkv` |
 | pictures     | working | No IPU emulation: `lsc2png` converts the 21 MPEG-2 still pictures (.LSC: title, menu, loading screens) to PNG once, and the game's picture decoder is replaced by a native function that loads them. The converter's decoder matches FFmpeg to 45-60 dB |
 
-## Building and running
+## Setting up from your own disc
 
-```sh
-# 1. Copy SLUS_203.67 from your own disc into game/.
-# 2. Generate Rust from it, then build and run.
-cargo run --release -p ee-recomp -- game/SLUS_203.67 freekstyle/src/gen freekstyle/hle.txt freekstyle/seeds.txt freekstyle/vu_dumps
-cargo run --release -p freekstyle -- [--res 1080|1440|4k] [--scale N] [--fullscreen] [--widescreen] [--stretch] [--blur-bars] [--mute]
-```
+The port needs the North American release (SLUS-20367); nothing from the
+game is in this repository. You need Rust (stable), a Vulkan driver and,
+for the optional movies, ffmpeg.
+
+1. **Dump your disc** to `game/Freekstyle.bin`. Either format works:
+   a raw image (`.bin`, 2352-byte sectors, as made by ImgBurn or
+   `cdrdao read-cd --read-raw`) or a plain ISO, e.g.
+   `dd if=/dev/sr0 of=game/Freekstyle.bin bs=2048`.
+2. **Copy the game's program off it**:
+   ```sh
+   cargo run --release -p ee-runtime --bin disc-extract   # -> game/SLUS_203.67
+   ```
+   Its sha256 should be `debcb4b0731741a389a0c890296609eb99d111952e97a250ea4c3cfc04a6d80a`.
+3. **Generate the Rust code** from it and build:
+   ```sh
+   cargo run --release -p ee-recomp -- game/SLUS_203.67 freekstyle/src/gen freekstyle/hle.txt freekstyle/seeds.txt freekstyle/vu_dumps
+   cargo build --release -p freekstyle -p freekstyle-launcher
+   ```
+4. **Convert the title and menu pictures** (optional, see *Pictures*):
+   ```sh
+   cargo run --release -p ee-runtime --bin lsc2png
+   ```
+5. **Record the VU programs once** (optional, for 60 fps races). They are
+   uploaded by the game at run time, so a fresh checkout runs them on the
+   slower interpreter. Play through a race or two with
+   `FREEK_VU_DUMP=freekstyle/vu_dumps ./target/release/freekstyle`, then
+   repeat step 3 to compile them to native code (see *VU microprograms*).
+6. **Play**: `./target/release/freekstyle-launcher`, or the game directly:
+   ```sh
+   ./target/release/freekstyle [--res 1080|1440|4k] [--scale N] [--fullscreen] [--widescreen] [--stretch] [--blur-bars] [--mute]
+   ```
+
+Run everything from the repository root; the game reads `game/` and
+`freekstyle.toml` from there.
 
 `--res` picks the window size and a matching internal resolution (3x, 4x
 or 5x the PS2's 512x448; vertical scale is doubled again in interlaced
