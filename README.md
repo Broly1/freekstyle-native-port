@@ -32,7 +32,8 @@ go in `game/`, which git ignores.
 
 The port needs the North American release (SLUS-20367); nothing from the
 game is in this repository. You need Rust (stable), a Vulkan driver and,
-for the optional movies, ffmpeg.
+for the optional movies, ffmpeg (built with libplacebo for their CRT look;
+most distributions' ffmpeg is).
 
 1. **Dump your disc** to `game/Freekstyle.bin`. Either format works:
    a raw image (`.bin`, 2352-byte sectors, as made by ImgBurn or
@@ -52,12 +53,21 @@ for the optional movies, ffmpeg.
    ```sh
    cargo run --release -p ee-runtime --bin lsc2png
    ```
-5. **Record the VU programs once** (optional, for 60 fps races). They are
-   uploaded by the game at run time, so a fresh checkout runs them on the
-   slower interpreter. Play through a race or two with
+5. **Convert the movies** (optional, see *Movies*): the intro and logos,
+   in HD with a CRT TV look. Without them the game skips its movies.
+   ```sh
+   for m in OPENING/BIGLOGO OPENING/EAGAMES OPENING/EAS_BIG OPENING/INTRO ABOUTEA/PROD1; do
+     cargo run --release -p ee-runtime --bin disc-extract -- game/Freekstyle.bin "\\SXDATA\\${m%/*}\\${m#*/}.FLM" game/movies/flm
+   done
+   cargo run --release -p flm --bin flm2mkv -- --crt game/movies/flm game/movies/hd
+   ```
+6. **Record the VU programs once** (optional, for 60 fps races). They are
+   the game's own microcode, uploaded at run time, so they are not in this
+   repository and a fresh checkout runs them on the slower interpreter.
+   Play through a race or two with
    `FREEK_VU_DUMP=freekstyle/vu_dumps ./target/release/freekstyle`, then
    repeat step 3 to compile them to native code (see *VU microprograms*).
-6. **Play**: `./target/release/freekstyle-launcher`, or the game directly:
+7. **Play**: `./target/release/freekstyle-launcher`, or the game directly:
    ```sh
    ./target/release/freekstyle [--res 1080|1440|4k] [--scale N] [--fullscreen] [--widescreen] [--stretch] [--blur-bars] [--mute]
    ```

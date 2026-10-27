@@ -6,6 +6,8 @@ machine.
 
 - `Freekstyle.bin` (or `.iso`): your disc dump
 - `SLUS_203.67`: written by `disc-extract`
-- `images/`, `movies/`: optional, made by `lsc2png` and `flm2mkv`
+- `images/`: optional, made by `lsc2png`
+- `movies/flm/`, `movies/hd/`: optional, the disc's movies and their
+  CRT-style conversions (`disc-extract`, `flm2mkv --crt`)
 
 See the main [README](../README.md) for the step-by-step setup.
