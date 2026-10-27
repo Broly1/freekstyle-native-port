@@ -3,13 +3,41 @@
 //! "Digit1"), gamepad buttons by gilrs `Button` name ("South", "DPadUp",
 //! "LeftTrigger2"), so neither side needs the other's input library.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-/// Where the launcher writes and the game looks, relative to the working
-/// directory (the port directory, which also holds `game/`).
+/// The settings file's name.
 pub const FILE: &str = "freekstyle.toml";
+
+/// Where the launcher writes and the game looks: `freekstyle.toml` in the
+/// working directory (the port or install directory, which also holds
+/// `game/`) when it is there or can be created; else, in an install shared
+/// by all users (/opt/freekstyle), each user's
+/// `$XDG_CONFIG_HOME/freekstyle/freekstyle.toml`.
+pub fn path() -> &'static Path {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let here = PathBuf::from(FILE);
+        if here.is_file() || writable(Path::new(".")) {
+            return here;
+        }
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".config")))
+            .unwrap_or_default();
+        config.join("freekstyle").join(FILE)
+    })
+}
+
+/// Whether files can be created in `dir` (tried, not guessed from modes).
+fn writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".freekstyle-probe-{}", std::process::id()));
+    let ok = std::fs::File::create(&probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -139,6 +167,9 @@ impl Config {
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
         std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
     }
 

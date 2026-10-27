@@ -3,9 +3,11 @@
 //!
 //! The port directory (the one holding `game/`) is the working directory
 //! for both; when started from elsewhere the launcher finds it from its own
-//! location (target/release -> port). On start it also installs desktop
-//! entries and icons under ~/.local/share, which is how Wayland desktops
-//! show the right icon for the game and launcher windows.
+//! location (target/release -> port, or /opt/freekstyle). On start it also
+//! installs desktop entries and icons under ~/.local/share, which is how
+//! Wayland desktops show the right icon for the game and launcher windows;
+//! `freekstyle-launcher --install-menu /usr/share` (run by setup.sh for a
+//! system install) puts them in the system menu instead.
 
 mod i18n;
 
@@ -62,8 +64,26 @@ fn main() -> eframe::Result {
     if let Err(e) = std::env::set_current_dir(&root) {
         eprintln!("{}: {e}", root.display());
     }
-    if let Err(e) = install_desktop_entries(&root) {
-        eprintln!("[launcher] desktop entries: {e}");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--install-menu") {
+        let data = args.get(1).map(PathBuf::from).or_else(user_data);
+        let Some(data) = data else { std::process::exit(1) };
+        if let Err(e) = install_desktop_entries(&root, &data) {
+            eprintln!("{}: {e}", data.display());
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    // A system install has its menu entries in /usr/share already; the
+    // user's own (from running a build in a source folder) would hide them.
+    let launcher = std::env::current_exe().unwrap_or_default();
+    let system = Path::new("/usr/share/applications/freekstyle-launcher.desktop");
+    let installed = std::fs::read_to_string(system).is_ok_and(|e| e.contains(&format!("Exec=\"{}\"", launcher.display())));
+    if let Some(data) = user_data() {
+        let done = if installed { remove_desktop_entries(&data) } else { install_desktop_entries(&root, &data) };
+        if let Err(e) = done {
+            eprintln!("[launcher] desktop entries: {e}");
+        }
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -95,12 +115,37 @@ fn game_binary() -> PathBuf {
     exe.with_file_name(format!("freekstyle{}", std::env::consts::EXE_SUFFIX))
 }
 
-/// Application-menu entries and icons for the game and the launcher. The
-/// window app IDs ("freekstyle", "freekstyle-launcher") match the entry
-/// names, which is how Wayland compositors pick the icon.
-fn install_desktop_entries(root: &Path) -> std::io::Result<()> {
-    let Some(home) = std::env::var_os("HOME") else { return Ok(()) };
-    let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| Path::new(&home).join(".local/share"));
+/// The user's data directory (~/.local/share), where their own menu
+/// entries and icons go.
+fn user_data() -> Option<PathBuf> {
+    std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share")))
+}
+
+/// Remove the menu entries and icons from `data`.
+fn remove_desktop_entries(data: &Path) -> std::io::Result<()> {
+    for name in ["freekstyle.desktop", "freekstyle-launcher.desktop"] {
+        let _ = std::fs::remove_file(data.join("applications").join(name));
+    }
+    if let Ok(dirs) = std::fs::read_dir(data.join("icons/hicolor")) {
+        for dir in dirs.flatten() {
+            let Ok(icons) = std::fs::read_dir(dir.path().join("apps")) else { continue };
+            for icon in icons.flatten() {
+                if icon.file_name().to_string_lossy().starts_with("freekstyle") {
+                    let _ = std::fs::remove_file(icon.path());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Application-menu entries and icons for the game and the launcher, under
+/// `data` (~/.local/share or /usr/share). The window app IDs ("freekstyle",
+/// "freekstyle-launcher") match the entry names, which is how Wayland
+/// compositors pick the icon. Only the launcher is listed in the menu (in
+/// Games, for KDE, GNOME, Cinnamon, XFCE and other freedesktop menus); the
+/// game's entry is there for its window icon.
+fn install_desktop_entries(root: &Path, data: &Path) -> std::io::Result<()> {
     let launcher = std::env::current_exe()?;
     let game = game_binary();
     // Plasma and KWin cache icons by name for the whole session, so each
@@ -113,25 +158,26 @@ fn install_desktop_entries(root: &Path) -> std::io::Result<()> {
         format!("{app}-{:08x}", hash as u32)
     };
     let (game_icon, launcher_icon) = (icon_name("freekstyle", &ICONS), icon_name("freekstyle-launcher", &LAUNCHER_ICONS));
-    let entry = |name: &str, comment: fn(&Tr) -> &str, exec: &Path, icon: &str, app_id: &str| {
+    let entry = |name: &str, comment: fn(&Tr) -> &str, exec: &Path, icon: &str, app_id: &str, shown: bool| {
         let mut comments = format!("Comment={}\n", comment(&i18n::EN));
         for (locale, lang) in [("pt_BR", Lang::PtBr), ("es", Lang::Es), ("fr", Lang::Fr)] {
             comments += &format!("Comment[{locale}]={}\n", comment(lang.tr()));
         }
         format!(
-            "[Desktop Entry]\nType=Application\nName={name}\n{comments}Exec=\"{}\"\nPath={}\nIcon={icon}\nStartupWMClass={app_id}\nCategories=Game;\nTerminal=false\n",
+            "[Desktop Entry]\nType=Application\nName={name}\n{comments}Exec=\"{}\"\nPath={}\nIcon={icon}\nStartupWMClass={app_id}\nCategories=Game;\nTerminal=false\nNoDisplay={}\n",
             exec.display(),
-            root.display()
+            root.display(),
+            !shown
         )
     };
     let mut files: Vec<(PathBuf, Vec<u8>)> = vec![
         (
             data.join("applications/freekstyle.desktop"),
-            entry("Freekstyle", |t| t.game_comment, &game, &game_icon, "freekstyle").into(),
+            entry("Freekstyle", |t| t.game_comment, &game, &game_icon, "freekstyle", false).into(),
         ),
         (
             data.join("applications/freekstyle-launcher.desktop"),
-            entry("Freekstyle Launcher", |t| t.launcher_comment, &launcher, &launcher_icon, "freekstyle-launcher").into(),
+            entry("Freekstyle Launcher", |t| t.launcher_comment, &launcher, &launcher_icon, "freekstyle-launcher", true).into(),
         ),
     ];
     for ((n, game), (_, launcher)) in ICONS.into_iter().zip(LAUNCHER_ICONS) {
@@ -213,7 +259,7 @@ impl Launcher {
             style.spacing.button_padding = egui::vec2(10.0, 5.0);
         });
 
-        let (config, status) = match Config::load(freek_config::FILE.as_ref()) {
+        let (config, status) = match Config::load(freek_config::path()) {
             Ok(c) => (c, String::new()),
             Err(e) => (Config::default(), fill(Lang::system().tr().using_defaults, &[&e])),
         };
@@ -237,7 +283,7 @@ impl Launcher {
 
     fn save(&mut self) {
         if self.config != self.saved {
-            match self.config.save(freek_config::FILE.as_ref()) {
+            match self.config.save(freek_config::path()) {
                 Ok(()) => self.saved = self.config.clone(),
                 Err(e) => self.status = fill(self.tr().could_not_save, &[&e]),
             }
@@ -502,7 +548,7 @@ impl eframe::App for Launcher {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&self.status).color(MUTED));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(fill(t.saved_to, &[freek_config::FILE])).color(MUTED.gamma_multiply(0.7)));
+                    ui.label(RichText::new(fill(t.saved_to, &[&freek_config::path().display().to_string()])).color(MUTED.gamma_multiply(0.7)));
                 });
             });
         });

@@ -5,8 +5,10 @@
 //! then:
 //!   cargo run --release -p freekstyle -- [options] [game/SLUS_203.67 [disc image]]
 //!
-//! Settings come from freekstyle.toml in the working directory (written by
-//! freekstyle-launcher; defaults if missing); options given here override it.
+//! Settings come from freekstyle.toml in the working directory, or
+//! ~/.config/freekstyle when that isn't writable (see freek_config::path;
+//! written by freekstyle-launcher, defaults if missing); options given here
+//! override it.
 //!
 //! Options:
 //!   --res 1080|1440|4k   window size and matching internal resolution (default 1080)
@@ -68,12 +70,12 @@ struct Options {
 }
 
 fn options() -> Options {
-    let c = freek_config::Config::load(freek_config::FILE.as_ref()).unwrap_or_else(|e| {
+    let c = freek_config::Config::load(freek_config::path()).unwrap_or_else(|e| {
         eprintln!("{e}");
         process::exit(2);
     });
     let (window, scale) = c.display().unwrap_or_else(|| {
-        eprintln!("{}: res must be 1080, 1440 or 4k, got {:?}", freek_config::FILE, c.res);
+        eprintln!("{}: res must be 1080, 1440 or 4k, got {:?}", freek_config::path().display(), c.res);
         process::exit(2);
     });
     let mut o = Options {
@@ -279,7 +281,7 @@ fn input_maps(bindings: &[freek_config::Binding]) -> (HashMap<String, u16>, Vec<
         for name in &b.pad {
             match PAD_BUTTONS.iter().find(|p| format!("{p:?}") == *name) {
                 Some(&p) => pad.push((p, bit)),
-                None => eprintln!("[input] {}: unknown gamepad button {name:?}", freek_config::FILE),
+                None => eprintln!("[input] {}: unknown gamepad button {name:?}", freek_config::path().display()),
             }
         }
     }
