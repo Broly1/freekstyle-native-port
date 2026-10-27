@@ -7,6 +7,8 @@
 //! entries and icons under ~/.local/share, which is how Wayland desktops
 //! show the right icon for the game and launcher windows.
 
+mod i18n;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Duration;
@@ -14,6 +16,7 @@ use std::time::Duration;
 use eframe::egui::{self, Color32, RichText};
 use freek_config::{Config, PS2_BUTTONS};
 use gilrs::{EventType, Gilrs};
+use i18n::{fill, Lang, Tr};
 
 /// The game's icon (the devil face) at each hicolor size KDE and GNOME
 /// look up.
@@ -110,9 +113,13 @@ fn install_desktop_entries(root: &Path) -> std::io::Result<()> {
         format!("{app}-{:08x}", hash as u32)
     };
     let (game_icon, launcher_icon) = (icon_name("freekstyle", &ICONS), icon_name("freekstyle-launcher", &LAUNCHER_ICONS));
-    let entry = |name: &str, comment: &str, exec: &Path, icon: &str, app_id: &str| {
+    let entry = |name: &str, comment: fn(&Tr) -> &str, exec: &Path, icon: &str, app_id: &str| {
+        let mut comments = format!("Comment={}\n", comment(&i18n::EN));
+        for (locale, lang) in [("pt_BR", Lang::PtBr), ("es", Lang::Es), ("fr", Lang::Fr)] {
+            comments += &format!("Comment[{locale}]={}\n", comment(lang.tr()));
+        }
         format!(
-            "[Desktop Entry]\nType=Application\nName={name}\nComment={comment}\nExec=\"{}\"\nPath={}\nIcon={icon}\nStartupWMClass={app_id}\nCategories=Game;\nTerminal=false\n",
+            "[Desktop Entry]\nType=Application\nName={name}\n{comments}Exec=\"{}\"\nPath={}\nIcon={icon}\nStartupWMClass={app_id}\nCategories=Game;\nTerminal=false\n",
             exec.display(),
             root.display()
         )
@@ -120,11 +127,11 @@ fn install_desktop_entries(root: &Path) -> std::io::Result<()> {
     let mut files: Vec<(PathBuf, Vec<u8>)> = vec![
         (
             data.join("applications/freekstyle.desktop"),
-            entry("Freekstyle", "Freekstyle, native port", &game, &game_icon, "freekstyle").into(),
+            entry("Freekstyle", |t| t.game_comment, &game, &game_icon, "freekstyle").into(),
         ),
         (
             data.join("applications/freekstyle-launcher.desktop"),
-            entry("Freekstyle Launcher", "Freekstyle display settings and controls", &launcher, &launcher_icon, "freekstyle-launcher").into(),
+            entry("Freekstyle Launcher", |t| t.launcher_comment, &launcher, &launcher_icon, "freekstyle-launcher").into(),
         ),
     ];
     for ((n, game), (_, launcher)) in ICONS.into_iter().zip(LAUNCHER_ICONS) {
@@ -208,7 +215,7 @@ impl Launcher {
 
         let (config, status) = match Config::load(freek_config::FILE.as_ref()) {
             Ok(c) => (c, String::new()),
-            Err(e) => (Config::default(), format!("{e}; using defaults")),
+            Err(e) => (Config::default(), fill(Lang::system().tr().using_defaults, &[&e])),
         };
         let logo = decode_png(WORDMARK_PNG).map(|img| cc.egui_ctx.load_texture("logo", img, egui::TextureOptions::LINEAR));
         Launcher {
@@ -223,11 +230,16 @@ impl Launcher {
         }
     }
 
+    /// Text in the chosen language.
+    fn tr(&self) -> &'static Tr {
+        Lang::from_setting(&self.config.language).tr()
+    }
+
     fn save(&mut self) {
         if self.config != self.saved {
             match self.config.save(freek_config::FILE.as_ref()) {
                 Ok(()) => self.saved = self.config.clone(),
-                Err(e) => self.status = format!("could not save: {e}"),
+                Err(e) => self.status = fill(self.tr().could_not_save, &[&e]),
             }
         }
     }
@@ -238,20 +250,21 @@ impl Launcher {
         match Command::new(&bin).spawn() {
             Ok(child) => {
                 self.game = Some(child);
-                self.status = "Game running".into();
+                self.status = self.tr().game_running.into();
             }
-            Err(e) => self.status = format!("{}: {e} (build it with cargo build --release -p freekstyle)", bin.display()),
+            Err(e) => self.status = format!("{}: {e} ({})", bin.display(), self.tr().build_hint),
         }
     }
 
     /// Bind `name` to the slot being captured, taking it off any other
     /// button so one input never presses two things.
     fn bind(&mut self, (index, keyboard): Capture, name: String) {
+        let t = self.tr();
         for (i, b) in self.config.bindings.iter_mut().enumerate() {
             let list = if keyboard { &mut b.keys } else { &mut b.pad };
             if i != index && list.contains(&name) {
                 list.retain(|n| *n != name);
-                self.status = format!("{} moved from {}", input_label(&name, keyboard), button_label(&b.button));
+                self.status = fill(t.moved_from, &[&input_label(t, &name, keyboard), button_label(t, &b.button)]);
             }
         }
         let list = if keyboard { &mut self.config.bindings[index].keys } else { &mut self.config.bindings[index].pad };
@@ -274,6 +287,7 @@ impl Launcher {
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
+        let t = self.tr();
         ui.horizontal(|ui| {
             // The wordmark is the title; text only if it failed to decode.
             ui.vertical(|ui| {
@@ -285,11 +299,11 @@ impl Launcher {
                         ui.label(RichText::new("Freekstyle").size(30.0).strong().color(INK));
                     }
                 }
-                ui.label(RichText::new("Launcher · native PC port").color(MUTED));
+                ui.label(RichText::new(t.subtitle).color(MUTED));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let running = self.game.is_some();
-                let play = egui::Button::new(RichText::new(if running { "Running…" } else { "▶  Play" }).size(22.0).strong().color(INK))
+                let play = egui::Button::new(RichText::new(if running { t.running } else { t.play }).size(22.0).strong().color(INK))
                     .fill(if running { MAROON } else { ACCENT })
                     .min_size(egui::vec2(150.0, 48.0))
                     .corner_radius(10.0);
@@ -301,54 +315,55 @@ impl Launcher {
     }
 
     fn play_tab(&mut self, ui: &mut egui::Ui) {
+        let t = self.tr();
         let c = &mut self.config;
-        section(ui, "Display", |ui| {
+        section(ui, t.display, |ui| {
             egui::Grid::new("display").num_columns(2).min_col_width(150.0).spacing([24.0, 10.0]).show(ui, |ui| {
-                ui.label("Resolution");
+                ui.label(t.resolution);
                 egui::ComboBox::from_id_salt("res").selected_text(res_label(&c.res)).show_ui(ui, |ui| {
                     for r in ["1080", "1440", "4k"] {
                         ui.selectable_value(&mut c.res, r.to_string(), res_label(r));
                     }
                 });
                 ui.end_row();
-                ui.label("Internal resolution");
-                let text = if c.scale == 0 { "Match window".to_string() } else { format!("{}× PS2", c.scale) };
+                ui.label(t.internal_resolution);
+                let text = if c.scale == 0 { t.match_window.to_string() } else { format!("{}× PS2", c.scale) };
                 egui::ComboBox::from_id_salt("scale").selected_text(text).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut c.scale, 0, "Match window");
+                    ui.selectable_value(&mut c.scale, 0, t.match_window);
                     for s in 1..=8 {
                         ui.selectable_value(&mut c.scale, s, format!("{s}× PS2"));
                     }
                 });
                 ui.end_row();
-                ui.label("Fullscreen");
-                ui.checkbox(&mut c.fullscreen, "Borderless fullscreen (F11 in game)");
+                ui.label(t.fullscreen);
+                ui.checkbox(&mut c.fullscreen, t.fullscreen_hint);
                 ui.end_row();
-                ui.label("Widescreen");
-                ui.checkbox(&mut c.widescreen, "16:9 view with wide pictures");
+                ui.label(t.widescreen);
+                ui.checkbox(&mut c.widescreen, t.widescreen_hint);
                 ui.end_row();
-                ui.label("Stretch");
-                ui.checkbox(&mut c.stretch, "Fill the window instead of keeping the shape");
+                ui.label(t.stretch);
+                ui.checkbox(&mut c.stretch, t.stretch_hint);
                 ui.end_row();
-                ui.label("Side bars");
-                ui.checkbox(&mut c.blur_bars, "Blurred picture instead of black bars");
+                ui.label(t.side_bars);
+                ui.checkbox(&mut c.blur_bars, t.side_bars_hint);
                 ui.end_row();
-                ui.label("Sharp textures");
-                ui.checkbox(&mut c.sharp_textures, "Upscale menu text and artwork (xBRZ)");
+                ui.label(t.sharp_textures);
+                ui.checkbox(&mut c.sharp_textures, t.sharp_textures_hint);
                 ui.end_row();
             });
         });
-        section(ui, "Game", |ui| {
+        section(ui, t.game, |ui| {
             egui::Grid::new("game").num_columns(2).min_col_width(150.0).spacing([24.0, 10.0]).show(ui, |ui| {
-                ui.label("Sound");
-                ui.checkbox(&mut c.mute, "Mute");
+                ui.label(t.sound);
+                ui.checkbox(&mut c.mute, t.mute);
                 ui.end_row();
-                ui.label("Button icons");
-                ui.checkbox(&mut c.ps2_icons, "Keep the original PlayStation icons");
+                ui.label(t.button_icons);
+                ui.checkbox(&mut c.ps2_icons, t.ps2_icons_hint);
                 ui.end_row();
-                ui.label("Disc image");
+                ui.label(t.disc_image);
                 ui.add(egui::TextEdit::singleline(&mut c.disc).desired_width(360.0));
                 ui.end_row();
-                ui.label("Executable");
+                ui.label(t.executable);
                 ui.add(egui::TextEdit::singleline(&mut c.elf).desired_width(360.0));
                 ui.end_row();
             });
@@ -356,53 +371,53 @@ impl Launcher {
     }
 
     fn controls_tab(&mut self, ui: &mut egui::Ui, pad_name: Option<&str>) {
+        let t = self.tr();
         ui.horizontal(|ui| {
             let (dot, text) = match pad_name {
-                Some(n) => (Color32::from_rgb(0x4c, 0xd9, 0x64), format!("Controller: {n}")),
-                None => (Color32::from_rgb(0xe0, 0x4f, 0x4f), "No controller connected".into()),
+                Some(n) => (Color32::from_rgb(0x4c, 0xd9, 0x64), fill(t.controller_named, &[n])),
+                None => (Color32::from_rgb(0xe0, 0x4f, 0x4f), t.no_controller.into()),
             };
             let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
             ui.painter().circle_filled(rect.center(), 5.0, dot);
             ui.label(text);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Reset to defaults").clicked() {
+                if ui.button(t.reset_defaults).clicked() {
                     self.config.bindings = freek_config::default_bindings();
                     self.capture = None;
                 }
             });
         });
         ui.label(
-            RichText::new("Click + and press a key or controller button. Click a binding to remove it. Keyboard and controller work together.")
-                .color(MUTED),
+            RichText::new(t.controls_help).color(MUTED),
         );
         ui.add_space(4.0);
         let mut remove = None;
         let mut start = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("controls").num_columns(3).striped(true).spacing([20.0, 8.0]).min_col_width(140.0).show(ui, |ui| {
-                ui.label(RichText::new("PS2 button").strong());
-                ui.label(RichText::new("Keyboard").strong());
-                ui.label(RichText::new("Controller").strong());
+                ui.label(RichText::new(t.ps2_button).strong());
+                ui.label(RichText::new(t.keyboard).strong());
+                ui.label(RichText::new(t.controller).strong());
                 ui.end_row();
                 for (i, b) in self.config.bindings.iter().enumerate() {
-                    ui.label(button_label(&b.button));
+                    ui.label(button_label(t, &b.button));
                     for keyboard in [true, false] {
                         let list = if keyboard { &b.keys } else { &b.pad };
                         ui.horizontal_wrapped(|ui| {
                             for name in list {
-                                let chip = egui::Button::new(RichText::new(input_label(name, keyboard)).color(INK))
+                                let chip = egui::Button::new(RichText::new(input_label(t, name, keyboard)).color(INK))
                                     .fill(MAROON)
                                     .corner_radius(6.0);
-                                if ui.add(chip).on_hover_text("Click to remove").clicked() {
+                                if ui.add(chip).on_hover_text(t.click_to_remove).clicked() {
                                     remove = Some((i, keyboard, name.clone()));
                                 }
                             }
                             if self.capture == Some((i, keyboard)) {
-                                let text = if keyboard { "Press a key… (Esc cancels)" } else { "Press a button…" };
+                                let text = if keyboard { t.press_key } else { t.press_button };
                                 if ui.add(egui::Button::new(RichText::new(text).color(INK)).fill(ACCENT)).clicked() {
                                     start = Some(None);
                                 }
-                            } else if ui.small_button(" + ").on_hover_text("Add a binding").clicked() {
+                            } else if ui.small_button(" + ").on_hover_text(t.add_binding).clicked() {
                                 start = Some(Some((i, keyboard)));
                             }
                         });
@@ -439,9 +454,9 @@ impl Launcher {
         });
         match got {
             Some(Some(name)) if name == "Escape" => self.capture = None,
-            Some(Some(name)) if RESERVED_KEYS.contains(&name.as_str()) => self.status = format!("{name} is reserved by the game"),
+            Some(Some(name)) if RESERVED_KEYS.contains(&name.as_str()) => self.status = fill(self.tr().reserved_key, &[&name]),
             Some(Some(name)) if slot.1 => self.bind(slot, name),
-            Some(None) => self.status = "That key can't be bound".into(),
+            Some(None) => self.status = self.tr().cant_bind.into(),
             _ => {}
         }
     }
@@ -450,9 +465,10 @@ impl Launcher {
 impl eframe::App for Launcher {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
+        let t = self.tr();
         if let Some(child) = &mut self.game {
             if let Ok(Some(status)) = child.try_wait() {
-                self.status = if status.success() { "Game closed".into() } else { format!("Game exited: {status}") };
+                self.status = if status.success() { t.game_closed.into() } else { fill(t.game_exited, &[&status.to_string()]) };
                 self.game = None;
             }
         }
@@ -466,15 +482,27 @@ impl eframe::App for Launcher {
             self.header(ui);
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Play, RichText::new("Settings").size(16.0));
-                ui.selectable_value(&mut self.tab, Tab::Controls, RichText::new("Controls").size(16.0));
+                ui.selectable_value(&mut self.tab, Tab::Play, RichText::new(t.settings_tab).size(16.0));
+                ui.selectable_value(&mut self.tab, Tab::Controls, RichText::new(t.controls_tab).size(16.0));
+                // Top right, so it can be found without reading the current language.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let lang = &mut self.config.language;
+                    let current = Lang::ALL.into_iter().find(|l| l.code() == lang);
+                    egui::ComboBox::from_id_salt("language").selected_text(current.map_or(t.system_language, Lang::name)).show_ui(ui, |ui| {
+                        ui.selectable_value(lang, String::new(), t.system_language);
+                        for l in Lang::ALL {
+                            ui.selectable_value(lang, l.code().to_string(), l.name());
+                        }
+                    });
+                    ui.label(RichText::new(t.language).color(MUTED));
+                });
             });
         });
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&self.status).color(MUTED));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("Saved to {}", freek_config::FILE)).color(MUTED.gamma_multiply(0.7)));
+                    ui.label(RichText::new(fill(t.saved_to, &[freek_config::FILE])).color(MUTED.gamma_multiply(0.7)));
                 });
             });
         });
@@ -514,8 +542,8 @@ fn res_label(res: &str) -> &'static str {
     }
 }
 
-fn button_label(name: &str) -> &'static str {
-    PS2_BUTTONS.iter().find(|b| b.0 == name).map(|b| b.2).unwrap_or("?")
+fn button_label(t: &'static Tr, name: &str) -> &'static str {
+    PS2_BUTTONS.iter().position(|b| b.0 == name).map_or("?", |i| t.buttons[i])
 }
 
 /// The winit `KeyCode` name the game matches for an egui key; None for keys
@@ -545,7 +573,7 @@ fn winit_key_name(key: egui::Key) -> Option<String> {
 }
 
 /// Short display names: "KeyZ" -> "Z", "South" -> "A".
-fn input_label(name: &str, keyboard: bool) -> String {
+fn input_label(t: &Tr, name: &str, keyboard: bool) -> String {
     if keyboard {
         if let Some(k) = name.strip_prefix("Key").or_else(|| name.strip_prefix("Digit")) {
             return k.to_string();
@@ -581,12 +609,12 @@ fn input_label(name: &str, keyboard: bool) -> String {
         "RightTrigger2" => "RT",
         "Select" => "Back",
         "Mode" => "Guide",
-        "LeftThumb" => "LS click",
-        "RightThumb" => "RS click",
-        "DPadUp" => "D-pad ↑",
-        "DPadDown" => "D-pad ↓",
-        "DPadLeft" => "D-pad ←",
-        "DPadRight" => "D-pad →",
+        "LeftThumb" => t.ls_click,
+        "RightThumb" => t.rs_click,
+        "DPadUp" => return format!("{} ↑", t.dpad),
+        "DPadDown" => return format!("{} ↓", t.dpad),
+        "DPadLeft" => return format!("{} ←", t.dpad),
+        "DPadRight" => return format!("{} →", t.dpad),
         other => other,
     }
     .to_string()

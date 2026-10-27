@@ -28,6 +28,8 @@ pub struct Config {
     /// Upscale game textures (menu text and artwork) with xBRZ.
     pub sharp_textures: bool,
     pub mute: bool,
+    /// Launcher language: "en", "pt-BR", "es", "fr"; empty follows the system.
+    pub language: String,
     pub bindings: Vec<Binding>,
 }
 
@@ -109,6 +111,7 @@ impl Default for Config {
             ps2_icons: false,
             sharp_textures: true,
             mute: false,
+            language: String::new(),
             bindings: default_bindings(),
         }
     }
