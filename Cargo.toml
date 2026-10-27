@@ -7,6 +7,8 @@ default-members = ["crates/*", "launcher"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# The oldest Rust the dependencies build with (setup.sh checks it).
+rust-version = "1.95"
 publish = false
 
 # The generated code is huge; keep debug builds usable.

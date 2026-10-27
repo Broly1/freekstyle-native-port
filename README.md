@@ -31,9 +31,10 @@ go in `game/`, which git ignores.
 ## Setting up from your own disc
 
 The port needs the North American release (SLUS-20367); nothing from the
-game is in this repository. You need Rust (stable), a Vulkan driver and,
-for the optional movies, ffmpeg (built with libplacebo for their CRT look;
-most distributions' ffmpeg is).
+game is in this repository. You need Rust 1.95 or newer (distributions often
+ship an older one; `setup.sh` then installs current Rust with rustup), a
+Vulkan driver and, for the optional movies, ffmpeg (built with libplacebo
+for their CRT look; most distributions' ffmpeg is).
 
 **Quick way**: dump your disc (step 1 below) into `game/`, then run
 
@@ -41,11 +42,18 @@ most distributions' ffmpeg is).
 ./setup.sh
 ```
 
-It installs whatever is missing (Rust through rustup, build libraries and
-ffmpeg through pacman, apt, dnf or zypper, asking first), then does steps
-2 to 5 for you. Then start `./target/release/freekstyle-launcher`. Steps
-already done are skipped, so run it again after recording VU programs
-(step 6).
+It installs whatever is missing (Rust through rustup; build libraries, a
+Vulkan driver for your GPU and ffmpeg through pacman, apt, dnf or zypper;
+asking first) and does steps 2 to 5 for you, in English, Portuguese,
+Spanish or French depending on the system language. At the end it offers to install the game to the system, like
+a game from a store: `/opt/freekstyle`, with Freekstyle Launcher in the app
+menu's Games section (KDE, GNOME, Cinnamon, XFCE and other freedesktop
+menus) and `freekstyle-launcher` on the command line. The source folder is
+then no longer needed to play; settings go to `~/.config/freekstyle`,
+saves to `~/.local/share/freekstyle/saves`, and `./setup.sh --uninstall`
+removes the installed copy (keeping both). Or keep it in the folder and
+start `./target/release/freekstyle-launcher`. Steps already done are
+skipped, so run it again after recording VU programs (step 6).
 
 The same by hand:
 
