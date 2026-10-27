@@ -35,6 +35,20 @@ game is in this repository. You need Rust (stable), a Vulkan driver and,
 for the optional movies, ffmpeg (built with libplacebo for their CRT look;
 most distributions' ffmpeg is).
 
+**Quick way**: dump your disc (step 1 below) into `game/`, then run
+
+```sh
+./setup.sh
+```
+
+It installs whatever is missing (Rust through rustup, build libraries and
+ffmpeg through pacman, apt, dnf or zypper, asking first), then does steps
+2 to 5 for you. Then start `./target/release/freekstyle-launcher`. Steps
+already done are skipped, so run it again after recording VU programs
+(step 6).
+
+The same by hand:
+
 1. **Dump your disc** to `game/Freekstyle.bin`. Either format works:
    a raw image (`.bin`, 2352-byte sectors, as made by ImgBurn or
    `cdrdao read-cd --read-raw`) or a plain ISO, e.g.
