@@ -1,6 +1,7 @@
 /target
 # Extracted game data and executables are never committed.
-/game
+/game/*
+!/game/README.md
 *.iso
 *.bin
 /out
