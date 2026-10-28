@@ -551,6 +551,9 @@ pub fn frame_time(c: &mut Cpu) {
 /// blocking play (0x1ab670) and close (0x1ab620). The IPU is not
 /// emulated: play shows the movie's `.mkv` conversion instead (see
 /// [`crate::movie`]), or skips it when there is none.
+/// The game's disc stream control: 0 pauses streaming, 1 restarts it.
+const STREAM_STATE: u32 = 0x193440;
+
 pub fn movie_open(c: &mut Cpu) {
     let path = cstr(c, c.r32(A0));
     *crate::movie::OPENED.lock().unwrap() = Some(path);
@@ -563,11 +566,20 @@ pub fn movie_play(c: &mut Cpu) {
     let dir = c.iop.images.parent().unwrap_or(std::path::Path::new(".")).join("movies");
     match (opened.as_deref().and_then(|p| crate::movie::find(&dir, p)), c.mem.io.gs.clone()) {
         (Some(file), Some(gs)) => {
+            // The real open pauses the game's disc streaming (0x193440(0))
+            // for as long as the movie plays and restarts it after
+            // (0x193440(1)). Without that, reads that finish while the game
+            // is blocked are lost and the stream queue stalls for good
+            // (the Circuit intro froze on the loading screen after it).
+            c.ws(A0, 0);
+            c.call(STREAM_STATE);
             if let Err(e) = crate::movie::play(&file, &gs) {
                 eprintln!("[movie] {e}");
             }
             // The game was blocked meanwhile, as on the PS2.
             c.mem.io.resync();
+            c.ws(A0, 1);
+            c.call(STREAM_STATE);
         }
         (None, _) => eprintln!("[movie] no conversion of {} in {} (see flm2mkv); skipped", opened.as_deref().unwrap_or("?"), dir.display()),
         _ => {}
