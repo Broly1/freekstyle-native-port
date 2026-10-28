@@ -20,7 +20,7 @@ go in `game/`, which git ignores.
 | `ee-recomp`  | working | Emits one Rust function per guest function; HLE overrides via `freekstyle/hle.txt` |
 | `ee-runtime` | partial | CPU state, memory map, MMI/FPU/VU0 helpers, HLE kernel, vblank + interrupt delivery, SPR DMA, SIF RPC layer |
 | `freekstyle` | boots   | The game binary: generated code + runtime, with a hang watchdog |
-| IOP services | partial | CD/DVD from the disc image; padman (controller frames each vblank); saves as files instead of memory cards |
+| IOP services | partial | CD/DVD from the disc image; padman (controller frames each vblank, two ports); saves as files instead of memory cards |
 | `ps2-iop`    | working | Sound: the game's own IOP driver (EA's AUDIO.IRX on Sony's LIBSD.IRX) runs on an R3000 interpreter over a native IOP kernel (threads, interrupts, SIF commands), with an SPU2 (ADPCM voices, ADSR, DMA) feeding the host audio device at 48 kHz |
 | `gs`         | working | GS core: registers, GIF PACKED/REGLIST/IMAGE, 4 MB VRAM with all swizzled formats (verified against hardware tables), transfers, CLUT, primitive assembly |
 | `gs-vulkan`  | working | Vulkan renderer: render targets at N x resolution (3x 1080p, 5x 4K), GS blend modes, texture cache, display output, screenshots |
@@ -109,6 +109,12 @@ Esc quits.
   Keyboard and gamepad work together. Default keys: WASD or arrows = D-pad
   and left stick, J/Space/Enter = A (menus confirm with A), K = B, U = X,
   I = Y, P/O = LB/RB, ;/L = LT/RT, T = Start (pause), Backspace = Back.
+- **Two players**: the game's split-screen modes (Single Race → Two
+  Players) work. Gamepads become player 1 and player 2 in the order they
+  connect; one that drops off keeps its seat for the next pad that
+  connects. The keyboard plays as player 1, or as player 2 with
+  `keyboard_player = 2` (the launcher's Controls tab), so one person can
+  use a pad and the other the keyboard.
 - **Sharp textures**: textures drawn as 2D sprites (menus, text, HUD) are
   upscaled with xBRZ to the internal resolution on a worker thread
   (`--no-sharp-textures` turns it off). 3D surfaces keep their originals.
@@ -236,7 +242,7 @@ Debugging switches (environment variables):
 | `FREEK_GS_LOG`       | Renderer state every 2 s, privileged register writes |
 | `FREEK_SHOT=f.png:N` | Save the displayed frame N at internal resolution |
 | `FREEK_SHOT_EVERY=K` | With `FREEK_SHOT`, save every K frames from N on |
-| `FREEK_PAD_SCRIPT`   | Scripted taps, e.g. `300:start,600:a+down,900-1500:a` (Xbox names; a range holds) |
+| `FREEK_PAD_SCRIPT`   | Scripted taps, e.g. `300:start,600:a+down,900-1500:a,1000:p2+a` (Xbox names; a range holds; `p2` is player 2's pad, which plugs it in) |
 | `FREEK_DUMP_TEXTURES=dir` | Write every decoded texture as PNG |
 | `IOP_TRACE=1` / `=2` | Log SIF traffic and SPU2 state each second / also every IOP kernel call |
 | `IOP_WAV=out.wav`    | Record the sound output |

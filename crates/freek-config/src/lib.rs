@@ -58,6 +58,9 @@ pub struct Config {
     pub mute: bool,
     /// Launcher language: "en", "pt-BR", "es", "fr"; empty follows the system.
     pub language: String,
+    /// The player the keyboard controls, 1 or 2. Gamepads take player 1
+    /// and 2 in the order they connect.
+    pub keyboard_player: u32,
     pub bindings: Vec<Binding>,
 }
 
@@ -140,6 +143,7 @@ impl Default for Config {
             sharp_textures: true,
             mute: false,
             language: String::new(),
+            keyboard_player: 1,
             bindings: default_bindings(),
         }
     }

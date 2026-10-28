@@ -45,7 +45,7 @@ use std::{env, fs, process, thread};
 
 use ee_runtime::pad::{button, Input};
 use ee_runtime::Cpu;
-use gilrs::{Axis, Button, EventType, Gilrs};
+use gilrs::{Axis, Button, EventType, Gamepad, GamepadId, Gilrs};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -66,6 +66,7 @@ struct Options {
     ps2_icons: bool,
     sharp_textures: bool,
     mute: bool,
+    keyboard_player: u32,
     bindings: Vec<freek_config::Binding>,
 }
 
@@ -91,6 +92,7 @@ fn options() -> Options {
         ps2_icons: c.ps2_icons,
         sharp_textures: c.sharp_textures,
         mute: c.mute,
+        keyboard_player: c.keyboard_player,
         bindings: c.bindings,
     };
     let mut positional = Vec::new();
@@ -202,13 +204,15 @@ fn main() {
     });
     event_loop.set_control_flow(ControlFlow::Poll);
     let gilrs = Gilrs::new().map_err(|e| eprintln!("[input] gamepads unavailable: {e}")).ok();
-    if let Some(g) = &gilrs {
-        for (_, pad) in g.gamepads() {
-            eprintln!("[input] gamepad: {}", pad.name());
+    let (key_map, pad_map) = input_maps(&opts.bindings);
+    let keyboard_player = (opts.keyboard_player.clamp(1, 2) - 1) as usize;
+    let mut app = App { opts, rx: gs_rx, window: None, renderer: None, last_title: Instant::now(), last_frame: 0, gilrs, players: [None; 2], keyboard_player, keys: Vec::new(), last_buttons: 0, traces: 0, key_map, pad_map };
+    if let Some(g) = &app.gilrs {
+        let pads: Vec<_> = g.gamepads().filter(|(_, p)| p.is_connected()).map(|(id, _)| id).collect();
+        for id in pads {
+            app.seat(id);
         }
     }
-    let (key_map, pad_map) = input_maps(&opts.bindings);
-    let mut app = App { opts, rx: gs_rx, window: None, renderer: None, last_title: Instant::now(), last_frame: 0, gilrs, keys: Vec::new(), last_buttons: 0, traces: 0, key_map, pad_map };
     profile::start_if_requested("FREEK_PROFILE_GS", "profile_gs.txt");
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("event loop: {e}");
@@ -224,6 +228,12 @@ struct App {
     last_title: Instant,
     last_frame: u64,
     gilrs: Option<Gilrs>,
+    /// The gamepad playing as player 1 and 2, in the order they connected.
+    /// A pad that drops off leaves its seat empty until a pad connects
+    /// again, so the other player keeps theirs.
+    players: [Option<GamepadId>; 2],
+    /// The player (0 or 1) the keyboard controls.
+    keyboard_player: usize,
     /// Mapped keys held down; several keys can share a button.
     keys: Vec<KeyCode>,
     last_buttons: u16,
@@ -288,46 +298,90 @@ fn input_maps(bindings: &[freek_config::Binding]) -> (HashMap<String, u16>, Vec<
     (keys, pad)
 }
 
+/// One gamepad's state as a PS2 controller.
+fn pad_input(pad: Gamepad, pad_map: &[(Button, u16)]) -> Input {
+    let mut input = Input::default();
+    // Analog triggers press past a quarter; whatever is bound to L2/R2 also
+    // gives their pressure.
+    for &(b, m) in pad_map {
+        let v = pad.button_data(b).map(|d| d.value()).unwrap_or(0.0);
+        let analog = matches!(b, Button::LeftTrigger2 | Button::RightTrigger2);
+        if if analog { v > 0.25 } else { pad.is_pressed(b) } {
+            input.buttons |= m;
+        }
+        let pressure = (v * 255.0) as u8;
+        if m & button::L2 != 0 {
+            input.l2 = input.l2.max(pressure);
+        }
+        if m & button::R2 != 0 {
+            input.r2 = input.r2.max(pressure);
+        }
+    }
+    // PS2 sticks: 0 = left/up, 0x80 = centre, 0xff = right/down.
+    let axis = |a, invert: bool| {
+        let v = pad.value(a);
+        let v = if invert { -v } else { v };
+        (128.0 + v * 127.5).clamp(0.0, 255.0) as u8
+    };
+    input.sticks = [axis(Axis::RightStickX, false), axis(Axis::RightStickY, true), axis(Axis::LeftStickX, false), axis(Axis::LeftStickY, true)];
+    input
+}
+
 impl App {
-    /// Combine gamepad and keyboard state into the PS2 controller.
+    /// Give a newly connected gamepad the first free player seat.
+    fn seat(&mut self, id: GamepadId) {
+        let Some(g) = &self.gilrs else { return };
+        let name = g.gamepad(id).name().to_string();
+        if self.players.contains(&Some(id)) {
+            return;
+        }
+        match self.players.iter().position(Option::is_none) {
+            Some(n) => {
+                self.players[n] = Some(id);
+                eprintln!("[input] gamepad connected: {name} (player {})", n + 1);
+            }
+            None => eprintln!("[input] gamepad connected: {name} (not playing: both players have one)"),
+        }
+    }
+
+    /// Combine gamepad and keyboard state into the two PS2 controllers.
     fn update_input(&mut self) {
         let keys = self.keys.iter().filter_map(|&k| self.key_map.get(&key_name(k))).fold(0, |a, b| a | b);
-        let mut input = Input { buttons: keys, ..Input::default() };
+        let mut events = Vec::new();
         if let Some(g) = &mut self.gilrs {
             while let Some(ev) = g.next_event() {
-                // Logged so a flaky controller shows up next to the game's output.
-                match ev.event {
-                    EventType::Connected => eprintln!("[input] gamepad connected: {}", g.gamepad(ev.id).name()),
-                    EventType::Disconnected => eprintln!("[input] gamepad disconnected: {}", g.gamepad(ev.id).name()),
-                    _ => {}
-                }
-            }
-            if let Some((_, pad)) = g.gamepads().find(|(_, p)| p.is_connected()) {
-                // Analog triggers press past a quarter; whatever is bound to
-                // L2/R2 also gives their pressure.
-                for &(b, m) in &self.pad_map {
-                    let v = pad.button_data(b).map(|d| d.value()).unwrap_or(0.0);
-                    let analog = matches!(b, Button::LeftTrigger2 | Button::RightTrigger2);
-                    if if analog { v > 0.25 } else { pad.is_pressed(b) } {
-                        input.buttons |= m;
-                    }
-                    let pressure = (v * 255.0) as u8;
-                    if m & button::L2 != 0 {
-                        input.l2 = input.l2.max(pressure);
-                    }
-                    if m & button::R2 != 0 {
-                        input.r2 = input.r2.max(pressure);
-                    }
-                }
-                // PS2 sticks: 0 = left/up, 0x80 = centre, 0xff = right/down.
-                let axis = |a, invert: bool| {
-                    let v = pad.value(a);
-                    let v = if invert { -v } else { v };
-                    (128.0 + v * 127.5).clamp(0.0, 255.0) as u8
-                };
-                input.sticks = [axis(Axis::RightStickX, false), axis(Axis::RightStickY, true), axis(Axis::LeftStickX, false), axis(Axis::LeftStickY, true)];
+                events.push((ev.id, ev.event));
             }
         }
+        // Logged so a flaky controller shows up next to the game's output.
+        for (id, event) in events {
+            match event {
+                EventType::Connected => self.seat(id),
+                EventType::Disconnected => {
+                    let name = self.gilrs.as_ref().map(|g| g.gamepad(id).name().to_string()).unwrap_or_default();
+                    match self.players.iter().position(|&p| p == Some(id)) {
+                        Some(n) => {
+                            self.players[n] = None;
+                            eprintln!("[input] gamepad disconnected: {name} (player {})", n + 1);
+                        }
+                        None => eprintln!("[input] gamepad disconnected: {name}"),
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut players: [Option<Input>; 2] = [None; 2];
+        if let Some(g) = &self.gilrs {
+            for (n, id) in self.players.iter().enumerate() {
+                if let Some(pad) = id.and_then(|id| g.connected_gamepad(id)) {
+                    players[n] = Some(pad_input(pad, &self.pad_map));
+                }
+            }
+        }
+        // Player 1 is always plugged in; the keyboard plugs in its player.
+        players[0].get_or_insert_with(Input::default);
+        let input = players[self.keyboard_player].get_or_insert_with(Input::default);
+        input.buttons |= keys;
         // D-pad keys (WASD, arrows) also push the left stick, so the keyboard
         // steers whether the game reads the D-pad or the stick. Per axis the
         // larger deflection wins: a resting or drifting gamepad stick never
@@ -338,21 +392,23 @@ impl App {
             _ => 0x80,
         };
         let merge = |pad: u8, key: u8| if (key as i32 - 128).abs() > (pad as i32 - 128).abs() { key } else { pad };
-        input.sticks[2] = merge(input.sticks[2], dir(button::LEFT, button::RIGHT));
-        input.sticks[3] = merge(input.sticks[3], dir(button::UP, button::DOWN));
+        let (left_x, left_y) = (dir(button::LEFT, button::RIGHT), dir(button::UP, button::DOWN));
+        input.sticks[2] = merge(input.sticks[2], left_x);
+        input.sticks[3] = merge(input.sticks[3], left_y);
         // FREEK_TRACE_BUTTON=<mask>: half a second after that pad button is
         // pressed, trace a frame and save its picture (effects too quick to
         // catch by hand), up to ten times.
+        let buttons = players[0].map_or(0, |i| i.buttons);
         if let Some(mask) = std::env::var("FREEK_TRACE_BUTTON").ok().and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok()) {
-            if input.buttons & mask != 0 && self.last_buttons & mask == 0 && self.traces < 10 {
+            if buttons & mask != 0 && self.last_buttons & mask == 0 && self.traces < 10 {
                 if let Some(r) = &mut self.renderer {
                     self.traces += 1;
                     r.trace_shot(30);
                 }
             }
         }
-        self.last_buttons = input.buttons;
-        ee_runtime::pad::set_input(input);
+        self.last_buttons = buttons;
+        ee_runtime::pad::set_input(players);
     }
 }
 

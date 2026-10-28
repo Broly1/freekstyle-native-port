@@ -53,11 +53,17 @@ impl Default for Input {
     }
 }
 
-/// Written by the window thread, read by the game on each vblank.
-pub static INPUT: Mutex<Input> = Mutex::new(Input { buttons: 0, sticks: [0x80; 4], l2: 0, r2: 0 });
+/// Each player's controller, `None` while unplugged (player 1 always has
+/// one). Written by the window thread, read by the game on each vblank.
+pub static INPUT: Mutex<[Option<Input>; 2]> = Mutex::new([Some(Input { buttons: 0, sticks: [0x80; 4], l2: 0, r2: 0 }), None]);
 
-pub fn set_input(i: Input) {
-    *INPUT.lock().unwrap() = i;
+pub fn set_input(players: [Option<Input>; 2]) {
+    *INPUT.lock().unwrap() = players;
+}
+
+/// Buttons held by any player.
+pub fn any_buttons() -> u16 {
+    INPUT.lock().unwrap().iter().flatten().fold(0, |a, i| a | i.buttons)
 }
 
 const MODE_DIGITAL: u8 = 0x41;
@@ -76,26 +82,31 @@ struct Port {
 pub struct Pad {
     ports: Vec<Port>,
     counter: u32,
-    analog: bool,
-    /// Buttons at the last FREEK_PAD_LOG report.
-    logged: u16,
-    /// FREEK_PAD_SCRIPT taps: (first frame, last frame, buttons), for
-    /// automated testing.
-    script: Option<Vec<(u32, u32, u16)>>,
+    /// Analog mode per port (SetMainMode).
+    analog: [bool; 2],
+    /// Buttons at the last FREEK_PAD_LOG report, per player.
+    logged: [u16; 2],
+    /// FREEK_PAD_SCRIPT taps: (first frame, last frame, player, buttons),
+    /// for automated testing.
+    script: Option<Vec<(u32, u32, usize, u16)>>,
 }
 
-/// Parse "600:a,900:start+up,1200-1800:a" into (first, last frame,
-/// buttons): a tap holds for 6 frames, a range for its whole length. Button
-/// names use the Xbox layout (a b x y lb rb lt rt back start up down left
-/// right).
-fn parse_script(s: &str) -> Vec<(u32, u32, u16)> {
+/// Parse "600:a,900:start+up,1200-1800:a,2000:p2+a" into (first, last
+/// frame, player, buttons): a tap holds for 6 frames, a range for its whole
+/// length. Button names use the Xbox layout (a b x y lb rb lt rt back start
+/// up down left right); "p2" makes it player 2's, which plugs that pad in.
+fn parse_script(s: &str) -> Vec<(u32, u32, usize, u16)> {
     use button::*;
     s.split(',')
         .filter_map(|tap| {
             let (frame, names) = tap.split_once(':')?;
-            let mut b = 0;
+            let (mut b, mut player) = (0, 0);
             for n in names.split('+') {
                 b |= match n.trim() {
+                    "p2" => {
+                        player = 1;
+                        0
+                    }
                     "a" => CROSS,
                     "b" => CIRCLE,
                     "x" => SQUARE,
@@ -120,7 +131,7 @@ fn parse_script(s: &str) -> Vec<(u32, u32, u16)> {
                     (f, f + 5)
                 }
             };
-            Some((first, last, b))
+            Some((first, last, player, b))
         })
         .collect()
 }
@@ -142,8 +153,8 @@ impl Pad {
                 put(12, 1);
             }
             0x06 => {
-                // SetMainMode(mode, lock): 1 = analog.
-                self.analog = word(12) == 1;
+                // SetMainMode(port, slot, mode, lock): 1 = analog.
+                self.analog[(word(4) as usize).min(1)] = word(12) == 1;
                 put(20, 1);
             }
             0x12 => put(12, 0x0400), // padman 4.0
@@ -169,22 +180,34 @@ impl Pad {
             return;
         }
         self.counter = self.counter.wrapping_add(1);
-        let mut input = *INPUT.lock().unwrap();
+        let mut players = *INPUT.lock().unwrap();
         let script = self.script.get_or_insert_with(|| std::env::var("FREEK_PAD_SCRIPT").map(|s| parse_script(&s)).unwrap_or_default());
-        for &(first, last, b) in script.iter() {
-            if (first..=last).contains(&self.counter) {
-                input.buttons |= b;
+        for &(_, _, player, _) in script.iter() {
+            players[player].get_or_insert_with(Input::default);
+        }
+        for &(first, last, player, b) in script.iter() {
+            if let Some(input) = &mut players[player] {
+                if (first..=last).contains(&self.counter) {
+                    input.buttons |= b;
+                }
             }
         }
-        if input.buttons != self.logged && std::env::var_os("FREEK_PAD_LOG").is_some() {
-            eprintln!("[pad] vblank {vblank}: buttons {:#06x} (pressed {:#06x})", input.buttons, input.buttons & !self.logged);
-            self.logged = input.buttons;
+        if std::env::var_os("FREEK_PAD_LOG").is_some() {
+            for (n, input) in players.iter().enumerate() {
+                let buttons = input.map_or(0, |i| i.buttons);
+                if buttons != self.logged[n] {
+                    eprintln!("[pad] vblank {vblank}: player {} buttons {buttons:#06x} (pressed {:#06x})", n + 1, buttons & !self.logged[n]);
+                    self.logged[n] = buttons;
+                }
+            }
         }
         for p in &self.ports {
-            let connected = p.port == 0 && p.slot == 0;
-            let mode = if self.analog { MODE_ANALOG } else { MODE_DIGITAL };
+            // No multitap: slot 0 of ports 0 and 1 only.
+            let input = if p.slot == 0 { players.get(p.port as usize).copied().flatten() } else { None };
+            let analog = self.analog[(p.port as usize).min(1)];
+            let mode = if analog { MODE_ANALOG } else { MODE_DIGITAL };
             let mut f = [0u8; 128];
-            if connected {
+            if let Some(input) = input {
                 let b = !input.buttons;
                 f[1] = mode;
                 f[2] = b as u8;
@@ -213,10 +236,10 @@ impl Pad {
             f[102] = 3;
             f[103] = 1;
             f[104] = 2;
-            f[105] = u8::from(self.analog);
+            f[105] = u8::from(analog);
             f[106] = 2;
             f[107] = 1;
-            f[112] = if connected { STATE_STABLE } else { STATE_DISCONNECTED };
+            f[112] = if input.is_some() { STATE_STABLE } else { STATE_DISCONNECTED };
             f[113] = 0;
             f[114] = 1;
             // Overwrite the older of the two frames.

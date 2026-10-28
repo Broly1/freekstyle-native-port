@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use ps2_iop::MOVIE_AUDIO;
 
-use crate::pad::{button, INPUT};
+use crate::pad::{any_buttons, button};
 
 /// Sound decoded ahead of the device: 0.2 s.
 const AUDIO_AHEAD: usize = 9600;
@@ -114,7 +114,7 @@ pub fn play(path: &Path, gs: &Sender<gs::Msg>) -> Result<(), String> {
     };
 
     // A button held since before the movie doesn't skip it.
-    let mut armed = INPUT.lock().unwrap().buttons & SKIP == 0;
+    let mut armed = any_buttons() & SKIP == 0;
     let mut stdout = video.stdout.take().unwrap();
     let mut shown = 0u64;
     'frames: for n in 0u64.. {
@@ -125,7 +125,7 @@ pub fn play(path: &Path, gs: &Sender<gs::Msg>) -> Result<(), String> {
         }
         let due = n as f64 / fps;
         let now = loop {
-            let pressed = INPUT.lock().unwrap().buttons & SKIP != 0;
+            let pressed = any_buttons() & SKIP != 0;
             if armed && pressed {
                 break 'frames;
             }

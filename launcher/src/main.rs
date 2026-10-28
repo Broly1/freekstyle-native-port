@@ -436,6 +436,13 @@ impl Launcher {
         ui.label(
             RichText::new(t.controls_help).color(MUTED),
         );
+        ui.horizontal(|ui| {
+            ui.label(t.keyboard_plays);
+            for n in 1..=2 {
+                ui.selectable_value(&mut self.config.keyboard_player, n, fill(t.player_n, &[&n.to_string()]));
+            }
+            ui.label(RichText::new(t.players_help).color(MUTED));
+        });
         ui.add_space(4.0);
         let mut remove = None;
         let mut start = None;
