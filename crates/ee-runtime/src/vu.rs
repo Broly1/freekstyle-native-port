@@ -142,7 +142,7 @@ impl Default for Vu0 {
 /// PS2 float clamp without branches: infinities and NaNs become +/-MAX,
 /// denormals become signed zero.
 #[inline(always)]
-fn clamp(x: f32) -> f32 {
+pub(crate) fn clamp(x: f32) -> f32 {
     let b = x.to_bits();
     let e = b & 0x7f80_0000;
     let sign = b & 0x8000_0000;

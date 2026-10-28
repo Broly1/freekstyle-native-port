@@ -319,9 +319,6 @@ impl Vif {
         let (cl, wl) = (self.cl.max(1), self.wl.max(1));
         let mut used = 0;
         if self.unpack_nbits == 0 && self.mode == 0 && wl <= cl && vl < 3 {
-            // STMASK selection per cycle row and field: 0 data, 1 row,
-            // 2 col, 3 keep (see `write_element`).
-            let sel: [[u32; 4]; 4] = std::array::from_fn(|r| std::array::from_fn(|n| if masked { (self.mask >> (r * 8 + n * 2)) & 3 } else { 0 }));
             let (row, col) = (self.row, self.col);
             let left = (self.unpack_target - self.unpack_done) as usize;
             let mut k = (ws.len() * 32 / eb).min(left);
@@ -333,42 +330,54 @@ impl Vif {
             }
             let bits = 32usize >> vl;
             let usn = self.code & 0x4000 != 0;
-            // Component c of element j (bits, offset all multiples of 8).
-            let comp = |j: usize, c: usize| -> u32 {
-                let at = j * eb + c * bits;
-                let raw = ws[at / 32] >> (at % 32);
-                match bits {
-                    32 => raw,
-                    16 if usn => raw & 0xffff,
-                    16 => raw as i16 as i32 as u32,
-                    _ if usn => raw & 0xff,
-                    _ => raw as i8 as i32 as u32,
+            // Per cycle row in use, lane masks for data and kept fields and
+            // the constant (row or column) fields, so a write is
+            // (data & d) | constant | (old & keep). STMASK has 2 bits per
+            // field: 0 data, 1 row, 2 col, 3 keep (see `write_element`).
+            const UNMASKED: [BulkRow; 4] = [BulkRow { data: [!0; 4], constant: [0; 4], keep: [0; 4] }; 4];
+            let mut rows = UNMASKED;
+            if masked {
+                for (r, row_masks) in rows.iter_mut().enumerate().take(wl.min(4) as usize) {
+                    row_masks.data = [0; 4];
+                    for n in 0..4 {
+                        match (self.mask >> (r * 8 + n * 2)) & 3 {
+                            0 => row_masks.data[n] = !0,
+                            1 => row_masks.constant[n] = row[n],
+                            2 => row_masks.constant[n] = col[r],
+                            _ => row_masks.keep[n] = !0,
+                        }
+                    }
                 }
-            };
+            }
             let data = if unit == 0 { &mut m.vu0_data } else { &mut m.vu1_data };
-            let qwords = data.len() / 16;
-            for j in 0..k {
-                let done = self.unpack_done + j as u32;
-                let cycle = done % wl;
-                let addr = self.unpack_addr + (done / wl) * cl + cycle;
-                let v = match vn {
-                    0 => [comp(j, 0); 4],
-                    1 => [comp(j, 0), comp(j, 1), comp(j, 0), comp(j, 1)],
-                    2 => [comp(j, 0), comp(j, 1), comp(j, 2), 0],
-                    _ => [comp(j, 0), comp(j, 1), comp(j, 2), comp(j, 3)],
+            let at = BulkAt { done: self.unpack_done, addr: self.unpack_addr, cl, wl };
+            macro_rules! go {
+                ($vn:literal, $bits:literal, $usn:literal) => {
+                    bulk_unpack::<$vn, $bits, $usn>(ws, k, data, at, &rows)
                 };
-                let base = (addr as usize % qwords) * 16;
-                let q = &mut data[base..base + 16];
-                let r = cycle.min(3) as usize;
-                for (n, x) in v.iter().enumerate() {
-                    let value = match sel[r][n] {
-                        0 => *x,
-                        1 => row[n],
-                        2 => col[r],
-                        _ => continue,
-                    };
-                    q[n * 4..n * 4 + 4].copy_from_slice(&value.to_le_bytes());
-                }
+            }
+            match (vn as usize, bits, usn) {
+                (0, 32, _) => go!(0, 32, false),
+                (0, 16, false) => go!(0, 16, false),
+                (0, 16, true) => go!(0, 16, true),
+                (0, 8, false) => go!(0, 8, false),
+                (0, 8, true) => go!(0, 8, true),
+                (1, 32, _) => go!(1, 32, false),
+                (1, 16, false) => go!(1, 16, false),
+                (1, 16, true) => go!(1, 16, true),
+                (1, 8, false) => go!(1, 8, false),
+                (1, 8, true) => go!(1, 8, true),
+                (2, 32, _) => go!(2, 32, false),
+                (2, 16, false) => go!(2, 16, false),
+                (2, 16, true) => go!(2, 16, true),
+                (2, 8, false) => go!(2, 8, false),
+                (2, 8, true) => go!(2, 8, true),
+                (3, 32, _) => go!(3, 32, false),
+                (3, 16, false) => go!(3, 16, false),
+                (3, 16, true) => go!(3, 16, true),
+                (3, 8, false) => go!(3, 8, false),
+                (3, 8, true) => go!(3, 8, true),
+                _ => unreachable!("vl < 3"),
             }
             self.unpack_done += k as u32;
             self.unpack_cycle = self.unpack_done % wl;
@@ -461,6 +470,67 @@ impl Vif {
     }
 }
 
+/// Lane masks for one STMASK cycle row (see `Vif::unpack_words`).
+#[derive(Clone, Copy, Default)]
+struct BulkRow {
+    data: [u32; 4],
+    constant: [u32; 4],
+    keep: [u32; 4],
+}
+
+/// Where a bulk unpack starts: elements done so far, the UNPACK address
+/// and the write cycle (CL, WL with WL <= CL).
+#[derive(Clone, Copy)]
+struct BulkAt {
+    done: u32,
+    addr: u32,
+    cl: u32,
+    wl: u32,
+}
+
+/// Unpack `k` elements of VN+1 components of BITS bits each from `ws`,
+/// specialised per format so the decode is a few shifts per element.
+fn bulk_unpack<const VN: usize, const BITS: usize, const USN: bool>(ws: &[u32], k: usize, data: &mut [u8], at: BulkAt, rows: &[BulkRow; 4]) {
+    let eb = BITS * (VN + 1);
+    let comp = |j: usize, c: usize| -> u32 {
+        let bit = j * eb + c * BITS;
+        let raw = ws[bit / 32] >> (bit % 32);
+        match BITS {
+            32 => raw,
+            16 if USN => raw & 0xffff,
+            16 => raw as i16 as i32 as u32,
+            _ if USN => raw & 0xff,
+            _ => raw as i8 as i32 as u32,
+        }
+    };
+    let qwords = data.len() / 16;
+    debug_assert!(qwords.is_power_of_two());
+    let mut cycle = at.done % at.wl;
+    let mut addr = at.addr + (at.done / at.wl) * at.cl + cycle;
+    for j in 0..k {
+        let v = match VN {
+            0 => [comp(j, 0); 4],
+            1 => [comp(j, 0), comp(j, 1), comp(j, 0), comp(j, 1)],
+            2 => [comp(j, 0), comp(j, 1), comp(j, 2), 0],
+            _ => [comp(j, 0), comp(j, 1), comp(j, 2), comp(j, 3)],
+        };
+        let r = &rows[cycle.min(3) as usize];
+        let base = (addr as usize & (qwords - 1)) * 16;
+        let q: &mut [u8; 16] = (&mut data[base..base + 16]).try_into().unwrap();
+        for n in 0..4 {
+            let old = u32::from_le_bytes(q[n * 4..n * 4 + 4].try_into().unwrap());
+            let value = (v[n] & r.data[n]) | r.constant[n] | (old & r.keep[n]);
+            q[n * 4..n * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        cycle += 1;
+        addr += 1;
+        if cycle == at.wl {
+            cycle = 0;
+            addr += at.cl - at.wl;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,7 +567,7 @@ mod tests {
     fn bulk_unpack_matches_word_path() {
         for fmt in 0..16u32 {
             for usn in [0, 0x4000] {
-                for (cl, wl) in [(1, 1), (4, 2)] {
+                for (cl, wl) in [(1, 1), (2, 2), (4, 4), (4, 2), (3, 1)] {
                     let num = 7u32;
                     let eb = if fmt == 15 { 16 } else { (32 >> (fmt & 3)) * ((fmt >> 2) + 1) };
                     let n = (num * eb).div_ceil(32);

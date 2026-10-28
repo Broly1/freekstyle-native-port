@@ -386,7 +386,10 @@ fn writes_finish(data: &[u128]) -> bool {
             n => n,
         };
         let regs = (tag >> 64) as u64;
+        // Only an A+D register can write FINISH; geometry packets have none.
+        let has_a_d = (0..nreg).any(|r| (regs >> (4 * r)) & 0xf == A_D);
         match flg {
+            0 if !has_a_d => i += nloop * nreg,
             0 => {
                 for q in 0..nloop * nreg {
                     let Some(&v) = data.get(i + q) else { return false };

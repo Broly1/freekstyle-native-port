@@ -77,6 +77,22 @@ impl X {
 /// `vu::clamp` on each lane: infinities and NaNs become ±MAX, denormals
 /// signed zero.
 #[inline(always)]
+#[cfg(target_feature = "sse4.1")]
+fn clamp(x: X) -> X {
+    // Same result as the SSE2 version below: |x| capped at FLT_MAX (an
+    // integer min also catches inf and NaN), zeroed below the smallest
+    // normal, sign put back.
+    unsafe {
+        let b = x.bits();
+        let sign = _mm_and_si128(b, ints(i32::MIN));
+        let mag = _mm_min_epi32(_mm_andnot_si128(ints(i32::MIN), b), ints(0x7f7f_ffff));
+        let mag = _mm_and_si128(mag, _mm_cmpgt_epi32(mag, ints(0x007f_ffff)));
+        X::from_bits(_mm_or_si128(sign, mag))
+    }
+}
+
+#[inline(always)]
+#[cfg(not(target_feature = "sse4.1"))]
 fn clamp(x: X) -> X {
     unsafe {
         let b = x.bits();
@@ -231,6 +247,19 @@ mod tests {
     /// differ from build to build there too.
     fn same2(x: V4, y: V4, a: V4, b: V4) -> bool {
         (0..4).all(|k| (a[k].is_nan() && b[k].is_nan()) || x[k].to_bits() == y[k].to_bits())
+    }
+
+    /// The vector clamp agrees with the scalar one for every sign and
+    /// exponent, with mantissas at and between the edges.
+    #[test]
+    fn clamp_matches_scalar() {
+        for se in 0..512u32 {
+            for m in [0, 1, 2, 0x1234, 0x3f_ffff, 0x40_0000, 0x40_0001, 0x7f_fffe, 0x7f_ffff] {
+                let x = f32::from_bits(se << 23 | m);
+                let want = vu::clamp(x).to_bits();
+                assert_eq!(clamp(X::splat(x)).get()[0].to_bits(), want, "{:#010x}", x.to_bits());
+            }
+        }
     }
 
     #[test]

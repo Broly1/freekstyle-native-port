@@ -316,6 +316,16 @@ impl Mem<'_> {
     fn qword(&self, q: usize) -> u128 {
         (0..4).fold(0u128, |a, n| a | (self.word(q, n) as u128) << (32 * n))
     }
+    /// Append `n` qwords from `q` on, wrapping at the end of memory.
+    fn extend_qwords(&self, mut q: usize, mut n: usize, out: &mut Vec<u128>) {
+        out.reserve(n);
+        while n > 0 {
+            let at = q & (self.qwords() - 1);
+            let run = n.min(self.qwords() - at);
+            out.extend(self.data[at * 16..(at + run) * 16].chunks_exact(16).map(|c| u128::from_le_bytes(c.try_into().unwrap())));
+            (q, n) = (q + run, n - run);
+        }
+    }
 }
 
 /// MAC and status flags for an FMAC result in the given fields.
@@ -998,10 +1008,10 @@ fn gif_packet(mem: &Mem, start: usize, out: &mut Vec<u128>) {
             1 => (nloop * nreg).div_ceil(2),
             _ => nloop,
         };
-        for _ in 0..n {
-            out.push(mem.qword(q));
-            q += 1;
-        }
+        // A runaway packet stops once it has covered all of memory.
+        let n = n.min(mem.qwords() + 1);
+        mem.extend_qwords(q, n, out);
+        q += n;
         if eop || out.len() - len0 > mem.qwords() {
             return;
         }
