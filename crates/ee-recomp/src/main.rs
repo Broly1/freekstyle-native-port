@@ -285,7 +285,7 @@ fn main() {
         let _ = writeln!(root, "mod {m};\npub use {m}::*;");
     }
     let _ = writeln!(root, "pub mod vu_programs;");
-    let (vu_src, vu_images, vu_entries) = vu::generate(args.get(5).map(std::path::Path::new));
+    let (vu_src, vu_images, vu_entries) = vu::generate(args.get(5).map(std::path::Path::new), &bytes);
     fs::write(format!("{out_dir}/vu_programs.rs"), vu_src).expect("write vu_programs.rs");
     let _ = writeln!(root, "\n/// FNV-1a of the executable this code was generated from.");
     let _ = writeln!(root, "pub const ELF_HASH: u64 = {:#x};", ee_runtime_fnv(&bytes));

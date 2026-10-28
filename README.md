@@ -53,7 +53,7 @@ then no longer needed to play; settings go to `~/.config/freekstyle`,
 saves to `~/.local/share/freekstyle/saves`, and `./setup.sh --uninstall`
 removes the installed copy (keeping both). Or keep it in the folder and
 start `./target/release/freekstyle-launcher`. Steps already done are
-skipped, so run it again after recording VU programs (step 6).
+skipped, so running it again after a `git pull` only redoes what changed.
 
 The same by hand:
 
@@ -83,13 +83,7 @@ The same by hand:
    done
    cargo run --release -p flm --bin flm2mkv -- --crt game/movies/flm game/movies/hd
    ```
-6. **Record the VU programs once** (optional, for 60 fps races). They are
-   the game's own microcode, uploaded at run time, so they are not in this
-   repository and a fresh checkout runs them on the slower interpreter.
-   Play through a race or two with
-   `FREEK_VU_DUMP=freekstyle/vu_dumps ./target/release/freekstyle`, then
-   repeat step 3 to compile them to native code (see *VU microprograms*).
-7. **Play**: `./target/release/freekstyle-launcher`, or the game directly:
+6. **Play**: `./target/release/freekstyle-launcher`, or the game directly:
    ```sh
    ./target/release/freekstyle [--res 1080|1440|4k] [--scale N] [--fullscreen] [--widescreen] [--stretch] [--blur-bars] [--mute]
    ```
@@ -204,11 +198,13 @@ must be installed to see them. Start or Cross skips a movie.
 
 ## VU microprograms
 
-VU0/VU1 microcode is uploaded by the game at run time, so it is recorded
-rather than read from the ELF: `FREEK_VU_DUMP=freekstyle/vu_dumps` saves
-each program image the interpreter runs (`.bin`), its entry points
-(`.entries`) and the JR/JALR targets compiled code did not know
-(`.jumps`). Regenerating then compiles them (`ee-recomp`'s `vuc`):
+The game uploads its VU0/VU1 microcode at run time with VIF MPG packets
+stored in the ELF, and calls into it at addresses only seen while playing.
+`FREEK_VU_DUMP=freekstyle/vu_dumps` records each program image the
+interpreter runs (`.bin`, not committed), its entry points (`.entries`) and
+the JR/JALR targets compiled code did not know (`.jumps`). The entry and
+jump lists are in the repository; regenerating rebuilds each image from the
+ELF's MPG chains (matched by hash) and compiles them (`ee-recomp`'s `vuc`):
 
 - The VU's pipeline timing (hazard stalls, Q latency, flags visible 4
   cycles late, branches seeing a VI register's old value) depends only on

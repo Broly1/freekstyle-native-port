@@ -115,22 +115,6 @@ dans un terminal). Ce dossier n'est plus nécessaire pour jouer ; ./setup.sh --u
 supprime la copie installée."
 msg done_here "Start the game with:   ./target/release/freekstyle-launcher" "Inicie o jogo com:   ./target/release/freekstyle-launcher" \
     "Inicia el juego con:   ./target/release/freekstyle-launcher" "Lancez le jeu avec :   ./target/release/freekstyle-launcher"
-msg vu_note "Races run on the VU interpreter until their programs are recorded. For
-60 fps races, play a race or two from this folder with
-    FREEK_VU_DUMP=freekstyle/vu_dumps ./target/release/freekstyle
-then run ./setup.sh again." \
-    "As corridas usam o interpretador de VU até seus programas serem gravados. Para
-corridas a 60 fps, jogue uma ou duas corridas a partir desta pasta com
-    FREEK_VU_DUMP=freekstyle/vu_dumps ./target/release/freekstyle
-e rode ./setup.sh de novo." \
-    "Las carreras usan el intérprete de VU hasta que se graban sus programas. Para
-carreras a 60 fps, juega una o dos carreras desde esta carpeta con
-    FREEK_VU_DUMP=freekstyle/vu_dumps ./target/release/freekstyle
-y vuelve a ejecutar ./setup.sh." \
-    "Les courses passent par l'interpréteur VU tant que leurs programmes ne sont pas
-enregistrés. Pour des courses à 60 fps, jouez une course ou deux depuis ce dossier avec
-    FREEK_VU_DUMP=freekstyle/vu_dumps ./target/release/freekstyle
-puis relancez ./setup.sh."
 msg not_installed "Freekstyle is not installed in %s." "O Freekstyle não está instalado em %s." "Freekstyle no está instalado en %s." "Freekstyle n'est pas installé dans %s."
 msg uninstall_info "This removes %s and its app menu entry. Your saves (~/.local/share/freekstyle) and settings (~/.config/freekstyle) stay." \
     "Isto remove %s e o item do menu. Seus saves (~/.local/share/freekstyle) e configurações (~/.config/freekstyle) ficam." \
@@ -386,4 +370,3 @@ else
     step "$(t done)"
     t done_here; printf '\n\n'
 fi
-t vu_note; echo
