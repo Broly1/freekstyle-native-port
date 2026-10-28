@@ -164,7 +164,7 @@ fn main() {
     let link = std::sync::Arc::new(ps2_iop::Link::default());
     let ring = std::sync::Arc::new(ps2_iop::AudioRing::default());
     ps2_iop::spawn(link.clone(), ring.clone(), audio::LATENCY);
-    let _stream = audio::start(ring, opts.mute);
+    audio::start(ring, opts.mute);
 
     // Converted pictures live next to the disc image (see lsc2png).
     let images_dir = std::path::Path::new(&opts.disc).parent().unwrap_or(std::path::Path::new(".")).join("images");

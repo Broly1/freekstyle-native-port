@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
 use ps2_iop::{AudioRing, MOVIE_AUDIO};
 
@@ -15,22 +15,69 @@ pub const LATENCY: usize = 768;
 /// on ALSA) makes sound trail the picture noticeably.
 const PERIOD: u32 = 240;
 
-/// Start playback from `ring`. Returns the stream, which must be kept
-/// alive. Without a usable device, samples are drained at the output
-/// rate instead, so the IOP still runs in real time.
-pub fn start(ring: Arc<AudioRing>, mute: bool) -> Option<cpal::Stream> {
-    let opened = if mute { Err("muted".to_string()) } else { open(ring.clone()) };
-    match opened {
-        Ok(s) => Some(s),
-        Err(e) => {
-            eprintln!("[audio] no output: {e}; running silent");
-            std::thread::spawn(move || drain(ring));
-            None
-        }
+/// Play `ring` on the default output device from an audio thread. Without
+/// a usable device (or muted) samples are drained at the output rate
+/// instead, so the IOP still runs in real time. A stream that reports an
+/// error or stops asking for samples is closed, the game goes on silent,
+/// and the device is reopened every few seconds until it plays again.
+pub fn start(ring: Arc<AudioRing>, mute: bool) {
+    let _ = std::thread::Builder::new().name("audio".into()).spawn(move || supervise(ring, mute));
+}
+
+/// Callbacks stopping for this long count as a dead stream.
+const STALL: Duration = Duration::from_millis(500);
+/// How long to stay silent before trying the device again.
+const RETRY: Duration = Duration::from_secs(2);
+
+/// What the stream's callbacks report to the audio thread.
+struct Health {
+    start: Instant,
+    /// Milliseconds since `start` at the last data callback.
+    last_callback: AtomicU64,
+    failed: AtomicBool,
+}
+
+impl Health {
+    fn alive(&self) -> bool {
+        let quiet = self.start.elapsed().saturating_sub(Duration::from_millis(self.last_callback.load(Relaxed)));
+        !self.failed.load(Relaxed) && quiet < STALL
     }
 }
 
-fn open(ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
+fn supervise(ring: Arc<AudioRing>, mute: bool) {
+    if mute {
+        eprintln!("[audio] muted; running silent");
+    }
+    let mut silent = Silent::new();
+    let mut retry_at = Instant::now();
+    let mut reported = false;
+    loop {
+        if !mute && Instant::now() >= retry_at {
+            let health = Arc::new(Health { start: Instant::now(), last_callback: AtomicU64::new(0), failed: AtomicBool::new(false) });
+            match open(ring.clone(), health.clone()) {
+                Ok(stream) => {
+                    reported = false;
+                    while health.alive() {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    drop(stream);
+                    eprintln!("[audio] output stopped; running silent and retrying");
+                }
+                Err(e) if !reported => {
+                    eprintln!("[audio] no output: {e}; running silent and retrying");
+                    reported = true;
+                }
+                Err(_) => {}
+            }
+            retry_at = Instant::now() + RETRY;
+            silent = Silent::new();
+        }
+        silent.step(&ring);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn open(ring: Arc<AudioRing>, health: Arc<Health>) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
     let device = host.default_output_device().ok_or("no output device")?;
     let rate = cpal::SampleRate(ps2_iop::spu2::RATE);
@@ -51,10 +98,12 @@ fn open(ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
     let report = std::env::var_os("FREEK_HEARTBEAT").is_some();
     let (mut missing, mut since) = (0usize, Instant::now());
     let (mut last_call, mut worst_gap) = (Instant::now(), Duration::ZERO);
+    let health_err = health.clone();
     let stream = device
         .build_output_stream(
             &config,
             move |out: &mut [f32], _| {
+                health.last_callback.store(health.start.elapsed().as_millis() as u64, Relaxed);
                 if std::env::var_os("FREEK_AUDIO_LOG").is_some() {
                     eprintln!("[audio] callback {} frames, queued {}", out.len() / 2, ring.len());
                 }
@@ -87,7 +136,16 @@ fn open(ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
                     }
                 }
             },
-            |e| eprintln!("[audio] {e}"),
+            {
+                // One report per stream: a broken device can return the
+                // same error on every poll.
+                let health = health_err;
+                move |e| {
+                    if !health.failed.swap(true, Relaxed) {
+                        eprintln!("[audio] {e}");
+                    }
+                }
+            },
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -96,16 +154,24 @@ fn open(ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
     Ok(stream)
 }
 
-fn drain(ring: Arc<AudioRing>) {
-    let start = Instant::now();
-    let mut taken = 0u64;
-    loop {
-        std::thread::sleep(Duration::from_millis(10));
-        let due = start.elapsed().as_micros() as u64 * ps2_iop::spu2::RATE as u64 / 1_000_000;
+/// Silent output: takes samples at the output rate, so the IOP and movies
+/// keep real time.
+struct Silent {
+    start: Instant,
+    taken: u64,
+}
+
+impl Silent {
+    fn new() -> Silent {
+        Silent { start: Instant::now(), taken: 0 }
+    }
+
+    fn step(&mut self, ring: &AudioRing) {
+        let due = self.start.elapsed().as_micros() as u64 * ps2_iop::spu2::RATE as u64 / 1_000_000;
         let mut q = ring.buf.lock().unwrap();
-        let n = (due - taken).min(q.len() as u64);
+        let n = (due - self.taken).min(q.len() as u64);
         q.drain(..n as usize);
-        taken += n;
+        self.taken += n;
         // A movie's sound keeps its clock running at the same rate.
         let mut movie = MOVIE_AUDIO.buf.lock().unwrap();
         let m = n.min(movie.len() as u64);
