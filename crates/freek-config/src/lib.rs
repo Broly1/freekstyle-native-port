@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 /// The settings file's name.
 pub const FILE: &str = "freekstyle.toml";
 
+/// Gamepad mappings (SDL_GameControllerDB lines) for controllers the
+/// gamepad library's database lacks; the game and launcher both add them.
+pub const GAMEPAD_MAPPINGS: &str = include_str!("gamecontrollerdb.txt");
+
 /// Where the launcher writes and the game looks: `freekstyle.toml` in the
 /// working directory (the port or install directory, which also holds
 /// `game/`) when it is there or can be created; else, in an install shared

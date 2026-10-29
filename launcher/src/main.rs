@@ -269,7 +269,7 @@ impl Launcher {
             config,
             tab: Tab::Play,
             capture: None,
-            gilrs: Gilrs::new().ok(),
+            gilrs: gilrs::GilrsBuilder::new().add_mappings(freek_config::GAMEPAD_MAPPINGS).build().ok(),
             game: None,
             status,
             logo,

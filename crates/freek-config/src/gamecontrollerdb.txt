@@ -1,0 +1,12 @@
+# SDL_GameControllerDB lines for controllers missing from the database
+# gilrs ships. Without one, buttons are read by Linux's positional names
+# (307 = top, 308 = left), but some generic pads send codes by the letter
+# printed on the button instead, which swaps X and Y; the right stick
+# (Z/RZ) is also not read as one.
+#
+# GameSir Cyclone Pro dongle (3537:1007), checked in game: A 304, B 305,
+# X 307, Y 308 (by letter),
+# LB/RB 310/311, LT/RT 312/313 (also analog on BRAKE/GAS), sticks X/Y and
+# Z/RZ, D-pad hat. The wired pad (3537:1023) is assumed to match.
+03000000373500000710000010010000,GameSir-Dongle,a:b0,b:b1,x:b3,y:b4,leftshoulder:b6,rightshoulder:b7,lefttrigger:b8,righttrigger:b9,back:b10,start:b11,guide:b12,leftstick:b13,rightstick:b14,leftx:a0,lefty:a1,rightx:a2,righty:a3,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,platform:Linux,
+03000000373500002310000010010000,GameSir Cyclone Pro,a:b0,b:b1,x:b3,y:b4,leftshoulder:b6,rightshoulder:b7,lefttrigger:b8,righttrigger:b9,back:b10,start:b11,guide:b12,leftstick:b13,rightstick:b14,leftx:a0,lefty:a1,rightx:a2,righty:a3,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,platform:Linux,

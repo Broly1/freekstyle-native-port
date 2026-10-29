@@ -203,7 +203,7 @@ fn main() {
         process::exit(1);
     });
     event_loop.set_control_flow(ControlFlow::Poll);
-    let gilrs = Gilrs::new().map_err(|e| eprintln!("[input] gamepads unavailable: {e}")).ok();
+    let gilrs = gilrs::GilrsBuilder::new().add_mappings(freek_config::GAMEPAD_MAPPINGS).build().map_err(|e| eprintln!("[input] gamepads unavailable: {e}")).ok();
     let (key_map, pad_map) = input_maps(&opts.bindings);
     let keyboard_player = (opts.keyboard_player.clamp(1, 2) - 1) as usize;
     let mut app = App { opts, rx: gs_rx, window: None, renderer: None, last_title: Instant::now(), last_frame: 0, gilrs, players: [None; 2], keyboard_player, keys: Vec::new(), last_buttons: 0, traces: 0, key_map, pad_map };
@@ -298,6 +298,11 @@ fn input_maps(bindings: &[freek_config::Binding]) -> (HashMap<String, u16>, Vec<
     (keys, pad)
 }
 
+/// A gamepad's SDL GUID as written in gamecontrollerdb.txt.
+fn uuid_hex(u: [u8; 16]) -> String {
+    u.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// One gamepad's state as a PS2 controller.
 fn pad_input(pad: Gamepad, pad_map: &[(Button, u16)]) -> Input {
     let mut input = Input::default();
@@ -331,7 +336,13 @@ impl App {
     /// Give a newly connected gamepad the first free player seat.
     fn seat(&mut self, id: GamepadId) {
         let Some(g) = &self.gilrs else { return };
-        let name = g.gamepad(id).name().to_string();
+        let pad = g.gamepad(id);
+        let mut name = pad.name().to_string();
+        if pad.mapping_source() == gilrs::MappingSource::None {
+            // Buttons then follow Linux codes, which put X and Y (and more)
+            // in the wrong places on many generic pads.
+            name += &format!(" [no layout mapping for {}; add one to freek-config's gamecontrollerdb.txt]", uuid_hex(pad.uuid()));
+        }
         if self.players.contains(&Some(id)) {
             return;
         }
