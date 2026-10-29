@@ -556,12 +556,19 @@ const STREAM_STATE: u32 = 0x193440;
 
 pub fn movie_open(c: &mut Cpu) {
     let path = cstr(c, c.r32(A0));
+    if std::env::var_os("FREEK_MOVIE_LOG").is_some() {
+        eprintln!("[movie] open {path} from {:#010x}, vblank {}", c.r32(31), c.mem.io.vblanks);
+    }
     *crate::movie::OPENED.lock().unwrap() = Some(path);
     c.ws(V0, 0);
 }
 
 pub fn movie_play(c: &mut Cpu) {
-    let opened = crate::movie::OPENED.lock().unwrap().clone();
+    // In the game 0x1ab670 is an empty function (the real open plays the
+    // whole movie), and some code calls it with nothing to play: the
+    // reset before a track loads replayed the Circuit intro. So each
+    // opened movie plays once.
+    let opened = crate::movie::OPENED.lock().unwrap().take();
     // Converted movies live next to the pictures (game/movies).
     let dir = c.iop.images.parent().unwrap_or(std::path::Path::new(".")).join("movies");
     match (opened.as_deref().and_then(|p| crate::movie::find(&dir, p)), c.mem.io.gs.clone()) {
@@ -581,7 +588,11 @@ pub fn movie_play(c: &mut Cpu) {
             c.ws(A0, 1);
             c.call(STREAM_STATE);
         }
-        (None, _) => eprintln!("[movie] no conversion of {} in {} (see flm2mkv); skipped", opened.as_deref().unwrap_or("?"), dir.display()),
+        (None, _) => {
+            if let Some(path) = &opened {
+                eprintln!("[movie] no conversion of {path} in {} (see flm2mkv); skipped", dir.display());
+            }
+        }
         _ => {}
     }
     c.ws(V0, 0);

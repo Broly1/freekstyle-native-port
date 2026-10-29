@@ -24,7 +24,7 @@ use crate::pad::{any_buttons, button};
 const AUDIO_AHEAD: usize = 9600;
 const SKIP: u16 = button::START | button::CROSS;
 
-/// Disc path of the movie last opened.
+/// Disc path of the movie opened and not yet played.
 pub static OPENED: Mutex<Option<String>> = Mutex::new(None);
 
 /// The `.mkv` for a disc path like `cdrom0:\SXDATA\OPENING\INTRO.FLM;1`.
