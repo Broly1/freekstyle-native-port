@@ -18,6 +18,7 @@
 //! overlays on a picture (loading bar, "PRESS START") are moved by the
 //! same curve ([`wide_position`]) so they stay on their spot in it.
 
+use crate::icons::Face;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -54,8 +55,22 @@ struct Original {
     wide: bool,
 }
 
+/// Face buttons drawn in pictures, redrawn as Xbox buttons with the
+/// prompts: (face, centre x, centre y) as fractions of the 4:3 picture.
+/// LDCNTL is the controller diagram on the loading screen.
+const BADGES: &[(&str, &[(Face, f32, f32)])] = &[(
+    "LDCNTL.png",
+    &[(Face::Triangle, 0.4267, 0.4125), (Face::Square, 0.3993, 0.4463), (Face::Circle, 0.4517, 0.4486), (Face::Cross, 0.4257, 0.4796)],
+)];
+
+/// Badge disc radius as a fraction of the picture height; just covers the
+/// original buttons and their rims.
+const BADGE_RADIUS: f32 = 0.0162;
+
 pub struct Pictures {
     hd: PathBuf,
+    /// Redraw face buttons as Xbox buttons (see [`BADGES`]).
+    xbox: bool,
     /// Original picture size -> full hash -> picture.
     known: HashMap<(u32, u32), HashMap<u64, Original>>,
 }
@@ -89,7 +104,9 @@ fn load_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
 
 impl Pictures {
     /// Index the originals in `dir` that have a replacement in `dir/hd`.
-    pub fn load(dir: &Path) -> Pictures {
+    /// With `xbox`, pictures in [`BADGES`] are replaced even without a
+    /// high-resolution version, to redraw their buttons.
+    pub fn load(dir: &Path, xbox: bool) -> Pictures {
         let hd = dir.join("hd");
         let pngs = |dir: &Path| -> Vec<String> {
             std::fs::read_dir(dir)
@@ -102,6 +119,9 @@ impl Pictures {
         };
         let (plain, wide) = (pngs(&hd), pngs(&hd.join("wide")));
         let mut names: Vec<String> = plain.iter().chain(&wide).cloned().collect();
+        if xbox {
+            names.extend(BADGES.iter().map(|b| b.0.to_string()).filter(|n| dir.join(n).is_file()));
+        }
         names.sort();
         names.dedup();
         let mut known: HashMap<(u32, u32), HashMap<u64, Original>> = HashMap::new();
@@ -120,7 +140,7 @@ impl Pictures {
         if n + w > 0 {
             eprintln!("[pictures] high-resolution pictures in {}: {n} at 4:3, {w} at 16:9", hd.display());
         }
-        Pictures { hd, known }
+        Pictures { hd, xbox, known }
     }
 
     /// Replacement for a decoded `w` x `h` texture holding a known
@@ -136,12 +156,22 @@ impl Pictures {
                 continue;
             }
             let Some(o) = by_hash.get(&hash(corner(px, w, pw, ph))) else { continue };
-            let use_wide = wide && o.wide || !o.hd;
-            let path = if use_wide { self.hd.join("wide").join(&o.name) } else { self.hd.join(&o.name) };
+            let use_wide = wide && o.wide || !o.hd && o.wide;
+            let path = match (use_wide, o.hd) {
+                (true, _) => self.hd.join("wide").join(&o.name),
+                (false, true) => self.hd.join(&o.name),
+                // Only here for its badges: the original, upscaled.
+                (false, false) => self.hd.parent().unwrap_or(Path::new(".")).join(&o.name),
+            };
             let t = std::time::Instant::now();
             match load_png(&path) {
                 Ok((sw, sh, rgba)) => {
-                    let out = place(&rgba, sw, sh, pw * sx, ph * sy, w * sx, h * sy);
+                    let mut out = place(&rgba, sw, sh, pw * sx, ph * sy, w * sx, h * sy);
+                    if self.xbox {
+                        if let Some((_, badges)) = BADGES.iter().find(|b| b.0 == o.name) {
+                            paint_badges(&mut out, w * sx, pw * sx, ph * sy, badges, use_wide);
+                        }
+                    }
                     if std::env::var_os("FREEK_GS_LOG").is_some() {
                         eprintln!("[pictures] {} {sw}x{sh} -> {}x{} in {} ms", path.display(), pw * sx, ph * sy, t.elapsed().as_millis());
                     }
@@ -151,6 +181,39 @@ impl Pictures {
             }
         }
         None
+    }
+}
+
+/// Draw Xbox buttons over a placed picture (`pw` x `ph` in the corner of a
+/// texture `stride` texels wide). In a wide version, positions and widths
+/// follow its stretch curve, as the original buttons do.
+fn paint_badges(out: &mut [u32], stride: u32, pw: u32, ph: u32, badges: &[(Face, f32, f32)], wide: bool) {
+    // The disc is round on a 4:3 screen: its width is 3/4 of its height
+    // as a fraction of the picture.
+    let (rx, ry) = (BADGE_RADIUS * 0.75, BADGE_RADIUS);
+    for &(face, x, y) in badges {
+        let (cx, half) = if wide {
+            let at = |f: f32| (wide_position(f * 2.0 - 1.0) + 1.0) / 2.0;
+            (at(x), (at(x + rx) - at(x - rx)) / 2.0)
+        } else {
+            (x, rx)
+        };
+        // The button fills 0.94 of its square (see icons::draw).
+        let (bw, bh) = ((half * 2.0 / 0.94 * pw as f32).round() as u32, (ry * 2.0 / 0.94 * ph as f32).round() as u32);
+        let (x0, y0) = ((cx * pw as f32) as i64 - bw as i64 / 2, (y * ph as f32) as i64 - bh as i64 / 2);
+        let icon = crate::icons::draw_sized(face, bw.max(1), bh.max(1));
+        for (j, row) in icon.chunks_exact(bw.max(1) as usize).enumerate() {
+            for (i, &p) in row.iter().enumerate() {
+                let (tx, ty) = (x0 + i as i64, y0 + j as i64);
+                if tx < 0 || ty < 0 || tx >= pw as i64 || ty >= ph as i64 {
+                    continue;
+                }
+                let a = ((p >> 24) as f32 / 128.0).min(1.0);
+                let d = &mut out[(ty as u32 * stride + tx as u32) as usize];
+                let mix = |s: u32| ((p >> s & 0xff) as f32 * a + (*d >> s & 0xff) as f32 * (1.0 - a)).round() as u32;
+                *d = mix(0) | mix(8) << 8 | mix(16) << 16 | (*d & 0xff00_0000);
+            }
+        }
     }
 }
 

@@ -50,14 +50,18 @@ pub fn classify(w: u32, h: u32, px: &[u32]) -> Option<Face> {
             if max < 0.35 {
                 dark += 1;
             }
-            if max > 0.35 && (max - min) / max > 0.45 {
+            // Saturated, or the pale lavender cross of the silver-rimmed
+            // prompts ("PRESS X TO CONTINUE").
+            let sat = (max - min) / max.max(1e-6);
+            if max > 0.35 && sat > 0.45 || max > 0.5 && sat > 0.2 && b > r && b > g {
                 symbol += 1;
                 sum = (sum.0 + r, sum.1 + g, sum.2 + b);
             }
         }
     }
+    // Some discs fill only a third of their texture (the line-up's prompt).
     let n = (w * h) as f32;
-    if (opaque as f32) < n * 0.5 || (dark as f32) < opaque as f32 * 0.3 || symbol < 6 || symbol as f32 > opaque as f32 * 0.45 {
+    if (opaque as f32) < n * 0.3 || (dark as f32) < opaque as f32 * 0.3 || symbol < 6 || symbol as f32 > opaque as f32 * 0.45 {
         return None;
     }
     let (r, g, b) = (sum.0 / symbol as f32, sum.1 / symbol as f32, sum.2 / symbol as f32);
@@ -116,18 +120,22 @@ fn colour(face: Face) -> (f32, f32, f32) {
 
 /// Draw an Xbox button: dark disc, light rim, coloured letter.
 pub fn draw(face: Face) -> (u32, u32, Vec<u32>) {
-    let n = OUT as f32;
+    (OUT, OUT, draw_sized(face, OUT, OUT))
+}
+
+/// [`draw`] at `w` x `h` texels; the button is stretched to fill them.
+pub fn draw_sized(face: Face, w: u32, h: u32) -> Vec<u32> {
     let lines = strokes(face);
     let (lr, lg, lb) = colour(face);
-    let mut out = Vec::with_capacity((OUT * OUT) as usize);
+    let mut out = Vec::with_capacity((w * h) as usize);
     const SS: u32 = 4;
-    for y in 0..OUT {
-        for x in 0..OUT {
+    for y in 0..h {
+        for x in 0..w {
             let (mut r, mut g, mut b, mut a) = (0.0, 0.0, 0.0, 0.0);
             for sy in 0..SS {
                 for sx in 0..SS {
-                    let px = (x as f32 + (sx as f32 + 0.5) / SS as f32) / n;
-                    let py = (y as f32 + (sy as f32 + 0.5) / SS as f32) / n;
+                    let px = (x as f32 + (sx as f32 + 0.5) / SS as f32) / w as f32;
+                    let py = (y as f32 + (sy as f32 + 0.5) / SS as f32) / h as f32;
                     let d = ((px - 0.5).powi(2) + (py - 0.5).powi(2)).sqrt();
                     if d > 0.47 {
                         continue;
@@ -162,12 +170,28 @@ pub fn draw(face: Face) -> (u32, u32, Vec<u32>) {
             out.push(byte(r) | byte(g) << 8 | byte(b) << 16 | ((cov * 128.0).round() as u32) << 24);
         }
     }
-    (OUT, OUT, out)
+    out
 }
 
 /// Replacement for a decoded texture, if it is a PlayStation button icon.
 pub fn replace(w: u32, h: u32, px: &[u32]) -> Option<(u32, u32, Vec<u32>)> {
-    classify(w, h, px).map(draw)
+    let face = classify(w, h, px)?;
+    // Match the original disc's size: from its area, its diameter as a
+    // fraction of the texture (the button fills 0.94 of its square).
+    let opaque = px.iter().filter(|&&p| (p >> 24).min(128) >= 64).count() as f32;
+    let fill = ((opaque / (w * h) as f32) * 4.0 / std::f32::consts::PI).sqrt() / 0.94;
+    if fill >= 0.9 {
+        return Some(draw(face));
+    }
+    let k = ((OUT as f32 * fill).round() as u32).max(1);
+    let button = draw_sized(face, k, k);
+    let mut out = vec![0; (OUT * OUT) as usize];
+    let o = (OUT - k) / 2;
+    for (y, row) in button.chunks_exact(k as usize).enumerate() {
+        let at = ((o + y as u32) * OUT + o) as usize;
+        out[at..at + k as usize].copy_from_slice(row);
+    }
+    Some((OUT, OUT, out))
 }
 
 #[cfg(test)]

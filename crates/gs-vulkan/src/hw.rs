@@ -375,7 +375,7 @@ impl Hw {
                 clut_hash: (u64::MAX, 0, 0, 0),
                 palettes: HashMap::new(),
                 palette: 0,
-                pictures: cfg.pictures.as_deref().map(crate::pictures::Pictures::load),
+                pictures: cfg.pictures.as_deref().map(|d| crate::pictures::Pictures::load(d, cfg.xbox_icons)),
                 on_wide_picture: false,
                 cfg,
                 blur: Vec::new(),
