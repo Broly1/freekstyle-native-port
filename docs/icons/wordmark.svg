@@ -29,8 +29,8 @@
     <!-- gloss -->
     <path d="M110 210 C150 110 290 70 390 140 C300 108 190 130 128 222 Z" fill="#ffffff" opacity="0.28"/>
   </g>
-  <g font-family="Noto Sans" font-weight="900" font-style="italic" font-size="66" text-anchor="middle" letter-spacing="3">
-    <text x="372" y="140" fill="none" stroke="#4f0710" stroke-width="14" stroke-linejoin="round" transform="skewX(-6)">DIRT FREEKS</text>
-    <text x="372" y="140" fill="#fff6ee" stroke="#9d0c0c" stroke-width="2" transform="skewX(-6)">DIRT FREEKS</text>
+  <g font-family="Noto Sans" font-weight="900" font-style="italic" font-size="62" text-anchor="middle" letter-spacing="3">
+    <text x="372" y="140" fill="none" stroke="#4f0710" stroke-width="14" stroke-linejoin="round" transform="skewX(-6)">LINUX FREEKS</text>
+    <text x="372" y="140" fill="#fff6ee" stroke="#9d0c0c" stroke-width="2" transform="skewX(-6)">LINUX FREEKS</text>
   </g>
 </svg>

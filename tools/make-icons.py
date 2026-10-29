@@ -1,9 +1,9 @@
 # Make the game and launcher pictures without any game artwork: the game
-# icon is a grinning badge drawn here, the launcher icon is cut from
-# docs/icons/launcher-disc-source.png, and the launcher title banner is
-# drawn here too. Writes SVGs to docs/icons/ and PNGs at every hicolor
-# size to freekstyle/assets/{icon,launcher}/ (needs rsvg-convert and
-# ImageMagick).
+# icon is a grinning badge drawn here, the launcher icon is a disc drawn
+# by tools/launcher-disc.py, and the launcher title banner is drawn here
+# too. Writes SVGs to docs/icons/ and PNGs at every hicolor size to
+# freekstyle/assets/{icon,launcher}/ (needs rsvg-convert, ImageMagick and
+# Python's Pillow).
 import math, pathlib, subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -76,9 +76,9 @@ WORDMARK = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 210">{DE
   <path d="{flame_edge(360, 112, 330, 92, 16, 0.7)}" fill="url(#rim)" stroke="{MAROON}" stroke-width="5" stroke-linejoin="round"/>
   <path d="{flame_edge(360, 114, 300, 72, 16, 0.84)}" fill="{MAROON}"/>
   {badge(360, 40, 0.15)}
-  <g font-family="Noto Sans" font-weight="900" font-style="italic" font-size="66" text-anchor="middle" letter-spacing="3">
-    <text x="372" y="140" fill="none" stroke="{MAROON}" stroke-width="14" stroke-linejoin="round" transform="skewX(-6)">DIRT FREEKS</text>
-    <text x="372" y="140" fill="{WHITE}" stroke="{RED_DARK}" stroke-width="2" transform="skewX(-6)">DIRT FREEKS</text>
+  <g font-family="Noto Sans" font-weight="900" font-style="italic" font-size="62" text-anchor="middle" letter-spacing="3">
+    <text x="372" y="140" fill="none" stroke="{MAROON}" stroke-width="14" stroke-linejoin="round" transform="skewX(-6)">LINUX FREEKS</text>
+    <text x="372" y="140" fill="{WHITE}" stroke="{RED_DARK}" stroke-width="2" transform="skewX(-6)">LINUX FREEKS</text>
   </g>
 </svg>
 '''
@@ -96,15 +96,9 @@ launcher_out = ROOT / "freekstyle/assets/launcher"
 for s in SIZES:
     svg_png(icons / "game.svg", game_out / f"{s}.png", s, s)
 
-# The launcher disc: crop it out of its black backdrop, round it off and
-# punch the centre hole.
-src = icons / "launcher-disc-source.png"
+# The launcher disc, with the game icon just made as its mascot.
 disc = icons / "launcher-disc.png"
-cx, cy, r, hole = 688, 386, 336, 44
-subprocess.run(["magick", str(src), "-crop", f"{2 * r}x{2 * r}+{cx - r}+{cy - r}", "+repage",
-                "(", "-size", f"{2 * r}x{2 * r}", "xc:black", "-fill", "white", "-draw", f"circle {r},{r} {r},1",
-                "-fill", "black", "-draw", f"circle {r},{r} {r},{r - hole}", ")",
-                "-alpha", "off", "-compose", "copy_opacity", "-composite", str(disc)], check=True)
+subprocess.run(["python3", str(ROOT / "tools" / "launcher-disc.py"), str(disc), str(game_out / "512.png")], check=True)
 for s in SIZES:
     subprocess.run(["magick", str(disc), "-filter", "Lanczos", "-resize", f"{s}x{s}", str(launcher_out / f"{s}.png")], check=True)
 
