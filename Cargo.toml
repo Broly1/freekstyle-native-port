@@ -10,6 +10,7 @@ edition = "2021"
 # The oldest Rust the dependencies build with (install.py checks it).
 rust-version = "1.95"
 publish = false
+license = "GPL-3.0-or-later"
 
 # The generated code is huge; keep debug builds usable.
 [profile.dev.package.freekstyle]

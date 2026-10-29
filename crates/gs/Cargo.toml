@@ -4,3 +4,4 @@ description = "PS2 Graphics Synthesizer: registers, GIF parsing, local memory, p
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true

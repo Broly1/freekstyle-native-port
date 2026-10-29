@@ -4,6 +4,7 @@ description = "Vulkan renderer for the GS: upscaled hardware rendering and displ
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 xbrz-rs = "=0.1.0"

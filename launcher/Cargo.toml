@@ -4,6 +4,7 @@ description = "Settings and controls for Freekstyle, then starts the game"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 freek-config = { path = "../crates/freek-config" }

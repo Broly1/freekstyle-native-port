@@ -4,3 +4,4 @@ description = "PS2 I/O processor for Freekstyle: runs the game's IOP sound drive
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true

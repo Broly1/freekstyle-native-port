@@ -11,6 +11,13 @@ functions can later be rewritten by hand in idiomatic Rust, one at a time.
 No game data is included. You need your own copy of the disc; extracted files
 go in `game/`, which git ignores.
 
+> Unofficial fan project, not affiliated with or endorsed by Electronic Arts,
+> Sony Interactive Entertainment or Microsoft. *Freekstyle* is a trademark of
+> Electronic Arts; PlayStation and Xbox are trademarks of their owners. This
+> repository contains no game code or assets, and no prebuilt game binaries
+> are distributed: the game is built on your machine from a disc you own.
+> Please don't open issues with game files or links to them.
+
 ## Crates
 
 | Crate        | Status  | Purpose |
@@ -300,3 +307,12 @@ Next steps, in order:
 - 198 distinct mnemonics are used: about 3,000 VU0 macro instructions, 99
   `vcallms` VU0 microprogram calls, and heavy 128-bit MMI use. The compiler's
   128-bit move idiom is `paddub rd, rs, $zero`.
+
+## License
+
+The code in this repository is GPL-3.0-or-later (see `LICENSE`). It covers
+only the port's own code, not the game: the code `ee-recomp` generates from
+your executable, and everything extracted from your disc, stay yours to keep
+and must not be redistributed.
+
+Most of the code was written with Claude (Anthropic's AI model).

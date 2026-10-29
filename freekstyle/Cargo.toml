@@ -4,6 +4,7 @@ description = "Freekstyle, natively: recompiled game code plus the runtime"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 ee-runtime = { path = "../crates/ee-runtime" }
