@@ -9,11 +9,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
 use ps2_iop::{AudioRing, MOVIE_AUDIO};
 
-/// Samples kept queued ahead of the device: about 16 ms.
-pub const LATENCY: usize = 768;
-/// Device buffer per callback: 5 ms. The default (often 100 ms periods
-/// on ALSA) makes sound trail the picture noticeably.
-const PERIOD: u32 = 240;
+/// Samples kept queued ahead of the device: about 32 ms.
+pub const LATENCY: usize = 1536;
+/// Device buffer per callback: 10 ms. The default (often 100 ms periods
+/// on ALSA) makes sound trail the picture noticeably; shorter ones (5 ms
+/// asked, 1.3 ms granted through PipeWire's ALSA plugin) crackled and
+/// ended in POLLERR.
+const PERIOD: u32 = 480;
 
 /// Play `ring` on the default output device from an audio thread. Without
 /// a usable device (or muted) samples are drained at the output rate
