@@ -31,29 +31,37 @@ go in `game/`, which git ignores.
 ## Setting up from your own disc
 
 The port needs the North American release (SLUS-20367); nothing from the
-game is in this repository. You need Rust 1.95 or newer (distributions often
-ship an older one; `setup.sh` then installs current Rust with rustup), a
-Vulkan driver and, for the optional movies, ffmpeg (built with libplacebo
-for their CRT look; most distributions' ffmpeg is).
+game is in this repository. You need Python 3 (preinstalled on most
+distributions), Rust 1.95 or newer (distributions often ship an older one;
+`install.py` then installs current Rust with rustup), a Vulkan driver and,
+for the optional movies, ffmpeg with MPEG-2 (and libplacebo for their CRT
+look; most distributions' ffmpeg has both, Fedora's needs RPM Fusion, which
+`install.py` offers to enable).
 
 **Quick way**: dump your disc (step 1 below) into `game/`, then run
 
 ```sh
-./setup.sh
+./install.py
 ```
 
-It installs whatever is missing (Rust through rustup; build libraries, a
-Vulkan driver for your GPU and ffmpeg through pacman, apt, dnf or zypper;
-asking first) and does steps 2 to 5 for you, in English, Portuguese,
-Spanish or French depending on the system language. At the end it offers to install the game to the system, like
-a game from a store: `/opt/freekstyle`, with Freekstyle Launcher in the app
-menu's Games section (KDE, GNOME, Cinnamon, XFCE and other freedesktop
-menus) and `freekstyle-launcher` on the command line. The source folder is
-then no longer needed to play; settings go to `~/.config/freekstyle`,
-saves to `~/.local/share/freekstyle/saves`, and `./setup.sh --uninstall`
-removes the installed copy (keeping both). Or keep it in the folder and
-start `./target/release/freekstyle-launcher`. Steps already done are
-skipped, so running it again after a `git pull` only redoes what changed.
+It shows what is present and what is missing, installs the missing pieces
+(Rust through rustup; build libraries, a Vulkan driver for your GPU and
+ffmpeg through pacman, apt, dnf or zypper; asking first) and does steps 2
+to 5 for you, in English, Portuguese, Spanish or French depending on the
+system language. Everything it runs is logged to `install.log`. At the end
+it offers to install the game to the system, like a game from a store:
+`/opt/freekstyle`, with Freekstyle Launcher in the app menu's Games section
+(KDE, GNOME, Cinnamon, XFCE and other freedesktop menus) and
+`freekstyle-launcher` on the command line. The source folder is then no
+longer needed to play; settings go to `~/.config/freekstyle`, saves to
+`~/.local/share/freekstyle/saves`. `./uninstall.py` (also copied to
+`/opt/freekstyle/uninstall.py`) removes the game and what `install.py`
+added: it lists each part and asks, keeping your saves and settings,
+packages and Rust unless you say otherwise, and removes a package only if
+nothing else installed needs it (`--dry-run` shows what it would do). Or keep it in the folder and start
+`./target/release/freekstyle-launcher`. Steps already done are skipped, so
+running it again after a `git pull` only redoes what changed. For an
+unattended run: `./install.py --yes --system` (or `--here`).
 
 The same by hand:
 

@@ -6,7 +6,7 @@
 //! location (target/release -> port, or /opt/freekstyle). On start it also
 //! installs desktop entries and icons under ~/.local/share, which is how
 //! Wayland desktops show the right icon for the game and launcher windows;
-//! `freekstyle-launcher --install-menu /usr/share` (run by setup.sh for a
+//! `freekstyle-launcher --install-menu /usr/share` (run by install.py for a
 //! system install) puts them in the system menu instead.
 
 mod i18n;
