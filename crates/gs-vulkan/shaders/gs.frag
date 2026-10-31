@@ -110,6 +110,11 @@ void main() {
         if (((pc.flags >> 9) & 3u) == 0u) {
             discard;
         }
+        // RGB_ONLY must not write depth either, or floor drawn after a shadow
+        // is hidden behind it. Pixels the shadow leaves alone can just go.
+        if (keep_a && (pc.flags & PAL8H) != 0u && c.a == 0.0) {
+            discard;
+        }
     }
     uint scale = (pc.flags >> 11) & 3u;
     if (scale == 1u) {
