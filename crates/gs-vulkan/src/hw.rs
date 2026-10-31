@@ -1274,8 +1274,10 @@ impl Hw {
             let t = &self.targets[&bp];
             let (s, ys) = (self.cfg.scale_x as i32, t.sy as i32);
             let sx1 = ((x + w) as i32 * s).min(t.color.extent.width as i32);
-            let sy1 = ((y + h) as i32 * ys).min(t.color.extent.height as i32);
-            (t.color.image, [vk::Offset3D { x: x as i32 * s, y: y as i32 * ys, z: 0 }, vk::Offset3D { x: sx1, y: sy1, z: 1 }], aspect)
+            // The game's last full-screen draw stops half a line short, which
+            // only shows at high resolution; a TV hid it in the overscan.
+            let sy1 = ((y + h) as i32 * ys - ys / 2).min(t.color.extent.height as i32);
+            (t.color.image,[vk::Offset3D { x: x as i32 * s, y: y as i32 * ys, z: 0 }, vk::Offset3D { x: sx1, y: sy1, z: 1 }], aspect)
         });
         self.submit_and_present(shown);
         if let Some((buf, w, h)) = readback {
