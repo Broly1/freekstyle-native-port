@@ -33,6 +33,9 @@
 00116118 mc_unformat
 001161e0 mc_get_ent_space
 
+# scePadSetActDirect: motor speeds, which go to padman by DMA rather than RPC.
+00112de8 pad_set_act_direct
+
 # Pictures (.LSC): loaded from game/images/*.png (made by lsc2png)
 # instead of being decoded by the IPU.
 00192090 lsc_decode

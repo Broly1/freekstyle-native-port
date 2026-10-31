@@ -61,6 +61,14 @@ pub fn set_input(players: [Option<Input>; 2]) {
     *INPUT.lock().unwrap() = players;
 }
 
+/// Motor speeds the game last asked for, per port: (small, large), each
+/// 0-255. The small motor is only on or off on a DualShock 2.
+static MOTORS: Mutex<[(u8, u8); 2]> = Mutex::new([(0, 0); 2]);
+
+pub fn motors() -> [(u8, u8); 2] {
+    *MOTORS.lock().unwrap()
+}
+
 /// Buttons held by any player.
 pub fn any_buttons() -> u16 {
     INPUT.lock().unwrap().iter().flatten().fold(0, |a, i| a | i.buttons)
@@ -86,6 +94,9 @@ pub struct Pad {
     analog: [bool; 2],
     /// Buttons at the last FREEK_PAD_LOG report, per player.
     logged: [u16; 2],
+    /// SetActAlign per port: which motor each byte of SetActDirect drives
+    /// (0 small, 1 large, 0xff none).
+    align: [[u8; 6]; 2],
     /// FREEK_PAD_SCRIPT taps: (first frame, last frame, player, buttons),
     /// for automated testing.
     script: Option<Vec<(u32, u32, usize, u16)>>,
@@ -157,6 +168,13 @@ impl Pad {
                 self.analog[(word(4) as usize).min(1)] = word(12) == 1;
                 put(20, 1);
             }
+            0x08 => {
+                // SetActAlign(port, slot, six bytes).
+                if let Some(b) = request.get(12..18) {
+                    self.align[(word(4) as usize).min(1)].copy_from_slice(b);
+                }
+                put(20, 1);
+            }
             0x12 => put(12, 0x0400), // padman 4.0
             0x0e => {
                 let (port, slot) = (word(4), word(8));
@@ -170,6 +188,24 @@ impl Pad {
         }
         reply.truncate(rsize as usize);
         reply
+    }
+
+    /// scePadSetActDirect: this libpad sends the six bytes to padman by DMA
+    /// rather than RPC, so the game's function is replaced (`hle.txt`).
+    pub fn set_act_direct(&mut self, port: u32, bytes: [u8; 6]) {
+        let port = (port as usize).min(1);
+        let (mut small, mut large) = (0, 0);
+        for (&motor, &value) in self.align[port].iter().zip(&bytes) {
+            match motor {
+                0 => small = if value != 0 { 255 } else { 0 },
+                1 => large = value,
+                _ => {}
+            }
+        }
+        if std::env::var_os("FREEK_PAD_LOG").is_some() && MOTORS.lock().unwrap()[port] != (small, large) {
+            eprintln!("[pad] port {port} motors: small {small} large {large} (raw {bytes:02x?}, align {:02x?})", self.align[port]);
+        }
+        MOTORS.lock().unwrap()[port] = (small, large);
     }
 
     /// Fill one frame for every open port with the current input.
@@ -224,8 +260,10 @@ impl Pad {
                 f[18] = input.l2.max(pressed(L2));
                 f[19] = input.r2.max(pressed(R2));
             }
-            // Two actuators (small and large motor), DualShock 2 style.
-            f[48..56].copy_from_slice(&[0, 1, 0, 1, 1, 1, 0x14, 0]);
+            // Two actuators, DualShock 2 style: function, subfunction, size
+            // (0 one bit, small motor; 1 eight bits, large motor), current.
+            // The game turns all vibration off without an eight-bit motor.
+            f[48..56].copy_from_slice(&[0, 1, 0, 1, 1, 1, 1, 0x14]);
             // Mode table holds controller types (4 digital, 7 DualShock),
             // which scePadInfoMode returns and games compare against.
             f[80..84].copy_from_slice(&[4, 0, 7, 0]);

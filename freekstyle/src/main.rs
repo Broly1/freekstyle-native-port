@@ -45,6 +45,7 @@ use std::{env, fs, process, thread};
 
 use ee_runtime::pad::{button, Input};
 use ee_runtime::Cpu;
+use gilrs::ff::{BaseEffect, BaseEffectType, Effect, EffectBuilder, Repeat, Replay, Ticks};
 use gilrs::{Axis, Button, EventType, Gamepad, GamepadId, Gilrs};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -206,7 +207,7 @@ fn main() {
     let gilrs = gilrs::GilrsBuilder::new().add_mappings(freek_config::GAMEPAD_MAPPINGS).build().map_err(|e| eprintln!("[input] gamepads unavailable: {e}")).ok();
     let (key_map, pad_map) = input_maps(&opts.bindings);
     let keyboard_player = (opts.keyboard_player.clamp(1, 2) - 1) as usize;
-    let mut app = App { opts, rx: gs_rx, window: None, renderer: None, last_title: Instant::now(), last_frame: 0, gilrs, players: [None; 2], keyboard_player, keys: Vec::new(), last_buttons: 0, traces: 0, key_map, pad_map };
+    let mut app = App { opts, rx: gs_rx, window: None, renderer: None, last_title: Instant::now(), last_frame: 0, gilrs, players: [None; 2], rumble: [None, None], rumble_at: [Instant::now(); 2], keyboard_player, keys: Vec::new(), last_buttons: 0, traces: 0, key_map, pad_map };
     if let Some(g) = &app.gilrs {
         let pads: Vec<_> = g.gamepads().filter(|(_, p)| p.is_connected()).map(|(id, _)| id).collect();
         for id in pads {
@@ -228,6 +229,9 @@ struct App {
     last_title: Instant,
     last_frame: u64,
     gilrs: Option<Gilrs>,
+    /// Each player's running rumble: the motor speeds and their effect.
+    rumble: [Option<((u16, u16), Effect)>; 2],
+    rumble_at: [Instant; 2],
     /// The gamepad playing as player 1 and 2, in the order they connected.
     /// A pad that drops off leaves its seat empty until a pad connects
     /// again, so the other player keeps theirs.
@@ -332,7 +336,55 @@ fn pad_input(pad: Gamepad, pad_map: &[(Button, u16)]) -> Input {
     input
 }
 
+/// Host motor strengths for the game's (small, large) speeds. A DualShock
+/// 2's large motor barely turns at the 50-110 the game holds while riding,
+/// but a modern pad shakes at any speed, so the curve silences that and
+/// leaves landings and crashes strong. The small motor is on or off there
+/// and much too harsh at full strength here.
+fn rumble_strength((small, large): (u8, u8)) -> (u16, u16) {
+    const QUIET: f32 = 110.0;
+    let x = ((large as f32 - QUIET) / (255.0 - QUIET)).max(0.0);
+    (if small != 0 { 8_000 } else { 0 }, (x * x * 50_000.0) as u16)
+}
+
 impl App {
+    /// Run each player's pad motors at the speeds the game asked for. An
+    /// effect's strength is fixed, so a new speed needs a new effect.
+    fn update_rumble(&mut self) {
+        let Some(g) = &mut self.gilrs else { return };
+        let motors = ee_runtime::pad::motors().map(rumble_strength);
+        for n in 0..2 {
+            let Some(id) = self.players[n].filter(|&id| g.connected_gamepad(id).is_some_and(|p| p.is_ff_supported())) else {
+                self.rumble[n] = None;
+                continue;
+            };
+            if self.rumble[n].as_ref().is_some_and(|r| r.0 == motors[n]) || (self.rumble[n].is_none() && motors[n] == (0, 0)) {
+                continue;
+            }
+            // The game fades its motors every frame; this is often enough.
+            if motors[n] != (0, 0) && self.rumble_at[n].elapsed() < Duration::from_millis(50) {
+                continue;
+            }
+            self.rumble[n] = None;
+            if motors[n] == (0, 0) {
+                continue;
+            }
+            self.rumble_at[n] = Instant::now();
+            let (weak, strong) = motors[n];
+            let motor = |kind| BaseEffect { kind, scheduling: Replay { play_for: Ticks::from_ms(1000), ..Default::default() }, ..Default::default() };
+            let effect = EffectBuilder::new()
+                .add_effect(motor(BaseEffectType::Weak { magnitude: weak }))
+                .add_effect(motor(BaseEffectType::Strong { magnitude: strong }))
+                .repeat(Repeat::Infinitely)
+                .gamepads(&[id])
+                .finish(g);
+            match effect.and_then(|e| e.play().map(|_| e)) {
+                Ok(e) => self.rumble[n] = Some((motors[n], e)),
+                Err(e) => eprintln!("[input] rumble: {e}"),
+            }
+        }
+    }
+
     /// Give a newly connected gamepad the first free player seat.
     fn seat(&mut self, id: GamepadId) {
         let Some(g) = &self.gilrs else { return };
@@ -342,6 +394,9 @@ impl App {
             // Buttons then follow Linux codes, which put X and Y (and more)
             // in the wrong places on many generic pads.
             name += &format!(" [no layout mapping for {}; add one to freek-config's gamecontrollerdb.txt]", uuid_hex(pad.uuid()));
+        }
+        if !pad.is_ff_supported() {
+            name += " [no rumble]";
         }
         if self.players.contains(&Some(id)) {
             return;
@@ -406,6 +461,7 @@ impl App {
         let (left_x, left_y) = (dir(button::LEFT, button::RIGHT), dir(button::UP, button::DOWN));
         input.sticks[2] = merge(input.sticks[2], left_x);
         input.sticks[3] = merge(input.sticks[3], left_y);
+        self.update_rumble();
         // FREEK_TRACE_BUTTON=<mask>: half a second after that pad button is
         // pressed, trace a frame and save its picture (effects too quick to
         // catch by hand), up to ten times.

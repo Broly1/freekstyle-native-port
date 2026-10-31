@@ -140,6 +140,11 @@ Esc quits.
   drawn over, and the loading screen's controller diagram gets an
   Xbox-style pad drawn by `tools/make-xbox-pad.py` (`--ps2-icons` keeps
   the originals).
+- **Vibration**: the game's motor speeds drive the controller's rumble,
+  with a curve that keeps the buzz it holds while riding quiet on modern
+  pads. The controller has to expose rumble to Linux: `[no rumble]` in the
+  log means it does not (a GameSir Cyclone Pro needs Bluetooth XInput
+  mode, Home + B at power on).
 - **Saves without memory cards**: the game's libmc calls are served from
   `$XDG_DATA_HOME/freekstyle/saves/` (default `~/.local/share/...`), always
   available. The 70 memory card messages in `ENGLISH.DAT` are reworded

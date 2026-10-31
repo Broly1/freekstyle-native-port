@@ -484,6 +484,14 @@ fn picture_pixels(c: &mut Cpu, bytes: &[u8], w: u32, h: u32) -> Vec<u32> {
 /// Set by the frontend: render the race camera 16:9 (shown stretched).
 pub static WIDESCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// scePadSetActDirect (0x112de8): `(port, slot, six motor bytes)`.
+pub fn pad_set_act_direct(c: &mut Cpu) {
+    let (port, data) = (c.r32(A0), c.r32(A2));
+    let bytes = std::array::from_fn(|n| c.mem.r8(data + n as u32));
+    c.mem.pad.set_act_direct(port, bytes);
+    c.ws(V0, 1);
+}
+
 /// Camera projection scale (0x145210): `(camera or 0 for the current
 /// one, sx in $f12, sy in $f13, update)` stores sx, sy and their
 /// reciprocals at +1144..+1156 and, if `update`, rebuilds the camera's
