@@ -18,7 +18,7 @@
 //! overlays on a picture (loading bar, "PRESS START") are moved by the
 //! same curve ([`wide_position`]) so they stay on their spot in it.
 
-use crate::icons::Face;
+use crate::icons::{Arms, DOWN, LEFT, RIGHT, UP};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -55,17 +55,33 @@ struct Original {
     wide: bool,
 }
 
-/// Face buttons drawn in pictures, redrawn as Xbox buttons with the
-/// prompts: (face, centre x, centre y) as fractions of the 4:3 picture.
-/// LDCNTL is the controller diagram on the loading screen.
-const BADGES: &[(&str, &[(Face, f32, f32)])] = &[(
-    "LDCNTL.png",
-    &[(Face::Triangle, 0.4267, 0.4125), (Face::Square, 0.3993, 0.4463), (Face::Circle, 0.4517, 0.4486), (Face::Cross, 0.4257, 0.4796)],
-)];
+/// A button drawn in a picture, redrawn in the style of the prompts.
+#[derive(Clone, Copy)]
+enum Badge {
+    /// A D-pad with these gold arms.
+    Dpad(Arms),
+}
 
-/// Badge disc radius as a fraction of the picture height; just covers the
-/// original buttons and their rims.
-const BADGE_RADIUS: f32 = 0.0162;
+/// Buttons drawn in pictures: (button, centre x, centre y) as fractions of
+/// the 4:3 picture. LDCNTL, the controller diagram on the loading screen,
+/// has none but is listed to get [`PAD`] drawn over it.
+const BADGES: &[(&str, &[(Badge, f32, f32)])] = &[
+    ("LDCNTL.png", &[]),
+    ("LDTIP2.png", &[(Badge::Dpad(DOWN), 0.748, 0.445)]),
+    ("LDTIP3.png", &[(Badge::Dpad(UP), 0.494, 0.400)]),
+    ("LDTIP8.png", &[(Badge::Dpad(LEFT), 0.569, 0.3725), (Badge::Dpad(RIGHT), 0.537, 0.430)]),
+    ("LDTIP9.png", &[(Badge::Dpad(UP), 0.779, 0.4075), (Badge::Dpad(DOWN), 0.594, 0.465)]),
+];
+
+/// The controller diagram's replacement, made by tools/make-xbox-pad.py.
+const PAD: &[u8] = include_bytes!("../assets/xbox-pad.png");
+/// Top-left corner of [`PAD`], and the picture size it is laid out for.
+const PAD_AT: (f32, f32) = (300.0, 500.0);
+const PAD_SPACE: (f32, f32) = (2880.0, 2160.0);
+
+/// Badge radius as a fraction of the picture height; just covers the
+/// original buttons.
+const BADGE_RADIUS: f32 = 0.031;
 
 pub struct Pictures {
     hd: PathBuf,
@@ -88,7 +104,11 @@ fn corner(px: &[u32], stride: u32, w: u32, h: u32) -> impl Iterator<Item = u32> 
 /// RGBA8 pixels of a PNG file.
 fn load_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut dec = png::Decoder::new(std::io::BufReader::new(file));
+    decode_png(std::io::BufReader::new(file))
+}
+
+fn decode_png(data: impl std::io::BufRead + std::io::Seek) -> Result<(u32, u32, Vec<u8>), String> {
+    let mut dec = png::Decoder::new(data);
     dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16 | png::Transformations::ALPHA);
     let mut reader = dec.read_info().map_err(|e| e.to_string())?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
@@ -170,6 +190,9 @@ impl Pictures {
                     if self.xbox {
                         if let Some((_, badges)) = BADGES.iter().find(|b| b.0 == o.name) {
                             paint_badges(&mut out, w * sx, pw * sx, ph * sy, badges, use_wide);
+                            if o.name == "LDCNTL.png" {
+                                paint_pad(&mut out, w * sx, pw * sx, ph * sy, use_wide);
+                            }
                         }
                     }
                     if std::env::var_os("FREEK_GS_LOG").is_some() {
@@ -187,11 +210,11 @@ impl Pictures {
 /// Draw Xbox buttons over a placed picture (`pw` x `ph` in the corner of a
 /// texture `stride` texels wide). In a wide version, positions and widths
 /// follow its stretch curve, as the original buttons do.
-fn paint_badges(out: &mut [u32], stride: u32, pw: u32, ph: u32, badges: &[(Face, f32, f32)], wide: bool) {
+fn paint_badges(out: &mut [u32], stride: u32, pw: u32, ph: u32, badges: &[(Badge, f32, f32)], wide: bool) {
     // The disc is round on a 4:3 screen: its width is 3/4 of its height
     // as a fraction of the picture.
     let (rx, ry) = (BADGE_RADIUS * 0.75, BADGE_RADIUS);
-    for &(face, x, y) in badges {
+    for &(badge, x, y) in badges {
         let (cx, half) = if wide {
             let at = |f: f32| (wide_position(f * 2.0 - 1.0) + 1.0) / 2.0;
             (at(x), (at(x + rx) - at(x - rx)) / 2.0)
@@ -201,7 +224,9 @@ fn paint_badges(out: &mut [u32], stride: u32, pw: u32, ph: u32, badges: &[(Face,
         // The button fills 0.94 of its square (see icons::draw).
         let (bw, bh) = ((half * 2.0 / 0.94 * pw as f32).round() as u32, (ry * 2.0 / 0.94 * ph as f32).round() as u32);
         let (x0, y0) = ((cx * pw as f32) as i64 - bw as i64 / 2, (y * ph as f32) as i64 - bh as i64 / 2);
-        let icon = crate::icons::draw_sized(face, bw.max(1), bh.max(1));
+        let icon = match badge {
+            Badge::Dpad(gold) => crate::icons::draw_dpad(gold, bw.max(1), bh.max(1)),
+        };
         for (j, row) in icon.chunks_exact(bw.max(1) as usize).enumerate() {
             for (i, &p) in row.iter().enumerate() {
                 let (tx, ty) = (x0 + i as i64, y0 + j as i64);
@@ -213,6 +238,64 @@ fn paint_badges(out: &mut [u32], stride: u32, pw: u32, ph: u32, badges: &[(Face,
                 let mix = |s: u32| ((p >> s & 0xff) as f32 * a + (*d >> s & 0xff) as f32 * (1.0 - a)).round() as u32;
                 *d = mix(0) | mix(8) << 8 | mix(16) << 16 | (*d & 0xff00_0000);
             }
+        }
+    }
+}
+
+/// Draw [`PAD`] over the placed controller diagram. In a wide version it
+/// follows the picture's stretch curve, like the labels around it.
+fn paint_pad(out: &mut [u32], stride: u32, pw: u32, ph: u32, wide: bool) {
+    let (ow, oh, rgba) = match decode_png(std::io::Cursor::new(PAD)) {
+        Ok(p) => p,
+        Err(e) => return eprintln!("[pictures] xbox-pad.png: {e}"),
+    };
+    let unstretch = |t: f32| {
+        // Where in the 4:3 picture a column of the wide one comes from.
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        for _ in 0..20 {
+            let f = (lo + hi) / 2.0;
+            if (wide_position(f * 2.0 - 1.0) + 1.0) / 2.0 < t {
+                lo = f;
+            } else {
+                hi = f;
+            }
+        }
+        lo
+    };
+    let texel = |x: i64, y: i64, c: usize| -> f32 {
+        if x < 0 || y < 0 || x >= ow as i64 || y >= oh as i64 {
+            return 0.0;
+        }
+        rgba[(y as usize * ow as usize + x as usize) * 4 + c] as f32
+    };
+    let (ow_f, oh_f) = (ow as f32, oh as f32);
+    for tx in 0..pw {
+        let t = (tx as f32 + 0.5) / pw as f32;
+        let f = if wide { unstretch(t) } else { t };
+        let sx = f * PAD_SPACE.0 - PAD_AT.0 - 0.5;
+        if sx < -1.0 || sx > ow_f {
+            continue;
+        }
+        for ty in 0..ph {
+            let sy = (ty as f32 + 0.5) / ph as f32 * PAD_SPACE.1 - PAD_AT.1 - 0.5;
+            if sy < -1.0 || sy > oh_f {
+                continue;
+            }
+            let (x0, y0) = (sx.floor(), sy.floor());
+            let (fx, fy) = (sx - x0, sy - y0);
+            let (x0, y0) = (x0 as i64, y0 as i64);
+            let sample = |c: usize| {
+                let top = texel(x0, y0, c) * (1.0 - fx) + texel(x0 + 1, y0, c) * fx;
+                let bottom = texel(x0, y0 + 1, c) * (1.0 - fx) + texel(x0 + 1, y0 + 1, c) * fx;
+                top * (1.0 - fy) + bottom * fy
+            };
+            let a = sample(3) / 255.0;
+            if a == 0.0 {
+                continue;
+            }
+            let d = &mut out[(ty * stride + tx) as usize];
+            let mix = |c: usize, s: u32| (sample(c) * a + (*d >> s & 0xff) as f32 * (1.0 - a)).round() as u32;
+            *d = mix(0, 0) | mix(1, 8) << 8 | mix(2, 16) << 16 | (*d & 0xff00_0000);
         }
     }
 }

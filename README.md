@@ -135,8 +135,11 @@ Esc quits.
   (`--no-sharp-textures` turns it off). 3D surfaces keep their originals.
   xBRZ comes from `xbrz-rs`, which is GPL-3.0.
 - **Xbox button prompts**: the game's PlayStation button icons are
-  recognised by content and redrawn as high-resolution Xbox A/B/X/Y
-  buttons (`--ps2-icons` keeps the originals).
+  recognised by content and redrawn as high-resolution Xbox A/B/X/Y and
+  LB/RB/LT/RT buttons and a solid D-pad. D-pads in the loading tips are
+  drawn over, and the loading screen's controller diagram gets an
+  Xbox-style pad drawn by `tools/make-xbox-pad.py` (`--ps2-icons` keeps
+  the originals).
 - **Saves without memory cards**: the game's libmc calls are served from
   `$XDG_DATA_HOME/freekstyle/saves/` (default `~/.local/share/...`), always
   available. The 70 memory card messages in `ENGLISH.DAT` are reworded

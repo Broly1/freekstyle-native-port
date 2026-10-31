@@ -38,6 +38,7 @@ const REWRITES: &[(&[u8], &[u8])] = &[
     (b"A memory card (8MB) (for PlayStation\xae2) with 9999KB available is required to save your progress.", b"9999KB of free disk space is required to save your progress."),
     (b"This will replace all current User ID's and game settings with those on the memory card (8MB) (for PlayStation\xae2) in MEMORY CARD slot 1. Do you wish to continue?", b"This will replace all current User ID's and game settings with the saved ones. Do you wish to continue?"),
     (b"Formatting", b"Resetting"),
+    (b"Press X to begin", b"Press A to begin"),
     (b"There is no save data on the memory card (8MB) (for PlayStation\xae2) in MEMORY CARD slot 1. Would you like to save?", b"There is no saved game. Would you like to save?"),
     (b"Do you wish to save to memory card (8MB) (for PlayStation\xae2) in MEMORY CARD slot 1?", b"Do you wish to save?"),
     (b"This will merge all User ID's on memory card (8MB) (for PlayStation\xae2) in MEMORY CARD slot 1 with the current User ID's.", b"This will merge all saved User ID's with the current User ID's."),
