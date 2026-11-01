@@ -144,7 +144,10 @@ Esc quits.
       FREEK_DUMP_TEXTURES=game/textures/dump ./target/release/freekstyle
       tools/hd_pack.py game/textures/dump --esrgan /path/to/realesrgan-ncnn-vulkan
 
-  Fonts, menus and the HUD are left to xBRZ unless you pass `--sprites`.
+  Sprites (fonts, HUD, menu frames) use the line-art model, 3D surfaces the
+  photo model.
+  `tools/redraw_art.py` then redraws the chrome menu frames and the boost
+  gear as clean steel, keeping their shapes.
   Leave out `--esrgan` for plain Lanczos scaling. Packs are game data and
   are not committed.
 - **Xbox button prompts**: the game's PlayStation button icons are

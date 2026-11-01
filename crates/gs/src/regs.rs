@@ -283,6 +283,10 @@ pub struct Context {
 
 impl Context {
     pub fn offset(&self) -> (f32, f32) {
-        (bits(self.xyoffset, 0, 16) as f32 / 16.0, bits(self.xyoffset, 32, 16) as f32 / 16.0)
+        // The game draws every other buffer half a line higher, for an
+        // interlaced TV. On a progressive display that makes the picture
+        // bounce, so both draw on the same line.
+        let ofy = bits(self.xyoffset, 32, 16) & !8;
+        (bits(self.xyoffset, 0, 16) as f32 / 16.0, ofy as f32 / 16.0)
     }
 }

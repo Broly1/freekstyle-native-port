@@ -9,7 +9,8 @@
 //! `<hash>_<format>_<w>x<h>_<sprite|surface>.png`. A pack is a folder
 //! (`game/textures/hd`) of PNGs whose names start with that hash; anything
 //! after the hash is ignored. A replacement keeps the original's aspect
-//! ratio. PNG alpha 255 is the GS's fully opaque 0x80.
+//! ratio. PNG alpha 255 is the texture's strongest alpha: 0x80, fully opaque,
+//! or more for textures such as fonts that brighten what they draw.
 //!
 //! PNGs are read on a worker thread and the original shows until one is
 //! ready, so a texture appearing mid-race never stalls a frame.
@@ -43,10 +44,12 @@ pub struct Loaded {
 
 pub struct Pack {
     files: HashMap<u64, PathBuf>,
-    jobs: Sender<(u64, PathBuf, u32, u32)>,
+    jobs: Sender<(u64, PathBuf, u32, u32, u32)>,
     done: Receiver<Result<Loaded, u64>>,
     /// Queued, or refused and not to be tried again.
     asked: HashSet<u64>,
+    /// Strongest alpha of each original seen.
+    peaks: HashMap<u64, u32>,
 }
 
 impl Pack {
@@ -67,30 +70,36 @@ impl Pack {
             return None;
         }
         eprintln!("[textures] {} HD textures in {}", files.len(), dir.display());
-        let (jobs, rx) = channel::<(u64, PathBuf, u32, u32)>();
+        let (jobs, rx) = channel::<(u64, PathBuf, u32, u32, u32)>();
         let (tx, done) = channel();
         std::thread::Builder::new()
             .name("hd-textures".into())
             .spawn(move || {
-                for (hash, path, w, h) in rx {
-                    let loaded = load(&path, w, h).map_err(|e| eprintln!("[textures] {}: {e}", path.display()));
+                for (hash, path, w, h, peak) in rx {
+                    let loaded = load(&path, w, h, peak).map_err(|e| eprintln!("[textures] {}: {e}", path.display()));
                     if tx.send(loaded.map(|levels| Loaded { hash, levels }).map_err(|()| hash)).is_err() {
                         break;
                     }
                 }
             })
             .expect("spawn HD texture thread");
-        Some(Pack { files, jobs, done, asked: HashSet::new() })
+        Some(Pack { files, jobs, done, asked: HashSet::new(), peaks: HashMap::new() })
     }
 
     pub fn has(&self, hash: u64) -> bool {
         self.files.contains_key(&hash)
     }
 
+    /// Remember the strongest alpha of an original, before asking for it.
+    pub fn note_peak(&mut self, hash: u64, px: &[u32]) {
+        self.peaks.entry(hash).or_insert_with(|| px.iter().map(|p| p >> 24).max().unwrap_or(0));
+    }
+
     /// Ask for a replacement of a `w` x `h` original to be loaded.
     pub fn request(&mut self, hash: u64, w: u32, h: u32) {
         if let Some(path) = self.files.get(&hash).filter(|_| self.asked.insert(hash)) {
-            let _ = self.jobs.send((hash, path.clone(), w, h));
+            let peak = self.peaks.get(&hash).copied().unwrap_or(0).max(0x80);
+            let _ = self.jobs.send((hash, path.clone(), w, h, peak));
         }
     }
 
@@ -106,7 +115,7 @@ impl Pack {
     }
 }
 
-fn load(path: &Path, w: u32, h: u32) -> Result<Vec<Level>, String> {
+fn load(path: &Path, w: u32, h: u32, peak: u32) -> Result<Vec<Level>, String> {
     let (rw, rh, rgba) = crate::pictures::load_png(path)?;
     if rw as u64 * h as u64 != rh as u64 * w as u64 {
         return Err(format!("{rw}x{rh} does not have the aspect ratio of the {w}x{h} original"));
@@ -114,7 +123,7 @@ fn load(path: &Path, w: u32, h: u32) -> Result<Vec<Level>, String> {
     if rw.max(rh) > MAX_SIDE {
         return Err(format!("{rw}x{rh} is over the {MAX_SIDE} limit"));
     }
-    let px: Vec<u32> = rgba.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], ((c[3] as u32 * 128 + 127) / 255) as u8])).collect();
+    let px: Vec<u32> = rgba.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], ((c[3] as u32 * peak + 127) / 255) as u8])).collect();
     let mut levels = vec![Level { w: rw, h: rh, px }];
     while let Some(next) = shrink(levels.last().unwrap()) {
         levels.push(next);

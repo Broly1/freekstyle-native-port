@@ -29,6 +29,11 @@ const TEXTURE_BUDGET: u64 = 1 << 30;
 /// Video memory for HD replacements, kept apart from the texture cache: they
 /// outlive the many cache entries that show the same picture.
 const HD_BUDGET: u64 = 3 << 30;
+/// Where the race HUD's boost gear is drawn (x0, y0, x1, y1), and how much
+/// to shrink it around its centre. It is a few textured triangles: the fill
+/// behind it, the ring and the mascot, which must all move together.
+const GEAR: [f32; 4] = [6.0, 144.5, 134.25, 209.0];
+const GEAR_SCALE: f32 = 0.8;
 /// HD texture data brought to the GPU per frame; the rest waits its turn.
 const HD_UPLOAD_PER_FRAME: u64 = 64 << 20;
 /// Blurred side bars: the picture is halved down this chain (each blit
@@ -306,6 +311,10 @@ pub struct Hw {
     shown: Option<u32>,
     /// The playing movie's current frame, shown instead of the GS display.
     movie: Option<Image>,
+    /// Draw count when a movie ended. Until the game draws again the screen
+    /// stays black: the display still holds whatever it showed before the
+    /// movie, which would flash between two skipped movies.
+    after_movie: Option<u64>,
     /// FREEK_SHOT=<file.png>:<frame>: save the displayed picture.
     shot: Option<(u64, String)>,
     /// FREEK_RECORD=<file.mkv>:<start vblank>:<seconds>: video capture.
@@ -416,6 +425,7 @@ impl Hw {
                 stats: Stats::default(),
                 shown: None,
                 movie: None,
+                after_movie: None,
                 shot_every: std::env::var("FREEK_SHOT_EVERY").ok().and_then(|v| v.parse().ok()),
                 record: std::env::var("FREEK_RECORD").ok().and_then(|v| {
                     let mut it = v.rsplitn(3, ':');
@@ -776,7 +786,12 @@ impl Hw {
                 None => {
                     hd = hash.filter(|&h| self.pack.as_ref().is_some_and(|p| p.has(h)));
                     match hd {
-                        Some(hash) => self.want_hd(hash, w, h),
+                        Some(hash) => {
+                            if let Some(p) = &mut self.pack {
+                                p.note_peak(hash, &px);
+                            }
+                            self.want_hd(hash, w, h);
+                        }
                         None => {
                             if let Some(s) = self.sharpen.as_mut().filter(|_| sprite) {
                                 s.queue(key, self.cfg.scale, w, h, &px);
@@ -1187,13 +1202,22 @@ impl Hw {
         let (tw, th) = ((1u32 << tex0.tw()) as f32, (1u32 << tex0.th()) as f32);
         let fst = attrs.fst();
         let overlay = self.overlay(&ctx, v, tex);
+        let [gx0, gy0, gx1, gy1] = GEAR;
+        let (gx, gy) = ((gx0 + gx1) / 2.0, (gy0 + gy1) / 2.0);
+        let gear = shape == Shape::Triangle
+            && attrs.textured()
+            && matches!(overlay, Overlay::Squeeze(_))
+            && v.iter().all(|v| (gx0..=gx1).contains(&v.x) && (gy0..=gy1).contains(&v.y));
         let conv = |v: &Vertex| GpuVertex {
-            x: match overlay {
-                Overlay::None => v.x,
-                Overlay::Squeeze(c) => c + (v.x - c) * 0.75,
-                Overlay::Picture(c) => c + c * crate::pictures::wide_position((v.x - c) / c),
+            x: {
+                let x = if gear { gx + (v.x - gx) * GEAR_SCALE } else { v.x };
+                match overlay {
+                    Overlay::None => x,
+                    Overlay::Squeeze(c) => c + (x - c) * 0.75,
+                    Overlay::Picture(c) => c + c * crate::pictures::wide_position((x - c) / c),
+                }
             },
-            y: v.y,
+            y: if gear { gy + (v.y - gy) * GEAR_SCALE } else { v.y },
             z: (v.z as f64 * zscale).min(1.0) as f32,
             color: u32::from_le_bytes(v.rgba),
             s: if fst { v.u / tw } else { v.s },
@@ -1367,7 +1391,13 @@ impl Hw {
             let sy1 = ((y + h) as i32 * ys - ys / 2).min(t.color.extent.height as i32);
             (t.color.image, [vk::Offset3D { x: x as i32 * s, y: y as i32 * ys, z: 0 }, vk::Offset3D { x: sx1, y: sy1, z: 1 }], aspect)
         });
-        self.submit_and_present(shown);
+        let stale = self.after_movie.is_some_and(|d| d == self.stats.draws);
+        if !stale {
+            if self.after_movie.take().is_some() && std::env::var_os("FREEK_MOVIE_LOG").is_some() {
+                eprintln!("[movie] game drew again at vblank {}", self.vblank);
+            }
+        }
+        self.submit_and_present(shown.filter(|_| !stale));
         if let Some((buf, w, h)) = readback {
             self.save_shot(buf, w, h);
         }
@@ -1569,6 +1599,8 @@ impl Hw {
         if let Some(img) = self.movie.take() {
             self.frames[self.slot].garbage.push(Garbage::Image(img));
         }
+        // Also for a movie skipped before its first frame: there was no image.
+        self.after_movie = Some(self.stats.draws);
     }
 
     /// Show `src` (an image, the rectangle to show, its aspect ratio) in
