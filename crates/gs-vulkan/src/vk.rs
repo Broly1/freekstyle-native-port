@@ -54,6 +54,9 @@ pub struct Vk {
     pub allocator: ManuallyDrop<Allocator>,
     pub swapchain: Swapchain,
     pub device_name: String,
+    /// Anisotropic filtering, when the GPU has it, and its limit.
+    pub anisotropy: bool,
+    pub max_anisotropy: f32,
 }
 
 impl Vk {
@@ -100,6 +103,8 @@ impl Vk {
         let prio = [1.0];
         let queues = [vk::DeviceQueueCreateInfo::default().queue_family_index(queue_family).queue_priorities(&prio)];
         let dev_exts = [ash::khr::swapchain::NAME.as_ptr()];
+        let anisotropy = unsafe { instance.get_physical_device_features(physical) }.sampler_anisotropy != 0;
+        let max_anisotropy = unsafe { instance.get_physical_device_properties(physical) }.limits.max_sampler_anisotropy;
         let device = unsafe {
             instance.create_device(
                 physical,
@@ -108,7 +113,7 @@ impl Vk {
                 &vk::DeviceCreateInfo::default()
                     .queue_create_infos(&queues)
                     .enabled_extension_names(&dev_exts)
-                    .enabled_features(&vk::PhysicalDeviceFeatures::default().dual_src_blend(true))
+                    .enabled_features(&vk::PhysicalDeviceFeatures::default().dual_src_blend(true).sampler_anisotropy(anisotropy))
                     .push_next(&mut v13),
                 None,
             )
@@ -139,6 +144,8 @@ impl Vk {
             allocator: ManuallyDrop::new(allocator),
             swapchain,
             device_name,
+            anisotropy,
+            max_anisotropy,
         };
         vk.recreate_swapchain(size)?;
         Ok(vk)
@@ -194,12 +201,16 @@ impl Vk {
     }
 
     pub fn create_image(&mut self, w: u32, h: u32, format: vk::Format, usage: vk::ImageUsageFlags, name: &str) -> Result<Image> {
+        self.create_image_levels(w, h, 1, format, usage, name)
+    }
+
+    pub fn create_image_levels(&mut self, w: u32, h: u32, levels: u32, format: vk::Format, usage: vk::ImageUsageFlags, name: &str) -> Result<Image> {
         let depth = format == vk::Format::D32_SFLOAT;
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(vk::Extent3D { width: w.max(1), height: h.max(1), depth: 1 })
-            .mip_levels(1)
+            .mip_levels(levels)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
@@ -221,7 +232,7 @@ impl Vk {
                         .image(image)
                         .view_type(vk::ImageViewType::TYPE_2D)
                         .format(format)
-                        .subresource_range(range(aspect)),
+                        .subresource_range(vk::ImageSubresourceRange { level_count: levels, ..range(aspect) }),
                     None,
                 )
                 .map_err(err("create view"))?;
@@ -289,6 +300,10 @@ pub fn barrier(dev: &ash::Device, cmd: vk::CommandBuffer) {
 
 /// Layout transition with a full barrier.
 pub fn transition(dev: &ash::Device, cmd: vk::CommandBuffer, image: vk::Image, aspect: vk::ImageAspectFlags, from: vk::ImageLayout, to: vk::ImageLayout) {
+    transition_levels(dev, cmd, image, aspect, 1, from, to);
+}
+
+pub fn transition_levels(dev: &ash::Device, cmd: vk::CommandBuffer, image: vk::Image, aspect: vk::ImageAspectFlags, levels: u32, from: vk::ImageLayout, to: vk::ImageLayout) {
     let ib = [vk::ImageMemoryBarrier2::default()
         .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
         .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
@@ -297,7 +312,7 @@ pub fn transition(dev: &ash::Device, cmd: vk::CommandBuffer, image: vk::Image, a
         .old_layout(from)
         .new_layout(to)
         .image(image)
-        .subresource_range(range(aspect))];
+        .subresource_range(vk::ImageSubresourceRange { level_count: levels, ..range(aspect) })];
     unsafe { dev.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&ib)) };
 }
 

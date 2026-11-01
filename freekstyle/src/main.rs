@@ -22,6 +22,7 @@
 //!   --headless           no window; print GS statistics
 //!   --ps2-icons          keep the original PlayStation button icons
 //!   --no-sharp-textures  original texture resolution (no xBRZ upscaling)
+//!   --no-hd-textures     ignore the texture pack in game/textures/hd
 //!   --mute               no sound (the sound driver still runs)
 //!
 //! Controls: any gamepad (Xbox layout: A/B/X/Y = Cross/Circle/Square/
@@ -66,6 +67,7 @@ struct Options {
     headless: bool,
     ps2_icons: bool,
     sharp_textures: bool,
+    hd_textures: bool,
     mute: bool,
     keyboard_player: u32,
     bindings: Vec<freek_config::Binding>,
@@ -92,6 +94,7 @@ fn options() -> Options {
         headless: false,
         ps2_icons: c.ps2_icons,
         sharp_textures: c.sharp_textures,
+        hd_textures: c.hd_textures,
         mute: c.mute,
         keyboard_player: c.keyboard_player,
         bindings: c.bindings,
@@ -119,6 +122,7 @@ fn options() -> Options {
             "--headless" => o.headless = true,
             "--ps2-icons" => o.ps2_icons = true,
             "--no-sharp-textures" => o.sharp_textures = false,
+            "--no-hd-textures" => o.hd_textures = false,
             "--mute" => o.mute = true,
             _ if a.starts_with("--") => {
                 eprintln!("unknown option {a}");
@@ -509,7 +513,9 @@ impl ApplicationHandler for App {
             process::exit(1);
         });
         let size = window.inner_size();
-        let pictures = std::path::Path::new(&self.opts.disc).parent().unwrap_or(std::path::Path::new(".")).join("images");
+        let game_dir = std::path::Path::new(&self.opts.disc).parent().unwrap_or(std::path::Path::new("."));
+        let pictures = game_dir.join("images");
+        let texture_pack = self.opts.hd_textures.then(|| game_dir.join("textures/hd"));
         // Widescreen stretches the frame by 4/3: render that much wider.
         let scale_x = if self.opts.widescreen { (self.opts.scale * 4).div_ceil(3) } else { self.opts.scale };
         let cfg = gs_vulkan::Config {
@@ -519,6 +525,7 @@ impl ApplicationHandler for App {
             stretch: self.opts.stretch, blur_bars: self.opts.blur_bars, xbox_icons: !self.opts.ps2_icons,
             sharp_textures: self.opts.sharp_textures,
             pictures: Some(pictures),
+            texture_pack,
         };
         let renderer = gs_vulkan::Renderer::new(&window, (size.width, size.height), cfg).unwrap_or_else(|e| {
             eprintln!("Vulkan: {e}");

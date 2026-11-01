@@ -10,6 +10,7 @@ mod hw;
 mod icons;
 mod pictures;
 mod png;
+mod retexture;
 mod vk;
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};

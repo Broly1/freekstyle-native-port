@@ -134,6 +134,19 @@ Esc quits.
   upscaled with xBRZ to the internal resolution on a worker thread
   (`--no-sharp-textures` turns it off). 3D surfaces keep their originals.
   xBRZ comes from `xbrz-rs`, which is GPL-3.0.
+- **HD textures**: PNGs in `game/textures/hd` replace the game's textures,
+  matched by a hash of their pixels, so a palette variant is its own
+  texture (`--no-hd-textures` turns them off). They load on a worker thread
+  and get mipmaps and anisotropic filtering. To make a pack, record what the
+  game uses while you play, then scale it; each run adds to the dump, and
+  the tool only processes what the pack lacks:
+
+      FREEK_DUMP_TEXTURES=game/textures/dump ./target/release/freekstyle
+      tools/hd_pack.py game/textures/dump --esrgan /path/to/realesrgan-ncnn-vulkan
+
+  Fonts, menus and the HUD are left to xBRZ unless you pass `--sprites`.
+  Leave out `--esrgan` for plain Lanczos scaling. Packs are game data and
+  are not committed.
 - **Xbox button prompts**: the game's PlayStation button icons are
   recognised by content and redrawn as high-resolution Xbox A/B/X/Y and
   LB/RB/LT/RT buttons and a solid D-pad. D-pads in the loading tips are

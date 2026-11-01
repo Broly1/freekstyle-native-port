@@ -102,7 +102,7 @@ fn corner(px: &[u32], stride: u32, w: u32, h: u32) -> impl Iterator<Item = u32> 
 }
 
 /// RGBA8 pixels of a PNG file.
-fn load_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
+pub fn load_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     decode_png(std::io::BufReader::new(file))
 }

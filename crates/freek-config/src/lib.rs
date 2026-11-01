@@ -59,6 +59,8 @@ pub struct Config {
     pub ps2_icons: bool,
     /// Upscale game textures (menu text and artwork) with xBRZ.
     pub sharp_textures: bool,
+    /// Draw HD replacements from `game/textures/hd` when there are any.
+    pub hd_textures: bool,
     pub mute: bool,
     /// Launcher language: "en", "pt-BR", "es", "fr"; empty follows the system.
     pub language: String,
@@ -145,6 +147,7 @@ impl Default for Config {
             blur_bars: false,
             ps2_icons: false,
             sharp_textures: true,
+            hd_textures: true,
             mute: false,
             language: String::new(),
             keyboard_player: 1,

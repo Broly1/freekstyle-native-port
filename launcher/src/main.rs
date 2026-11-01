@@ -396,6 +396,9 @@ impl Launcher {
                 ui.label(t.sharp_textures);
                 ui.checkbox(&mut c.sharp_textures, t.sharp_textures_hint);
                 ui.end_row();
+                ui.label(t.hd_textures);
+                ui.checkbox(&mut c.hd_textures, t.hd_textures_hint);
+                ui.end_row();
             });
         });
         section(ui, t.game, |ui| {

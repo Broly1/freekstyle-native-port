@@ -14,7 +14,7 @@ use gs::mem::{Psm, Vram};
 use gs::{Gs, MemRect, Shape, Vertex};
 
 use crate::blend::{self, Blend};
-use crate::vk::{barrier, layers, range, transition, Buffer, Image, Result, Vk};
+use crate::vk::{barrier, layers, range, transition, transition_levels, Buffer, Image, Result, Vk};
 
 const FRAMES: usize = 2;
 const VERTEX_BYTES: u64 = 64 << 20;
@@ -26,6 +26,11 @@ const DEPTH: vk::Format = vk::Format::D32_SFLOAT;
 const TEXTURE_TTL: u64 = 600;
 /// Texture cache budget; least recently used textures go first beyond it.
 const TEXTURE_BUDGET: u64 = 1 << 30;
+/// Video memory for HD replacements, kept apart from the texture cache: they
+/// outlive the many cache entries that show the same picture.
+const HD_BUDGET: u64 = 3 << 30;
+/// HD texture data brought to the GPU per frame; the rest waits its turn.
+const HD_UPLOAD_PER_FRAME: u64 = 64 << 20;
 /// Blurred side bars: the picture is halved down this chain (each blit
 /// averages 2x2 texels), then the smallest is stretched over the window.
 const BLUR_CHAIN: [(u32, u32); 6] = [(1024, 768), (512, 384), (256, 192), (128, 96), (64, 48), (32, 24)];
@@ -87,6 +92,8 @@ struct PipeKey {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct SamplerKey {
     linear: bool,
+    /// HD replacement: trilinear and anisotropic over its mip chain.
+    mipmapped: bool,
     repeat_u: bool,
     repeat_v: bool,
 }
@@ -185,6 +192,15 @@ struct Texture {
     bytes: u64,
     /// A title or loading picture replaced by its 16:9 version.
     wide_picture: bool,
+    /// Content hash, when the texture pack replaces this texture.
+    hd: Option<u64>,
+}
+
+/// A texture pack replacement on the GPU.
+struct HdImage {
+    image: Image,
+    last_used: u64,
+    bytes: u64,
 }
 
 /// How a 2D overlay draw is placed in widescreen (see `Hw::overlay`).
@@ -236,6 +252,8 @@ pub struct Config {
     pub sharp_textures: bool,
     /// Converted pictures (`game/images`); replacements in its `hd`.
     pub pictures: Option<std::path::PathBuf>,
+    /// Texture pack folder (see `retexture`).
+    pub texture_pack: Option<std::path::PathBuf>,
 }
 
 pub struct Hw {
@@ -260,6 +278,12 @@ pub struct Hw {
     /// xBRZ upscaling runs on a worker thread; textures show at their
     /// original size until the sharp version is swapped in between frames.
     sharpen: Option<Sharpener>,
+    pack: Option<crate::retexture::Pack>,
+    hd_images: FastMap<u64, HdImage>,
+    hd_bytes: u64,
+    /// Loaded replacements waiting for upload budget.
+    hd_waiting: std::collections::VecDeque<crate::retexture::Loaded>,
+    dumper: Option<crate::retexture::Dumper>,
     /// Hash of the CLUT entries a texture uses: (GS CLUT generation,
     /// offset, entries, hash), recomputed only after a CLUT load.
     clut_hash: (u64, usize, usize, u64),
@@ -372,6 +396,11 @@ impl Hw {
                 targets: FastMap::default(),
                 textures: FastMap::default(),
                 sharpen: cfg.sharp_textures.then(Sharpener::spawn),
+                pack: cfg.texture_pack.as_deref().and_then(crate::retexture::Pack::open),
+                hd_images: FastMap::default(),
+                hd_bytes: 0,
+                hd_waiting: Default::default(),
+                dumper: std::env::var_os("FREEK_DUMP_TEXTURES").map(|d| crate::retexture::Dumper::new(d.into())),
                 clut_hash: (u64::MAX, 0, 0, 0),
                 palettes: HashMap::new(),
                 palette: 0,
@@ -471,6 +500,23 @@ impl Hw {
             .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
         unsafe { dev.cmd_copy_buffer_to_image(cmd, buf, img.image, vk::ImageLayout::GENERAL, &[region]) };
         barrier(dev, cmd);
+        Ok(img)
+    }
+
+    /// Upload a mip chain into a new image in GENERAL layout.
+    fn upload_levels(&mut self, levels: &[crate::retexture::Level]) -> Result<Image> {
+        let img = self.vk.create_image_levels(levels[0].w, levels[0].h, levels.len() as u32, COLOR, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST, "HD texture")?;
+        transition_levels(&self.vk.device, self.frames[self.slot].cmd, img.image, vk::ImageAspectFlags::COLOR, levels.len() as u32, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
+        for (i, l) in levels.iter().enumerate() {
+            let bytes = unsafe { std::slice::from_raw_parts(l.px.as_ptr() as *const u8, l.px.len() * 4) };
+            let (buf, off) = self.stage(bytes)?;
+            let region = vk::BufferImageCopy::default()
+                .buffer_offset(off)
+                .image_subresource(vk::ImageSubresourceLayers { mip_level: i as u32, ..layers(vk::ImageAspectFlags::COLOR) })
+                .image_extent(vk::Extent3D { width: l.w, height: l.h, depth: 1 });
+            unsafe { self.vk.device.cmd_copy_buffer_to_image(self.frames[self.slot].cmd, buf, img.image, vk::ImageLayout::GENERAL, &[region]) };
+        }
+        barrier(&self.vk.device, self.frames[self.slot].cmd);
         Ok(img)
     }
 
@@ -706,11 +752,15 @@ impl Hw {
         let frame = self.frame_no;
         if let Some(tex) = self.textures.get_mut(&key) {
             tex.last_used = frame;
+            if let Some(hash) = tex.hd {
+                self.want_hd(hash, tw, th);
+            }
             return Ok((TexRef::Cache(key), [1.0, 1.0], false));
         }
         let (w, h, px) = gs::tex::decode(&gs.vram, t, gs.texa, &gs.clut, gs.clut_psm);
-        if let Some(dir) = std::env::var_os("FREEK_DUMP_TEXTURES") {
-            dump_texture(std::path::Path::new(&dir), &key, t, w, h, &px);
+        let hash = (self.pack.is_some() || self.dumper.is_some()).then(|| crate::retexture::content_hash(w, h, &px));
+        if let (Some(d), Some(hash)) = (&mut self.dumper, hash) {
+            d.dump(hash, t.psm(), sprite, w, h, &px);
         }
         // Pictures in high resolution; PlayStation button prompts become
         // Xbox buttons.
@@ -718,13 +768,20 @@ impl Hw {
             Some(p) if !t.psm().is_indexed() => p.replace(w, h, &px, (self.cfg.scale_x, self.cfg.scale), self.cfg.widescreen),
             _ => None,
         };
+        let mut hd = None;
         let (w, h, px, wide_picture) = match picture {
             Some(r) => r,
             None => match self.cfg.xbox_icons.then(|| crate::icons::replace(w, h, &px)).flatten() {
                 Some((w, h, px)) => (w, h, px, false),
                 None => {
-                    if let Some(s) = self.sharpen.as_mut().filter(|_| sprite) {
-                        s.queue(key, self.cfg.scale, w, h, &px);
+                    hd = hash.filter(|&h| self.pack.as_ref().is_some_and(|p| p.has(h)));
+                    match hd {
+                        Some(hash) => self.want_hd(hash, w, h),
+                        None => {
+                            if let Some(s) = self.sharpen.as_mut().filter(|_| sprite) {
+                                s.queue(key, self.cfg.scale, w, h, &px);
+                            }
+                        }
                     }
                     (w, h, px, false)
                 }
@@ -732,13 +789,30 @@ impl Hw {
         };
         self.end_rendering();
         let image = self.upload_image(w, h, &px, vk::ImageUsageFlags::SAMPLED, "texture")?;
-        self.textures.insert(key, Texture { image, last_used: frame, bytes: w as u64 * h as u64 * 4, wide_picture });
+        self.textures.insert(key, Texture { image, last_used: frame, bytes: w as u64 * h as u64 * 4, wide_picture, hd });
         self.texture_bytes += w as u64 * h as u64 * 4;
         if self.texture_bytes > TEXTURE_BUDGET {
             self.evict_lru();
         }
         self.stats.texture_uploads += 1;
         Ok((TexRef::Cache(key), [1.0, 1.0], false))
+    }
+
+    /// Keep a replacement in memory, or have it loaded.
+    fn want_hd(&mut self, hash: u64, w: u32, h: u32) {
+        match self.hd_images.get_mut(&hash) {
+            Some(i) => i.last_used = self.frame_no,
+            None => {
+                if let Some(p) = &mut self.pack {
+                    p.request(hash, w, h);
+                }
+            }
+        }
+    }
+
+    /// The replacement to draw with, once it has reached the GPU.
+    fn hd_image(&self, t: &Texture) -> Option<&HdImage> {
+        self.hd_images.get(&t.hd?)
     }
 
     /// View to sample for a texture reference, snapshotting targets.
@@ -786,7 +860,10 @@ impl Hw {
     fn texture_view(&mut self, r: TexRef) -> Result<vk::ImageView> {
         match r {
             TexRef::None => Ok(self.white.view),
-            TexRef::Cache(k) => Ok(self.textures[&k].image.view),
+            TexRef::Cache(k) => {
+                let t = &self.textures[&k];
+                Ok(self.hd_image(t).map_or(t.image.view, |i| i.image.view))
+            }
             TexRef::Target(bp) => {
                 if !self.targets[&bp].snapshot_valid {
                     self.ensure_snapshot(bp)?;
@@ -817,13 +894,17 @@ impl Hw {
         *self.samplers.entry(k).or_insert_with(|| {
             let filter = if k.linear { vk::Filter::LINEAR } else { vk::Filter::NEAREST };
             let mode = |r: bool| if r { vk::SamplerAddressMode::REPEAT } else { vk::SamplerAddressMode::CLAMP_TO_EDGE };
+            let aniso = k.mipmapped && self.vk.anisotropy;
             let info = vk::SamplerCreateInfo::default()
+                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                .anisotropy_enable(aniso)
+                .max_anisotropy(if aniso { 16f32.min(self.vk.max_anisotropy) } else { 1.0 })
                 .mag_filter(filter)
                 .min_filter(filter)
                 .address_mode_u(mode(k.repeat_u))
                 .address_mode_v(mode(k.repeat_v))
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                .max_lod(0.0);
+                .max_lod(if k.mipmapped { vk::LOD_CLAMP_NONE } else { 0.0 });
             unsafe { dev.create_sampler(&info, None).expect("sampler") }
         })
     }
@@ -1075,8 +1156,10 @@ impl Hw {
             _ => vk::CompareOp::GREATER,
         };
         let ztst = if test.zte() { ztst } else { vk::CompareOp::ALWAYS };
+        let mipmapped = matches!(tex, TexRef::Cache(k) if self.hd_image(&self.textures[&k]).is_some());
         let sampler = SamplerKey {
-            linear: ctx.tex1.mag_linear() || ctx.tex1.min_linear(),
+            linear: mipmapped || ctx.tex1.mag_linear() || ctx.tex1.min_linear(),
+            mipmapped,
             repeat_u: ctx.clamp.wms() == 0,
             repeat_v: ctx.clamp.wmt() == 0,
         };
@@ -1181,6 +1264,11 @@ impl Hw {
         }
         if self.on_wide_picture {
             Overlay::Picture(width / 2.0)
+        } else if (x0 <= 1.0 || x1 >= width - 1.0) && x1 - x0 >= width / 3.0 {
+            // Menu frames are halves that meet in the middle and reach the
+            // screen edges, over a panel that spans the width: squeezing
+            // them would pull them in from the edges of that panel.
+            Overlay::None
         } else if ctx.test.zte() && ctx.test.ztst() >= 2 {
             Overlay::Squeeze(width / 2.0)
         } else {
@@ -1572,6 +1660,7 @@ impl Hw {
         self.frame_no += 1;
         self.begin_frame();
         self.apply_sharpened();
+        self.apply_hd();
     }
 
     pub fn resize(&mut self, size: (u32, u32)) {
@@ -1605,6 +1694,45 @@ impl Hw {
             self.texture_bytes = self.texture_bytes - t.bytes + bytes;
             t.bytes = bytes;
             self.frames[self.slot].garbage.push(Garbage::Image(old));
+        }
+    }
+
+    /// Bring loaded replacements to the GPU, at the start of a frame like
+    /// `apply_sharpened`, a little at a time so that a whole pack arriving
+    /// at the start of a race does not stall a frame.
+    fn apply_hd(&mut self) {
+        let Some(pack) = &mut self.pack else { return };
+        self.hd_waiting.extend(std::iter::from_fn(|| pack.next_loaded()));
+        let mut budget = HD_UPLOAD_PER_FRAME;
+        while let Some(l) = self.hd_waiting.front() {
+            let bytes: u64 = l.levels.iter().map(|m| m.px.len() as u64 * 4).sum();
+            if bytes > budget && budget != HD_UPLOAD_PER_FRAME {
+                break;
+            }
+            budget = budget.saturating_sub(bytes);
+            let l = self.hd_waiting.pop_front().unwrap();
+            match self.upload_levels(&l.levels) {
+                Ok(image) => {
+                    self.hd_bytes += bytes;
+                    self.hd_images.insert(l.hash, HdImage { image, last_used: self.frame_no, bytes });
+                }
+                Err(e) => eprintln!("[textures] upload: {e}"),
+            }
+        }
+        if self.hd_bytes > HD_BUDGET {
+            let mut by_age: Vec<(u64, u64)> = self.hd_images.iter().filter(|(_, i)| i.last_used + 2 < self.frame_no).map(|(&h, i)| (i.last_used, h)).collect();
+            by_age.sort_unstable();
+            for (_, hash) in by_age {
+                if self.hd_bytes <= HD_BUDGET / 4 * 3 {
+                    break;
+                }
+                let i = self.hd_images.remove(&hash).unwrap();
+                self.hd_bytes -= i.bytes;
+                if let Some(p) = &mut self.pack {
+                    p.forget(hash);
+                }
+                self.frames[self.slot].garbage.push(Garbage::Image(i.image));
+            }
         }
     }
 
@@ -1644,7 +1772,6 @@ fn blit(dev: &ash::Device, cmd: vk::CommandBuffer, (src, from): (vk::Image, [vk:
     barrier(dev, cmd);
 }
 
-/// Write a decoded texture as PNG (alpha scaled to 0-255) for inspection.
 struct Sharpened {
     key: TexKey,
     w: u32,
@@ -1705,22 +1832,6 @@ fn sharpen(scale: u32, w: u32, h: u32, px: Vec<u32>) -> (u32, u32, Vec<u32>) {
     let out = xbrz::scale_rgba(&rgba, w as usize, h as usize, f as usize);
     let px = out.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     (w * f, h * f, px)
-}
-
-fn dump_texture(dir: &std::path::Path, key: &TexKey, t: gs::regs::Tex0, w: u32, h: u32, px: &[u32]) {
-    let _ = std::fs::create_dir_all(dir);
-    let id = key.tex0 ^ key.clut.rotate_left(17) ^ key.texa.rotate_left(33);
-    let name = format!("tex_{id:016x}_{:?}_{w}x{h}_tbp{:x}.png", t.psm(), t.tbp0());
-    // Composite over magenta so transparent areas are visible.
-    let rgba: Vec<u8> = px
-        .iter()
-        .flat_map(|p| {
-            let a = ((p >> 24).min(128) * 255 / 128) as f32 / 255.0;
-            let c = |v: u32, bg: f32| ((v & 0xff) as f32 * a + bg * (1.0 - a)) as u8;
-            [c(*p, 255.0), c(p >> 8, 0.0), c(p >> 16, 255.0), 255]
-        })
-        .collect();
-    let _ = std::fs::write(dir.join(name), crate::png::encode(w, h, &rgba));
 }
 
 impl Drop for Hw {

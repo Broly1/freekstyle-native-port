@@ -96,6 +96,8 @@ pub struct Tr {
     pub side_bars_hint: &'static str,
     pub sharp_textures: &'static str,
     pub sharp_textures_hint: &'static str,
+    pub hd_textures: &'static str,
+    pub hd_textures_hint: &'static str,
 
     pub game: &'static str,
     pub sound: &'static str,
@@ -165,6 +167,8 @@ pub const EN: Tr = Tr {
     side_bars_hint: "Blurred picture instead of black bars",
     sharp_textures: "Sharp textures",
     sharp_textures_hint: "Upscale menu text and artwork (xBRZ)",
+    hd_textures: "HD textures",
+    hd_textures_hint: "Use the texture pack in game/textures/hd",
 
     game: "Game",
     sound: "Sound",
@@ -249,6 +253,8 @@ pub const PT_BR: Tr = Tr {
     side_bars_hint: "Imagem desfocada em vez de barras pretas",
     sharp_textures: "Texturas nítidas",
     sharp_textures_hint: "Ampliar textos e artes dos menus (xBRZ)",
+    hd_textures: "Texturas HD",
+    hd_textures_hint: "Usar o pacote de texturas em game/textures/hd",
 
     game: "Jogo",
     sound: "Som",
@@ -333,6 +339,8 @@ pub const ES: Tr = Tr {
     side_bars_hint: "Imagen difuminada en lugar de barras negras",
     sharp_textures: "Texturas nítidas",
     sharp_textures_hint: "Escalar textos e ilustraciones de los menús (xBRZ)",
+    hd_textures: "Texturas HD",
+    hd_textures_hint: "Usar el paquete de texturas de game/textures/hd",
 
     game: "Juego",
     sound: "Sonido",
@@ -417,6 +425,8 @@ pub const FR: Tr = Tr {
     side_bars_hint: "Image floutée au lieu de bandes noires",
     sharp_textures: "Textures nettes",
     sharp_textures_hint: "Agrandir les textes et illustrations des menus (xBRZ)",
+    hd_textures: "Textures HD",
+    hd_textures_hint: "Utiliser le pack de textures de game/textures/hd",
 
     game: "Jeu",
     sound: "Son",
