@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Declick and declip a 16-bit stereo WAV.
 
 Each channel is modelled block by block with an autoregressive (AR) model.

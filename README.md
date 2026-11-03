@@ -241,6 +241,130 @@ preferring `game/movies/hd/` and falling back to `game/movies/`; a movie
 with no conversion is skipped. ffmpeg decodes them while they play, so it
 must be installed to see them. Start or Cross skips a movie.
 
+## HD extras (optional)
+
+None of this is needed to play. It makes the game look sharper: an HD
+texture pack with redrawn steel menu frames, AI-upscaled pictures with
+16:9 versions for widescreen, and AI-upscaled intro movies. Run every
+command from the repository root, after `install.py` has finished.
+
+### What you need
+
+Python's Pillow and numpy, ffmpeg and unzip:
+
+```sh
+sudo pacman -S --needed python-pillow python-numpy ffmpeg unzip   # Arch, Manjaro
+sudo apt install python3-pil python3-numpy ffmpeg unzip           # Debian, Ubuntu, Mint
+sudo dnf install python3-pillow python3-numpy ffmpeg unzip        # Fedora (ffmpeg from RPM Fusion)
+sudo zypper install python3-Pillow python3-numpy ffmpeg unzip     # openSUSE
+```
+
+Real-ESRGAN, the AI upscaler (needs a GPU with Vulkan):
+
+```sh
+mkdir -p ~/.local/share/realesrgan && cd ~/.local/share/realesrgan
+curl -LO https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip
+unzip -o realesrgan-ncnn-vulkan-20220424-ubuntu.zip && chmod +x realesrgan-ncnn-vulkan
+cd -
+```
+
+Set these two shortcuts in the terminal you use for the steps below (again
+in every new terminal):
+
+```sh
+ESRGAN=~/.local/share/realesrgan/realesrgan-ncnn-vulkan
+E="$ESRGAN -m $HOME/.local/share/realesrgan/models"
+```
+
+### 1. HD pictures
+
+About a minute:
+
+```sh
+P=$(mktemp -d); mkdir -p $P/in $P/out game/images/hd
+cp game/images/*.png $P/in/
+$E -i $P/in -o $P/out -n realesrgan-x4plus-anime -f png
+for f in $P/out/*.png; do
+  ffmpeg -loglevel error -y -i "$f" -vf scale=2880:2160:flags=lanczos,format=rgb24 game/images/hd/$(basename "$f")
+done
+rm -r $P
+```
+
+### 2. 16:9 pictures
+
+Needs step 1. For the launcher's *Widescreen* option:
+
+```sh
+tools/widen-pictures.py
+```
+
+### 3. HD texture pack and steel menu frames
+
+1. Record the textures while you play:
+
+   ```sh
+   FREEK_DUMP_TEXTURES=game/textures/dump ./target/release/freekstyle
+   ```
+
+   Visit everything you want sharp: every menu, every rider and bike on
+   the rider select screen, a race on each track, Freestyle, Freeride, a
+   split-screen race, the pause menu and the results screen. You can quit
+   and record more later; each run adds to the same folder.
+
+2. Upscale the recording, then redraw the menu frames and boost gear as
+   steel:
+
+   ```sh
+   tools/hd_pack.py game/textures/dump --esrgan $ESRGAN
+   tools/redraw_art.py --esrgan $ESRGAN
+   ```
+
+After recording more, run both lines again: only new textures are added.
+Tick *HD textures* in the launcher (on by default).
+
+### 4. AI-upscaled intro movies
+
+About 3 hours on a mid-range GPU, and up to 25 GB of free space while it
+runs. If you stop it, run it again: it carries on from the frames already
+done.
+
+```sh
+W=game/movies/work
+for m in intro prod1; do
+  M=$(echo $m | tr a-z A-Z)
+  mkdir -p $W/$m/frames $W/$m/ai $W/$m/todo
+  ./target/release/flm2mkv --extract game/movies/flm/$M.FLM $W/$m
+  [ -e $W/$m/frames/00001.png ] || ffmpeg -loglevel error -r 30000/1001 -i $W/$m/$m.m2v \
+    -vf "setfield=tff,bwdif=mode=send_field:parity=tff:deint=all" $W/$m/frames/%05d.png
+  rm -f $W/$m/todo/*
+  # The newest frame may be half-written if a run was stopped: redo it.
+  [ -z "$(ls $W/$m/ai)" ] || rm "$W/$m/ai/$(ls -t $W/$m/ai | head -1)"
+  for f in $W/$m/frames/*.png; do [ -e $W/$m/ai/$(basename $f) ] || ln "$f" $W/$m/todo/; done
+  [ -z "$(ls $W/$m/todo)" ] || $E -i $W/$m/todo -o $W/$m/ai -n realesrgan-x4plus -f png
+  tools/movie_declick.py $W/$m/$m.wav $W/$m/fixed.wav 5
+  ffmpeg -loglevel error -y -framerate 60000/1001 -i $W/$m/ai/%05d.png -i $W/$m/fixed.wav \
+    -vf "scale=1440:1080:flags=lanczos+accurate_rnd+full_chroma_int:out_color_matrix=bt709,setsar=1" \
+    -c:v libvpx-vp9 -crf 18 -b:v 0 -deadline good -cpu-used 2 -row-mt 1 -tile-columns 2 -pix_fmt yuv420p \
+    -colorspace bt709 -color_primaries bt709 -color_trc bt709 \
+    -c:a libopus -b:a 160k -shortest game/movies/hd/$m.mkv
+  rm -r $W/$m
+done
+rmdir $W 2>/dev/null || true
+```
+
+### If you installed the game to the system
+
+The game in `/opt/freekstyle` has its own copy of `game/`. Copy the extras
+into it:
+
+```sh
+sudo cp -r game/images /opt/freekstyle/game/
+sudo cp -r game/movies/hd /opt/freekstyle/game/movies/
+sudo mkdir -p /opt/freekstyle/game/textures && sudo cp -r game/textures/hd /opt/freekstyle/game/textures/
+```
+
+All of this stays under `game/`, which is never committed.
+
 ## VU microprograms
 
 The game uploads its VU0/VU1 microcode at run time with VIF MPG packets

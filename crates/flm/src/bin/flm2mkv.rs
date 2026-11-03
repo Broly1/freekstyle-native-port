@@ -2,6 +2,11 @@
 //! Linux players and for in-game playback.
 //!
 //! Usage: flm2mkv [--height N] [--crt] <movie.FLM | directory> <out-dir>
+//!        flm2mkv --extract <movie.FLM | directory> <out-dir>
+//!
+//! `--extract` writes each movie's MPEG-2 video (`<name>.m2v`) and its
+//! soundtrack as decoded (`<name>.wav`, 22050 Hz, no headroom) and prints its
+//! field order, for custom conversions such as an AI upscale.
 //! Needs ffmpeg with libvpx-vp9 and libopus on PATH (and libplacebo with a
 //! Vulkan GPU for --crt).
 //!
@@ -121,6 +126,20 @@ fn convert(src: &Path, out_dir: &Path, height: Option<u32>, crt: bool) -> Result
     Ok(out)
 }
 
+/// `--extract`: the raw streams, for conversions made by hand.
+fn extract(src: &Path, out_dir: &Path) -> Result<(), String> {
+    let data = fs::read(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    let movie = flm::demux(&data).map_err(|e| format!("{}: {e}", src.display()))?;
+    let stem = src.file_stem().unwrap().to_string_lossy().to_ascii_lowercase();
+    let (m2v, wav) = (out_dir.join(format!("{stem}.m2v")), out_dir.join(format!("{stem}.wav")));
+    fs::write(&m2v, &movie.video).map_err(|e| e.to_string())?;
+    fs::write(&wav, flm::wav(&movie.audio, flm::AUDIO_RATE)).map_err(|e| e.to_string())?;
+    let (num, den) = flm::VIDEO_FPS;
+    let fields = field_order(&m2v, &format!("{num}/{den}"))?.unwrap_or("progressive");
+    eprintln!("{} -> {}, {} (fields: {fields})", src.display(), m2v.display(), wav.display());
+    Ok(())
+}
+
 fn main() {
     let mut args: Vec<String> = env::args().skip(1).collect();
     let mut height = None;
@@ -132,6 +151,8 @@ fn main() {
         }
         args.drain(i..i + 2);
     }
+    let raw = args.iter().any(|a| a == "--extract");
+    args.retain(|a| a != "--extract");
     let crt = args.iter().any(|a| a == "--crt");
     args.retain(|a| a != "--crt");
     if crt && height.is_none() {
@@ -139,6 +160,7 @@ fn main() {
     }
     if args.len() != 2 {
         eprintln!("usage: flm2mkv [--height N] [--crt] <movie.FLM | directory> <out-dir>");
+        eprintln!("       flm2mkv --extract <movie.FLM | directory> <out-dir>");
         exit(2);
     }
     let (src, out) = (Path::new(&args[0]), Path::new(&args[1]));
@@ -161,7 +183,8 @@ fn main() {
     };
     let mut failed = false;
     for p in inputs {
-        if let Err(e) = convert(&p, out, height, crt) {
+        let done = if raw { extract(&p, out) } else { convert(&p, out, height, crt).map(|_| ()) };
+        if let Err(e) = done {
             eprintln!("{e}");
             failed = true;
         }
