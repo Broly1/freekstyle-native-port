@@ -74,6 +74,7 @@ pub type NativeFn = fn(&mut Ctx);
 
 /// Recompiled programs: (unit, image hash, entry instruction, function),
 /// sorted. Installed by the frontend from generated code.
+#[derive(Clone, Copy)]
 pub struct Programs(pub &'static [(u8, u64, u32, NativeFn)]);
 
 impl Programs {

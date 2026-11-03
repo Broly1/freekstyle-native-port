@@ -20,6 +20,7 @@ pub mod movie;
 pub mod pad;
 pub mod text;
 pub mod vu;
+pub mod vu1;
 pub mod vumicro;
 #[cfg(target_arch = "x86_64")]
 pub mod vux;

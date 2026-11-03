@@ -104,6 +104,8 @@ pub struct Io {
     pub vblanks: u64,
     /// Channel to the GS on the render thread; None runs headless.
     pub gs: Option<Sender<gs::Msg>>,
+    /// VU1's thread, waited for before anything that could show its work.
+    pub vu1: Option<crate::vu1::Handle>,
     pub gif_packets: u64,
     warned: HashSet<String>,
     /// Set on each new vblank; cleared by `Memory::service_vblank`.
@@ -127,6 +129,7 @@ impl Io {
             vblanks: 0,
             gs: None,
             gif_packets: 0,
+            vu1: None,
             warned: HashSet::new(),
             new_vblank: false,
             poll_time: Default::default(),
@@ -136,7 +139,17 @@ impl Io {
         }
     }
 
+    /// Wait for VU1 to finish its queued work, so the GS sees it before
+    /// what the EE sends next, and pick up a FINISH it wrote.
+    pub fn sync_vu1(&mut self) {
+        if self.vu1.as_ref().is_some_and(|h| h.wait()) {
+            let csr = self.regs.get(&GS_CSR).copied().unwrap_or(0) | GS_CSR_FINISH;
+            self.regs.insert(GS_CSR, csr);
+        }
+    }
+
     pub fn send_gif(&mut self, data: Vec<u128>) {
+        self.sync_vu1();
         self.gif_packets += 1;
         // The GS consumes packets as they come, so a FINISH write is done
         // by the time the EE can look: raise the event now.
@@ -190,6 +203,7 @@ impl Io {
             let csr = self.regs.get(&GS_CSR).copied().unwrap_or(0) | GS_CSR_VSINT;
             let csr = if n % 2 == 1 { csr | GS_CSR_FIELD } else { csr & !GS_CSR_FIELD };
             self.regs.insert(GS_CSR, csr);
+            self.sync_vu1();
             if let Some(tx) = &self.gs {
                 let _ = tx.send(gs::Msg::Vsync(n));
             }
@@ -245,6 +259,9 @@ impl Io {
     }
 
     pub fn read(&mut self, addr: u32, n: usize) -> u128 {
+        if (0x1200_0000..0x1200_2000).contains(&addr) {
+            self.sync_vu1();
+        }
         if matches!(addr, INTC_STAT | GS_CSR | D_STAT) {
             self.tick();
         }
@@ -290,6 +307,9 @@ impl Io {
     /// the caller performs it (it needs memory) and then calls `dma_done`.
     pub fn write(&mut self, addr: u32, n: usize, v: u128) -> Option<DmaStart> {
         self.trace(addr, true, n, v);
+        if (0x1200_0000..0x1200_2000).contains(&addr) {
+            self.sync_vu1();
+        }
         match addr {
             // Status bits are write-1-to-clear; mask bits toggle.
             D_STAT => {
@@ -372,7 +392,7 @@ impl Default for Io {
 }
 
 /// Whether a GIF packet writes the GS FINISH register (A+D in PACKED mode).
-fn writes_finish(data: &[u128]) -> bool {
+pub(crate) fn writes_finish(data: &[u128]) -> bool {
     const A_D: u64 = 0xe;
     const FINISH: u128 = 0x61;
     let mut i = 0;

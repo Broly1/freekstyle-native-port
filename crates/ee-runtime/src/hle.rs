@@ -579,6 +579,8 @@ pub fn movie_play(c: &mut Cpu) {
     let opened = crate::movie::OPENED.lock().unwrap().take();
     // Converted movies live next to the pictures (game/movies).
     let dir = c.iop.images.parent().unwrap_or(std::path::Path::new(".")).join("movies");
+    // Movie frames go to the GS from another thread: VU1's drawing first.
+    c.mem.io.sync_vu1();
     match (opened.as_deref().and_then(|p| crate::movie::find(&dir, p)), c.mem.io.gs.clone()) {
         (Some(file), Some(gs)) => {
             // The real open pauses the game's disc streaming (0x193440(0))

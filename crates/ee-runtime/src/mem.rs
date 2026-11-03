@@ -23,14 +23,13 @@ pub struct Memory {
     pub spr: Box<[u8]>,
     pub vu0_code: Box<[u8]>,
     pub vu0_data: Box<[u8]>,
-    pub vu1_code: Box<[u8]>,
-    pub vu1_data: Box<[u8]>,
     pub io: Io,
-    pub vif: [Vif; 2],
+    pub vif0: Vif,
     pub pad: crate::pad::Pad,
-    /// VU1 registers (VU0's live in `Cpu::vu0`, shared with COP2).
-    pub vu1: crate::vu::VuRegs,
-    /// Bumped whenever VU0/VU1 program memory changes.
+    /// VU1 with VIF1, on its own thread (VU0's registers live in
+    /// `Cpu::vu0`, shared with COP2).
+    pub vu1: crate::vu1::Vu1,
+    /// Bumped whenever VU0 program memory changes (index 0; VU1 keeps its own).
     pub vu_code_gen: [u64; 2],
     pub vu_cache: [crate::vumicro::DecodeCache; 2],
     /// Recompiled VU microprograms.
@@ -68,21 +67,28 @@ macro_rules! access {
 
 impl Memory {
     pub fn new() -> Memory {
+        let vu1 = crate::vu1::Vu1::new();
+        let mut io = Io::new();
+        io.vu1 = Some(vu1.handle());
         Memory {
             ram: zeroed(RAM_SIZE),
             spr: zeroed(SPR_SIZE),
             vu0_code: zeroed(4 << 10),
             vu0_data: zeroed(4 << 10),
-            vu1_code: zeroed(16 << 10),
-            vu1_data: zeroed(16 << 10),
-            io: Io::new(),
-            vif: Default::default(),
+            io,
+            vif0: Vif::default(),
             pad: Default::default(),
-            vu1: crate::vu::VuRegs::new(),
+            vu1,
             vu_code_gen: [1, 1],
             vu_cache: Default::default(),
             vu_programs: crate::vumicro::Programs(&[]),
         }
+    }
+
+    /// Install recompiled VU microprograms (VU0 and VU1).
+    pub fn set_vu_programs(&mut self, p: crate::vumicro::Programs) {
+        self.vu1.get().programs = p;
+        self.vu_programs = p;
     }
 
     access!(r8, w8, u8);
@@ -106,8 +112,8 @@ impl Memory {
             0..=0x01ff_ffff => (&mut self.ram, 0),
             0x1100_0000..=0x1100_0fff => (&mut self.vu0_code, 0x1100_0000),
             0x1100_4000..=0x1100_4fff => (&mut self.vu0_data, 0x1100_4000),
-            0x1100_8000..=0x1100_bfff => (&mut self.vu1_code, 0x1100_8000),
-            0x1100_c000..=0x1100_ffff => (&mut self.vu1_data, 0x1100_c000),
+            0x1100_8000..=0x1100_bfff => (&mut self.vu1.get().code, 0x1100_8000),
+            0x1100_c000..=0x1100_ffff => (&mut self.vu1.get().data, 0x1100_c000),
             _ => return None,
         };
         let a = (phys - base) as usize;
@@ -142,7 +148,7 @@ impl Memory {
         // Writes into VU program memory invalidate decoded programs.
         match addr & 0x1fff_ffff {
             0x1100_0000..=0x1100_0fff => self.vu_code_gen[0] += 1,
-            0x1100_8000..=0x1100_bfff => self.vu_code_gen[1] += 1,
+            0x1100_8000..=0x1100_bfff => self.vu1.get().code_gen += 1,
             _ => {}
         }
         if let Some(b) = self.backing(addr, n) {

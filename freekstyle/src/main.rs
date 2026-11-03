@@ -194,7 +194,7 @@ fn main() {
             c.mem.io.gs = Some(gs_tx);
             // FREEK_VU_INTERP: interpret all VU microcode (debugging aid).
             if env::var_os("FREEK_VU_INTERP").is_none() {
-                c.mem.vu_programs = ee_runtime::vumicro::Programs(&gen::vu_programs::VU_PROGRAMS);
+                c.mem.set_vu_programs(ee_runtime::vumicro::Programs(&gen::vu_programs::VU_PROGRAMS));
             }
             let entry = ee_runtime::load_elf(&mut c, &bytes).expect("load ELF");
             eprintln!("[boot] {} functions, entry {entry:#x}", gen::FUNCS.len());
@@ -639,12 +639,13 @@ fn watchdog() {
             let (runs, cycles, ns) = std::mem::take(&mut *ee_runtime::vumicro::STATS.lock().unwrap());
             let poll = ee_runtime::cpu::POLL_US.load(Relaxed);
             eprintln!(
-                "[heartbeat] in fn {f:#010x}, {} calls in the last 2s; VU: {runs} programs ({} VU1, {} XGKICKs), {cycles} cycles, {:.0} ms; polling {:.0} ms",
+                "[heartbeat] in fn {f:#010x}, {} calls in the last 2s; VU: {runs} programs ({} VU1, {} XGKICKs), {cycles} cycles, {:.0} ms; polling {:.0} ms; waiting for VU1 {:.0} ms",
                 n - last,
                 ee_runtime::dma::VU1_RUNS.swap(0, Relaxed),
                 ee_runtime::dma::PATH1_PACKETS.swap(0, Relaxed),
                 ns as f64 / 1e6,
-                (poll - last_poll) as f64 / 1e3
+                (poll - last_poll) as f64 / 1e3,
+                ee_runtime::vu1::WAIT_US.swap(0, Relaxed) as f64 / 1e3
             );
             last_poll = poll;
         }

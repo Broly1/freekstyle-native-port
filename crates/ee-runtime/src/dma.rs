@@ -1,11 +1,39 @@
 //! DMA channels that feed the GS and the vector units: source-chain tag
 //! walking, and the VIF command stream (UNPACK, MPG, DIRECT, ...).
 //!
-//! Transfers run to completion when started. GIF data is forwarded to the
-//! GS thread; VU1 microprograms started by MSCAL run immediately.
+//! Transfers run to completion when started, as far as the EE can tell.
+//! GIF data is forwarded to the GS thread; VIF1 transfers and the VU1
+//! microprograms they start go to VU1's own thread (see `vu1`).
 
-use crate::io::DmaStart;
+use crate::io::{DmaStart, Io};
 use crate::mem::Memory;
+use crate::vu::VuRegs;
+use crate::vumicro::{DecodeCache, Programs};
+
+/// Where a VIF sends GIF output (XGKICK, DIRECT) and its warnings.
+pub trait VifIo {
+    fn send_gif(&mut self, data: Vec<u128>);
+    fn warn_once(&mut self, msg: &str);
+}
+
+impl VifIo for Io {
+    fn send_gif(&mut self, data: Vec<u128>) {
+        Io::send_gif(self, data)
+    }
+    fn warn_once(&mut self, msg: &str) {
+        Io::warn_once(self, msg)
+    }
+}
+
+/// The vector unit a VIF writes to: its program and data memory, and for
+/// VU1 the registers and recompiled programs MSCAL runs.
+pub struct Target<'a> {
+    pub unit: usize,
+    pub code: &'a mut [u8],
+    pub data: &'a mut [u8],
+    pub code_gen: &'a mut u64,
+    pub vu1: Option<(&'a mut VuRegs, &'a mut DecodeCache, &'a Programs)>,
+}
 
 pub const CH_VIF0: usize = 0;
 pub const CH_VIF1: usize = 1;
@@ -97,9 +125,15 @@ pub fn vif(m: &mut Memory, d: &DmaStart) {
             }
         },
     });
-    let mut vif = std::mem::take(&mut m.vif[unit]);
-    vif.run(m, unit, &words);
-    m.vif[unit] = vif;
+    if unit == CH_VIF1 {
+        let Memory { vu1, io, .. } = m;
+        let gs = io.gs.clone();
+        vu1.submit(words, io, gs.as_ref());
+        return;
+    }
+    let Memory { vif0, vu0_code, vu0_data, vu_code_gen, io, .. } = m;
+    let mut t = Target { unit: 0, code: vu0_code, data: vu0_data, code_gen: &mut vu_code_gen[0], vu1: None };
+    vif0.run(&mut t, io, &words);
 }
 
 /// Parser state for one VIF, kept across transfers because a command's
@@ -141,13 +175,13 @@ pub struct Vif {
 }
 
 impl Vif {
-    fn run(&mut self, m: &mut Memory, unit: usize, words: &[u32]) {
+    pub fn run(&mut self, t: &mut Target, io: &mut dyn VifIo, words: &[u32]) {
         let mut i = 0;
         while i < words.len() {
             if self.left > 0 && self.cmd >= 0x60 {
                 // UNPACK data: as many words as it still takes at once.
                 let k = self.left.min(words.len() - i);
-                self.unpack_words(m, unit, &words[i..i + k]);
+                self.unpack_words(t, &words[i..i + k]);
                 i += k;
                 self.word_pos = (self.word_pos + k) % 4;
                 self.left -= k;
@@ -157,25 +191,26 @@ impl Vif {
                 self.code = words[i];
                 i += 1;
                 self.word_pos = (self.word_pos + 1) % 4;
-                self.begin(m, unit);
+                self.begin(t, io);
                 continue;
             }
             let w = words[i];
             i += 1;
             self.word_pos = (self.word_pos + 1) % 4;
             self.left -= 1;
-            self.data(m, unit, w);
+            self.data(t, w);
             if self.left == 0 {
-                self.end(m, unit);
+                self.end();
             }
         }
-        self.flush_direct(m);
+        self.flush_direct();
         if !self.gif.is_empty() {
-            m.io.send_gif(std::mem::take(&mut self.gif));
+            io.send_gif(std::mem::take(&mut self.gif));
         }
     }
 
-    fn begin(&mut self, m: &mut Memory, unit: usize) {
+    fn begin(&mut self, t: &mut Target, io: &mut dyn VifIo) {
+        let unit = t.unit;
         let code = self.code;
         let imm = code & 0xffff;
         let num = (code >> 16) & 0xff;
@@ -189,8 +224,8 @@ impl Vif {
             0x04 => self.itop = imm & 0x3ff,
             0x05 => self.mode = imm & 3,
             0x06 => {} // MSKPATH3
-            0x14 | 0x15 => self.mscal(m, unit, imm * 8),
-            0x17 => self.mscal(m, unit, u32::MAX),
+            0x14 | 0x15 => self.mscal(t, io, imm * 8),
+            0x17 => self.mscal(t, io, u32::MAX),
             0x20 => self.left = 1,
             0x30 | 0x31 => self.left = 4,
             0x4a => {
@@ -205,7 +240,7 @@ impl Vif {
                 self.buf.clear();
             }
             0x60..=0x7f => self.begin_unpack(),
-            _ => m.io.warn_once(&format!("VIF{unit}: unknown command {code:#010x}")),
+            _ => io.warn_once(&format!("VIF{unit}: unknown command {code:#010x}")),
         }
         // Double-buffer swap on MSCAL: TOPS alternates between BASE and
         // BASE+OFST (VIF1 only).
@@ -216,32 +251,31 @@ impl Vif {
 
     /// Start a microprogram (MSCAL/MSCALF at `addr`, MSCNT at u32::MAX)
     /// and run it to completion. VU1 output goes to the GS (PATH1).
-    fn mscal(&mut self, m: &mut Memory, unit: usize, addr: u32) {
-        if unit == 0 {
+    fn mscal(&mut self, t: &mut Target, io: &mut dyn VifIo, addr: u32) {
+        let Some((vu1, cache, programs)) = t.vu1.as_mut() else {
             // VU0 registers live in the CPU; VIF0-started programs are rare.
-            m.io.warn_once("VIF0: MSCAL to VU0 is not supported yet");
+            io.warn_once("VIF0: MSCAL to VU0 is not supported yet");
             return;
-        }
-        let Memory { vu1, vu1_code, vu1_data, vu_cache, vu_code_gen, vu_programs, .. } = m;
+        };
         let start = if addr == u32::MAX { vu1.tpc } else { addr / 8 };
         VU1_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        vu_cache[1].sync(vu_code_gen[1], vu1_code.len() / 8);
-        let env = crate::vumicro::Env { code: vu1_code, data: vu1_data, top: self.tops, itop: self.itop, kick: Some(&mut self.gif) };
-        crate::vumicro::run(vu1, env, &mut vu_cache[1], 1, vu_programs, start);
+        cache.sync(*t.code_gen, t.code.len() / 8);
+        let env = crate::vumicro::Env { code: t.code, data: t.data, top: self.tops, itop: self.itop, kick: Some(&mut self.gif) };
+        crate::vumicro::run(vu1, env, cache, 1, programs, start);
     }
 
-    fn data(&mut self, m: &mut Memory, unit: usize, w: u32) {
+    fn data(&mut self, t: &mut Target, w: u32) {
         match self.cmd {
             0x20 => self.mask = w,
             0x30 | 0x31 => self.buf.push(w),
             0x4a => {
-                let code = if unit == 0 { &mut m.vu0_code } else { &mut m.vu1_code };
+                let code = &mut *t.code;
                 let a = (self.mpg_addr as usize) % code.len();
                 // Games re-upload the same microcode constantly; only a real
                 // change invalidates decoded and recompiled programs.
                 if code[a..a + 4] != w.to_le_bytes() {
                     code[a..a + 4].copy_from_slice(&w.to_le_bytes());
-                    m.vu_code_gen[unit] += 1;
+                    *t.code_gen += 1;
                 }
                 self.mpg_addr += 4;
             }
@@ -253,21 +287,21 @@ impl Vif {
                     self.buf.clear();
                 }
             }
-            0x60..=0x7f => self.unpack_word(m, unit, w),
+            0x60..=0x7f => self.unpack_word(t, w),
             _ => {}
         }
     }
 
-    fn end(&mut self, m: &mut Memory, _unit: usize) {
+    fn end(&mut self) {
         match self.cmd {
             0x30 => self.row.copy_from_slice(&self.buf),
             0x31 => self.col.copy_from_slice(&self.buf),
-            0x50 | 0x51 => self.flush_direct(m),
+            0x50 | 0x51 => self.flush_direct(),
             _ => {}
         }
     }
 
-    fn flush_direct(&mut self, _m: &mut Memory) {
+    fn flush_direct(&mut self) {
         self.gif.append(&mut self.direct);
     }
 
@@ -312,7 +346,7 @@ impl Vif {
     /// UNPACK data words. Whole elements starting on a word boundary are
     /// decoded in bulk when no addition mode or fill applies; the rest
     /// goes through `unpack_word`.
-    fn unpack_words(&mut self, m: &mut Memory, unit: usize, ws: &[u32]) {
+    fn unpack_words(&mut self, t: &mut Target, ws: &[u32]) {
         let (vn, vl) = self.unpack_format();
         let eb = self.element_bits() as usize;
         let masked = self.cmd & 0x10 != 0;
@@ -349,7 +383,7 @@ impl Vif {
                     }
                 }
             }
-            let data = if unit == 0 { &mut m.vu0_data } else { &mut m.vu1_data };
+            let data = &mut *t.data;
             let at = BulkAt { done: self.unpack_done, addr: self.unpack_addr, cl, wl };
             macro_rules! go {
                 ($vn:literal, $bits:literal, $usn:literal) => {
@@ -384,11 +418,11 @@ impl Vif {
             used = (k * eb).div_ceil(32);
         }
         for &w in &ws[used..] {
-            self.unpack_word(m, unit, w);
+            self.unpack_word(t, w);
         }
     }
 
-    fn unpack_word(&mut self, m: &mut Memory, unit: usize, w: u32) {
+    fn unpack_word(&mut self, t: &mut Target, w: u32) {
         self.unpack_bits |= (w as u128) << self.unpack_nbits;
         self.unpack_nbits += 32;
         let eb = self.element_bits();
@@ -396,17 +430,17 @@ impl Vif {
             let e = if eb == 128 { self.unpack_bits } else { self.unpack_bits & ((1u128 << eb) - 1) };
             self.unpack_bits = if eb == 128 { 0 } else { self.unpack_bits >> eb };
             self.unpack_nbits -= eb;
-            self.write_element(m, unit, Some(e));
+            self.write_element(t, Some(e));
             // Fill mode: after CL data writes, WL-CL filler writes.
             let (cl, wl) = (self.cl.max(1), self.wl.max(1));
             while wl > cl && self.unpack_cycle >= cl && self.unpack_cycle < wl && self.unpack_done < self.unpack_target {
-                self.write_element(m, unit, None);
+                self.write_element(t, None);
             }
         }
     }
 
     /// Write one unpacked qword (or a filler when `e` is None).
-    fn write_element(&mut self, m: &mut Memory, unit: usize, e: Option<u128>) {
+    fn write_element(&mut self, t: &mut Target, e: Option<u128>) {
         let (vn, vl) = self.unpack_format();
         let usn = self.code & 0x4000 != 0;
         let masked = self.cmd & 0x10 != 0;
@@ -430,7 +464,7 @@ impl Vif {
             }
         }
         let addr = self.unpack_addr + self.unpack_done_offset();
-        let data = if unit == 0 { &mut m.vu0_data } else { &mut m.vu1_data };
+        let data = &mut *t.data;
         let qwords = data.len() / 16;
         let base = (addr as usize % qwords) * 16;
         for (n, x) in v.iter().enumerate() {
@@ -536,11 +570,17 @@ mod tests {
     use super::*;
 
     /// Run VIF1 words through the parser and return VU1 data qword `q`.
+    /// Output and warnings dropped.
+    struct NoIo;
+    impl VifIo for NoIo {
+        fn send_gif(&mut self, _: Vec<u128>) {}
+        fn warn_once(&mut self, _: &str) {}
+    }
+
     fn unpack(words: &[u32], q: usize) -> [u32; 4] {
-        let mut m = Memory::new();
-        let mut vif = Vif::default();
-        vif.run(&mut m, 1, words);
-        std::array::from_fn(|n| u32::from_le_bytes(m.vu1_data[q * 16 + n * 4..q * 16 + n * 4 + 4].try_into().unwrap()))
+        let mut u = crate::vu1::Unit::new();
+        u.run(words, &mut NoIo);
+        std::array::from_fn(|n| u32::from_le_bytes(u.data[q * 16 + n * 4..q * 16 + n * 4 + 4].try_into().unwrap()))
     }
 
     #[test]
@@ -577,16 +617,14 @@ mod tests {
                         let mk = if mask != 0 { 0x10 } else { 0 };
                         w.extend([wl << 8 | cl | 0x0100_0000, (0x60 | mk | fmt) << 24 | num << 16 | usn | 3]);
                         w.extend((0..n).map(|k| 0x8f3a_c561u32.wrapping_mul(k + 1).rotate_left(k)));
-                        let mut bulk = Memory::new();
-                        let mut vif = Vif::default();
-                        vif.run(&mut bulk, 1, &w);
-                        let mut single = Memory::new();
-                        let mut vif = Vif::default();
+                        let mut bulk = crate::vu1::Unit::new();
+                        bulk.run(&w, &mut NoIo);
+                        let mut single = crate::vu1::Unit::new();
                         for x in &w {
-                            vif.run(&mut single, 1, std::slice::from_ref(x));
+                            single.run(std::slice::from_ref(x), &mut NoIo);
                         }
-                        assert!(bulk.vu1_data.iter().any(|&b| b != 0));
-                        assert!(bulk.vu1_data == single.vu1_data, "format {fmt:#x} usn {usn:#x} cl {cl} wl {wl} mask {mask:#x}");
+                        assert!(bulk.data.iter().any(|&b| b != 0));
+                        assert!(bulk.data == single.data, "format {fmt:#x} usn {usn:#x} cl {cl} wl {wl} mask {mask:#x}");
                     }
                 }
             }

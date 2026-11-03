@@ -414,6 +414,7 @@ Debugging switches (environment variables):
 | `FREEK_AUDIO_LOG`    | Log each audio device callback and the queue depth |
 | `FREEK_VU_INTERP`    | Interpret all VU microcode (to tell recompiler bugs from VU semantics bugs) |
 | `FREEK_VU_CHECK`     | Check every compiled VU program against the interpreter |
+| `FREEK_MTVU=0`       | Run VIF1 and VU1 on the game thread instead of their own thread |
 | `FREEK_VU_DUMP=dir`  | Record VU programs, entry points and jump targets for compiling |
 | `FREEK_VU_MISS`      | List VU entry points that have no compiled code |
 | `FREEK_VU_TOP`       | Periodically list the most-run VU microprogram entry points |
