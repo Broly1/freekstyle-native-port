@@ -322,7 +322,8 @@ once per command block.
 The driver asks for 22,050 Hz, but the SPU2 pitch register rounds that to
 22,043 Hz, so emulated music plays 0.03% slow.
 
-`crates/ps2-iop/src/native.rs` implements this behind FREEK_AUDIO=native.
+`crates/ps2-iop/src/native.rs` implements this. It is the default;
+FREEK_AUDIO=emulated runs the original driver on the emulated IOP and SPU2.
 
 ## Sound effects
 
@@ -448,3 +449,6 @@ audio went over full scale 1933 times; the game decodes movies to 16-bit
 surrounding audio and leaves headroom before encoding. Some clicks remain:
 on loud hits the original encoder fell back to unpredicted 4-bit frames
 (2.0 s and 21.7 s are the clearest), and those are on the disc.
+
+`flm2mkv` turns any soundtrack peaking above 23000 down to that level, so
+every converted movie keeps that headroom.

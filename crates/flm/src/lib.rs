@@ -92,6 +92,25 @@ impl Vag {
     }
 }
 
+/// Highest peak a movie soundtrack keeps, about 3 dB below full scale.
+/// Opus overshoots hot, clipped audio by up to about 20%, and the game
+/// decodes movies to 16-bit, so anything over full scale would crackle.
+pub const PEAK: i32 = 23_000;
+
+/// Turns `pcm` down so its peak is at most `PEAK`; returns the gain used
+/// (1.0 when it was already quiet enough).
+pub fn headroom(pcm: &mut [i16]) -> f32 {
+    let peak = pcm.iter().map(|s| (*s as i32).abs()).max().unwrap_or(0);
+    if peak <= PEAK {
+        return 1.0;
+    }
+    let gain = PEAK as f32 / peak as f32;
+    for s in pcm.iter_mut() {
+        *s = (*s as f32 * gain).round() as i16;
+    }
+    gain
+}
+
 /// A 16-bit stereo WAV file.
 pub fn wav(pcm: &[i16], rate: u32) -> Vec<u8> {
     let bytes = (pcm.len() * 2) as u32;
@@ -132,6 +151,17 @@ mod tests {
         let mut f = [0u8; 16];
         f[0] = 0x1c;
         assert_eq!(v.decode(&f)[0], 600);
+    }
+
+    #[test]
+    fn headroom_only_turns_down_hot_audio() {
+        let mut quiet = vec![1000i16, -20000, 22000];
+        assert_eq!(headroom(&mut quiet), 1.0);
+        assert_eq!(quiet, [1000, -20000, 22000]);
+        let mut hot = vec![i16::MIN, 16384, i16::MAX];
+        let gain = headroom(&mut hot);
+        assert!((gain - PEAK as f32 / 32768.0).abs() < 1e-6);
+        assert_eq!(hot.iter().map(|s| (*s as i32).abs()).max().unwrap(), PEAK);
     }
 
     #[test]

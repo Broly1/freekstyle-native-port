@@ -28,7 +28,7 @@ go in `game/`, which git ignores.
 | `ee-runtime` | partial | CPU state, memory map, MMI/FPU/VU0 helpers, HLE kernel, vblank + interrupt delivery, SPR DMA, SIF RPC layer |
 | `freekstyle` | boots   | The game binary: generated code + runtime, with a hang watchdog |
 | IOP services | partial | CD/DVD from the disc image; padman (controller frames each vblank, two ports); saves as files instead of memory cards |
-| `ps2-iop`    | working | Sound: the game's own IOP driver (EA's AUDIO.IRX on Sony's LIBSD.IRX) runs on an R3000 interpreter over a native IOP kernel (threads, interrupts, SIF commands), with an SPU2 (ADPCM voices, ADSR, DMA) feeding the host audio device at 48 kHz |
+| `ps2-iop`    | working | Sound: a native engine answers the game's sound commands (music, effects, voice-overs, bikes, reverb) at 48 kHz. With `FREEK_AUDIO=emulated`, the game's own IOP driver (EA's AUDIO.IRX on Sony's LIBSD.IRX) runs instead on an R3000 interpreter over a native IOP kernel, with an emulated SPU2 |
 | `gs`         | working | GS core: registers, GIF PACKED/REGLIST/IMAGE, 4 MB VRAM with all swizzled formats (verified against hardware tables), transfers, CLUT, primitive assembly |
 | `gs-vulkan`  | working | Vulkan renderer: render targets at N x resolution (3x 1080p, 5x 4K), GS blend modes, texture cache, display output, screenshots |
 | VU0/VU1      | working | VIF unpack/MPG/DIRECT, VU micro-mode interpreter with pipeline timing (Q/P latency, flag delay, hazard stalls); recorded programs are compiled to native SSE code from `freekstyle/vu_dumps` (see below) |
@@ -282,7 +282,7 @@ Debugging switches (environment variables):
 | `FREEK_SHOT=f.png:N` | Save the displayed frame N at internal resolution |
 | `FREEK_SHOT_EVERY=K` | With `FREEK_SHOT`, save every K frames from N on |
 | `FREEK_PAD_SCRIPT`   | Scripted taps, e.g. `300:start,600:a+down,900-1500:a,1000:p2+a` (Xbox names; a range holds; `p2` is player 2's pad, which plugs it in) |
-| `FREEK_AUDIO=native` | Native sound engine instead of the emulated IOP and SPU2. Music, sound effects, voice-overs, bikes and reverb |
+| `FREEK_AUDIO=emulated` | Run the game's own sound driver on the emulated IOP and SPU2 instead of the native sound engine (the default) |
 | `FREEK_DUMP_TEXTURES=dir` | Write every decoded texture as PNG |
 | `IOP_TRACE=1` / `=2` | Log SIF traffic and SPU2 state each second / also every IOP kernel call |
 | `IOP_WAV=out.wav`    | Record the sound output |
@@ -310,14 +310,11 @@ frame that misses one vblank waits for the next, and emulating VU1 and the
 VIF used to cost about 20 ms a frame. `--headless` prints the frame rate.)
 
 Temporarily skipped:
-- Intro movies (`.FLM`): movie open/play/close are no-ops.
-- SPU2 reverb, noise and pitch modulation, so sound is drier than the
-  original.
+- With `FREEK_AUDIO=emulated`: SPU2 reverb, noise and pitch modulation, so
+  that mode is drier than the original. The native engine (the default)
+  has reverb.
 
-Next steps, in order:
-1. Movies: the `.mkv` conversions played in game (or the IPU's movie
-   commands).
-2. SPU2 reverb.
+Open sound items are listed at the end of `docs/native-audio.md`.
 
 ## Analysis results (SLUS_203.67, sha256 debcb4b0…6d80a)
 

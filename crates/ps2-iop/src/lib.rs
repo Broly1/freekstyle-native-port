@@ -426,7 +426,7 @@ pub fn spawn(link: Arc<Link>, ring: Arc<AudioRing>, latency: usize) -> std::thre
     std::thread::Builder::new()
         .name("iop".into())
         .spawn(move || {
-            // FREEK_AUDIO=native: no emulated IOP (see `native`).
+            // Native sound unless FREEK_AUDIO=emulated (see `native`).
             let mut render: Box<dyn FnMut(usize, &mut Vec<[i16; 2]>)> = if native::enabled() {
                 let mut n = native::Native::new(link);
                 let mut reported = 0;

@@ -5,6 +5,10 @@
 //! Needs ffmpeg with libvpx-vp9 and libopus on PATH (and libplacebo with a
 //! Vulkan GPU for --crt).
 //!
+//! Hot soundtracks are turned down to leave headroom for the Opus encoder
+//! (see `flm::headroom`); clicks already on the disc are left alone
+//! (tools/movie_declick.py repairs those).
+//!
 //! Interlaced movies (the intro is 60-field video; the logos are
 //! progressive) are deinterlaced to 59.94 frames a second, one per field,
 //! so motion stays as smooth as on a TV. `--height` upscales to that many
@@ -55,7 +59,9 @@ fn convert(src: &Path, out_dir: &Path, height: Option<u32>, crt: bool) -> Result
     fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
     let (m2v, wav) = (tmp.join("video.m2v"), tmp.join("audio.wav"));
     fs::write(&m2v, &movie.video).map_err(|e| e.to_string())?;
-    fs::write(&wav, flm::wav(&movie.audio, flm::AUDIO_RATE)).map_err(|e| e.to_string())?;
+    let mut audio = movie.audio.clone();
+    let gain = flm::headroom(&mut audio);
+    fs::write(&wav, flm::wav(&audio, flm::AUDIO_RATE)).map_err(|e| e.to_string())?;
     let out = out_dir.join(format!("{stem}.mkv"));
     let (num, den) = flm::VIDEO_FPS;
     let rate = format!("{num}/{den}");
@@ -110,6 +116,7 @@ fn convert(src: &Path, out_dir: &Path, height: Option<u32>, crt: bool) -> Result
     let secs = movie.audio.len() as f64 / 2.0 / flm::AUDIO_RATE as f64;
     let kind = if fields.is_some() { "interlaced, deinterlaced to 59.94 fps" } else { "progressive" };
     let kind = if crt { format!("{kind}, CRT look") } else { kind.to_string() };
+    let kind = if gain < 1.0 { format!("{kind}, audio {:.1} dB for headroom", 20.0 * gain.log10()) } else { kind };
     eprintln!("{} -> {} ({secs:.1} s, {kind})", src.display(), out.display());
     Ok(out)
 }

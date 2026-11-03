@@ -1,5 +1,6 @@
 //! Native sound: answers the game's sound protocol directly, with no
-//! emulated IOP or SPU2. Enabled with FREEK_AUDIO=native.
+//! emulated IOP or SPU2. The default; FREEK_AUDIO=emulated runs the
+//! game's own driver on the emulated IOP and SPU2 instead.
 //!
 //! This file holds the protocol and music; `sfx` plays sound effects. The
 //! protocol and data formats are described in docs/native-audio.md.
@@ -443,9 +444,9 @@ impl Native {
     }
 }
 
-/// Whether FREEK_AUDIO asks for the native engine.
+/// Native unless FREEK_AUDIO=emulated asks for the emulated IOP and SPU2.
 pub fn enabled() -> bool {
-    std::env::var("FREEK_AUDIO").is_ok_and(|v| v == "native")
+    std::env::var("FREEK_AUDIO").map_or(true, |v| v != "emulated")
 }
 
 #[cfg(test)]
