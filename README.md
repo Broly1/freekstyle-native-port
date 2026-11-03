@@ -255,7 +255,7 @@ Python's Pillow and numpy, ffmpeg and unzip:
 ```sh
 sudo pacman -S --needed python-pillow python-numpy ffmpeg unzip   # Arch, Manjaro
 sudo apt install python3-pil python3-numpy ffmpeg unzip           # Debian, Ubuntu, Mint
-sudo dnf install python3-pillow python3-numpy ffmpeg unzip        # Fedora (ffmpeg from RPM Fusion)
+sudo dnf install python3-pillow python3-numpy ffmpeg unzip        # Fedora (ffmpeg-free is enough)
 sudo zypper install python3-Pillow python3-numpy ffmpeg unzip     # openSUSE
 ```
 
