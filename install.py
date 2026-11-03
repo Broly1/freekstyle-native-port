@@ -134,6 +134,10 @@ MESSAGES = {
                  "pulado: este ffmpeg não decodifica os vídeos (MPEG-2), então o jogo os pula. Instale um ffmpeg completo e rode de novo.",
                  "omitido: este ffmpeg no decodifica los vídeos (MPEG-2), así que el juego los omite. Instala un ffmpeg completo y vuelve a ejecutarlo.",
                  "ignoré : ce ffmpeg ne décode pas les vidéos (MPEG-2), le jeu les saute donc. Installez un ffmpeg complet, puis relancez."),
+    "movie_audio": ("turned down %d movie soundtrack(s) that went over full volume (they crackled)",
+                    "%d trilha(s) de vídeo que passavam do volume máximo (estalavam) foram abaixadas",
+                    "se bajó el volumen de %d banda(s) sonora(s) de vídeo que superaban el máximo (crujían)",
+                    "%d bande(s) son de vidéo qui dépassaient le volume maximal (grésillaient) ont été baissées"),
     "crt": ("with the CRT look", "com o visual CRT", "con aspecto CRT", "avec le rendu CRT"),
     "no_crt": ("CRT look unavailable (needs ffmpeg with libplacebo and a GPU); converting the movies without it",
                "visual CRT indisponível (precisa de ffmpeg com libplacebo e uma GPU); convertendo os vídeos sem ele",
@@ -338,6 +342,18 @@ def ffmpeg_mpeg2():
     """The movies are MPEG-2, which some ffmpeg builds (Fedora's
     ffmpeg-free) leave out."""
     return re.search(r"^ V.{5} mpeg2video ", output(["ffmpeg", "-hide_banner", "-decoders"]), re.M) is not None
+
+def movie_peak(path):
+    """Highest sample of a movie's soundtrack in dB (0 is full scale), or
+    None if ffmpeg can't tell."""
+    try:
+        err = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-vn", "-af",
+                              "aformat=sample_fmts=flt,astats=measure_perchannel=none:measure_overall=Peak_level",
+                              "-f", "null", "-"], capture_output=True, text=True).stderr
+    except OSError:
+        return None
+    found = re.findall(r"Peak level dB: (-?[0-9.]+|-inf)", err)
+    return float(found[-1]) if found and found[-1] != "-inf" else None
 
 def pkg_installed(family, pkg):
     if family == "arch":
@@ -566,6 +582,7 @@ class Installer:
             return
         if (movies / "hd" / "intro.mkv").is_file() or (movies / "intro.mkv").is_file():
             self.ui.good(t("already"))
+            self.movie_headroom(movies)
             return
         if not ffmpeg_mpeg2():
             self.ui.warn(t("no_mpeg2"))
@@ -581,6 +598,28 @@ class Installer:
             made = [p for p in [flm, movies / "hd"] + list(movies.glob("*.mkv")) if p.exists() and p not in before]
             made += [p for p in movies.glob("hd/*.mkv") if p not in before and (movies / "hd") in before]
             self.record("files", [str(p.relative_to(ROOT)) for p in made])
+
+    def movie_headroom(self, movies):
+        """Movies converted before flm2mkv left headroom go over full scale
+        after Opus encoding, and the game's 16-bit decode clips that into a
+        crackle. Re-encode just their audio about 3 dB lower; the video is
+        copied untouched, so hand-made movies keep their picture."""
+        fixed = 0
+        for mkv in sorted(movies.glob("*.mkv")) + sorted(movies.glob("hd/*.mkv")):
+            peak = movie_peak(mkv)
+            if peak is None or peak < -0.1:
+                continue
+            tmp = mkv.with_name(mkv.stem + ".headroom.mkv")
+            ok = self.ui.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", mkv, "-map", "0", "-c", "copy",
+                              "-af", "volume=%.2fdB" % (-3.0 - peak), "-c:a", "libopus", "-b:a", "160k", tmp],
+                             quiet=True, check=False)
+            if ok and tmp.is_file():
+                os.replace(tmp, mkv)
+                fixed += 1
+            else:
+                tmp.unlink(missing_ok=True)
+        if fixed:
+            self.ui.good(t("movie_audio") % fixed)
 
     def convert_movies(self, movies, flm):
         for m in MOVIES:

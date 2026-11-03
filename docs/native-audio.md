@@ -451,4 +451,6 @@ on loud hits the original encoder fell back to unpredicted 4-bit frames
 (2.0 s and 21.7 s are the clearest), and those are on the disc.
 
 `flm2mkv` turns any soundtrack peaking above 23000 down to that level, so
-every converted movie keeps that headroom.
+every converted movie keeps that headroom. `install.py` also checks movies converted
+before that: any soundtrack reaching full scale has its audio re-encoded
+about 3 dB lower, with the video copied as it is.
