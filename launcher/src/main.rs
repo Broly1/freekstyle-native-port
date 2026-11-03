@@ -406,6 +406,12 @@ impl Launcher {
                 ui.label(t.sound);
                 ui.checkbox(&mut c.mute, t.mute);
                 ui.end_row();
+                ui.label(t.audio_engine);
+                ui.vertical(|ui| {
+                    ui.radio_value(&mut c.emulated_audio, false, t.enhanced_audio);
+                    ui.radio_value(&mut c.emulated_audio, true, t.emulated_audio);
+                });
+                ui.end_row();
                 ui.label(t.button_icons);
                 ui.checkbox(&mut c.ps2_icons, t.ps2_icons_hint);
                 ui.end_row();

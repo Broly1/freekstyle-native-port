@@ -444,9 +444,21 @@ impl Native {
     }
 }
 
-/// Native unless FREEK_AUDIO=emulated asks for the emulated IOP and SPU2.
+static EMULATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The launcher's sound choice: true runs the emulated IOP and SPU2.
+pub fn set_emulated(on: bool) {
+    EMULATED.store(on, Ordering::Relaxed);
+}
+
+/// Native unless the setting asks for the emulated IOP and SPU2.
+/// FREEK_AUDIO=native or =emulated overrides the setting.
 pub fn enabled() -> bool {
-    std::env::var("FREEK_AUDIO").map_or(true, |v| v != "emulated")
+    match std::env::var("FREEK_AUDIO").as_deref() {
+        Ok("emulated") => false,
+        Ok("native") => true,
+        _ => !EMULATED.load(Ordering::Relaxed),
+    }
 }
 
 #[cfg(test)]

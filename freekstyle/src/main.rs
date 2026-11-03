@@ -69,6 +69,7 @@ struct Options {
     sharp_textures: bool,
     hd_textures: bool,
     mute: bool,
+    emulated_audio: bool,
     keyboard_player: u32,
     bindings: Vec<freek_config::Binding>,
 }
@@ -96,6 +97,7 @@ fn options() -> Options {
         sharp_textures: c.sharp_textures,
         hd_textures: c.hd_textures,
         mute: c.mute,
+        emulated_audio: c.emulated_audio,
         keyboard_player: c.keyboard_player,
         bindings: c.bindings,
     };
@@ -124,6 +126,7 @@ fn options() -> Options {
             "--no-sharp-textures" => o.sharp_textures = false,
             "--no-hd-textures" => o.hd_textures = false,
             "--mute" => o.mute = true,
+            "--emulated-audio" => o.emulated_audio = true,
             _ if a.starts_with("--") => {
                 eprintln!("unknown option {a}");
                 process::exit(2);
@@ -168,6 +171,7 @@ fn main() {
     // audio device.
     let link = std::sync::Arc::new(ps2_iop::Link::default());
     let ring = std::sync::Arc::new(ps2_iop::AudioRing::default());
+    ps2_iop::native::set_emulated(opts.emulated_audio);
     ps2_iop::spawn(link.clone(), ring.clone(), audio::LATENCY);
     audio::start(ring, opts.mute);
 

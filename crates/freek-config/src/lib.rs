@@ -62,6 +62,9 @@ pub struct Config {
     /// Draw HD replacements from `game/textures/hd` when there are any.
     pub hd_textures: bool,
     pub mute: bool,
+    /// Run the game's own sound driver on the emulated IOP and SPU2 instead
+    /// of the enhanced native sound engine.
+    pub emulated_audio: bool,
     /// Launcher language: "en", "pt-BR", "es", "fr"; empty follows the system.
     pub language: String,
     /// The player the keyboard controls, 1 or 2. Gamepads take player 1
@@ -149,6 +152,7 @@ impl Default for Config {
             sharp_textures: true,
             hd_textures: true,
             mute: false,
+            emulated_audio: false,
             language: String::new(),
             keyboard_player: 1,
             bindings: default_bindings(),
