@@ -282,6 +282,7 @@ Debugging switches (environment variables):
 | `FREEK_SHOT=f.png:N` | Save the displayed frame N at internal resolution |
 | `FREEK_SHOT_EVERY=K` | With `FREEK_SHOT`, save every K frames from N on |
 | `FREEK_PAD_SCRIPT`   | Scripted taps, e.g. `300:start,600:a+down,900-1500:a,1000:p2+a` (Xbox names; a range holds; `p2` is player 2's pad, which plugs it in) |
+| `FREEK_AUDIO=native` | Native sound engine instead of the emulated IOP and SPU2. Music, sound effects, voice-overs, bikes and reverb |
 | `FREEK_DUMP_TEXTURES=dir` | Write every decoded texture as PNG |
 | `IOP_TRACE=1` / `=2` | Log SIF traffic and SPU2 state each second / also every IOP kernel call |
 | `IOP_WAV=out.wav`    | Record the sound output |

@@ -185,8 +185,12 @@ impl Spu2 {
             reg::KOFF | 0x1a6 => {
                 let bits = if r == reg::KOFF { v as u32 } else { (v as u32 & 0xff) << 16 };
                 for vi in 0..24 {
-                    if bits & (1 << vi) != 0 && self.cores[c].voices[vi].phase != Phase::Off {
-                        self.cores[c].voices[vi].phase = Phase::Release;
+                    let voice = &mut self.cores[c].voices[vi];
+                    if bits & (1 << vi) != 0 && voice.phase != Phase::Off {
+                        voice.phase = Phase::Release;
+                        // The slow sustain rate leaves a wait of up to 2^20
+                        // samples; release must not sit it out.
+                        voice.wait = 0;
                     }
                 }
             }
@@ -225,7 +229,8 @@ impl Spu2 {
             self.keyons += 1;
             let ssa = self.pair(base + reg::VADDR + vi as u32 * 12);
             let v = &mut self.cores[c].voices[vi];
-            *v = Voice { next: ssa, lsa: ssa, phase: Phase::Attack, ..Voice::default() };
+            // Key on leaves the loop address alone: it is often set first.
+            *v = Voice { next: ssa, lsa: v.lsa, phase: Phase::Attack, ..Voice::default() };
             let endx = base + reg::ENDX + if vi >= 16 { 2 } else { 0 };
             let e = self.get(endx) & !(1 << (vi % 16));
             self.set(endx, e);
@@ -348,7 +353,7 @@ impl Spu2 {
         match v.phase {
             Phase::Attack if v.level >= 0x7fff => v.phase = Phase::Decay,
             Phase::Decay if v.level <= sustain => v.phase = Phase::Sustain,
-            Phase::Release if v.level == 0 => v.phase = Phase::Off,
+            Phase::Sustain | Phase::Release if v.level == 0 => v.phase = Phase::Off,
             _ => {}
         }
     }
@@ -508,6 +513,38 @@ mod tests {
             s.tick();
         }
         assert_eq!(s.read(0xa), 0, "ENVX after release");
+    }
+
+    #[test]
+    fn key_off_during_slow_sustain_releases_at_once() {
+        let mut s = Spu2::new();
+        setup_voice(&mut s);
+        // Sustain rate 0x7f (steps 2^20 samples apart), fast release.
+        s.write(0x8, 0x5fc5);
+        for _ in 0..2000 {
+            s.tick();
+        }
+        assert!(s.read(0xa) > 0x1000, "still sustaining");
+        s.write(0x1a4, 1);
+        for _ in 0..2000 {
+            s.tick();
+        }
+        assert_eq!(s.read(0xa), 0, "ENVX soon after key off");
+    }
+
+    #[test]
+    fn key_on_keeps_loop_address() {
+        let mut s = Spu2::new();
+        setup_voice(&mut s);
+        // Block without a loop-start flag, ending and repeating.
+        s.ram[0x2000] = 0x0300;
+        s.write(0x1c0 + 2, 0x2000); // SSA
+        s.write(0x1c0 + 6, 0x3000); // LSA
+        s.write(0x1a0, 1);
+        for _ in 0..40 {
+            s.tick();
+        }
+        assert_eq!(s.cores[0].voices[0].next, 0x3008, "looped to LSA");
     }
 
     #[test]

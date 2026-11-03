@@ -10,6 +10,9 @@
 pub mod cpu;
 pub mod irx;
 mod kernel;
+pub mod native;
+mod reverb;
+mod sfx;
 pub mod spu2;
 
 use std::collections::VecDeque;
@@ -423,7 +426,27 @@ pub fn spawn(link: Arc<Link>, ring: Arc<AudioRing>, latency: usize) -> std::thre
     std::thread::Builder::new()
         .name("iop".into())
         .spawn(move || {
-            let mut m = Machine::new(link);
+            // FREEK_AUDIO=native: no emulated IOP (see `native`).
+            let mut render: Box<dyn FnMut(usize, &mut Vec<[i16; 2]>)> = if native::enabled() {
+                let mut n = native::Native::new(link);
+                let mut reported = 0;
+                let mut seen = (0, 0);
+                Box::new(move |count, out| {
+                    n.render(count, out);
+                    let (banks, categories, _) = n.sfx_counts();
+                    if (banks, categories) != seen {
+                        seen = (banks, categories);
+                        eprintln!("[audio] {banks} sound banks, {categories} categories");
+                    }
+                    if n.underruns() != reported {
+                        reported = n.underruns();
+                        eprintln!("[audio] music ran out of data ({reported} times)");
+                    }
+                })
+            } else {
+                let mut m = Machine::new(link);
+                Box::new(move |count, out| m.render(count, out))
+            };
             let mut chunk = Vec::with_capacity(64);
             // IOP_WAV=path: also record the output (debugging aid).
             let mut wav = std::env::var_os("IOP_WAV").map(|p| (p, Vec::<[i16; 2]>::new()));
@@ -432,7 +455,7 @@ pub fn spawn(link: Arc<Link>, ring: Arc<AudioRing>, latency: usize) -> std::thre
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 chunk.clear();
-                m.render(48, &mut chunk);
+                render(48, &mut chunk);
                 ring.buf.lock().unwrap().extend(chunk.iter().copied());
                 if let Some((path, rec)) = wav.as_mut() {
                     rec.extend_from_slice(&chunk);
