@@ -360,6 +360,10 @@ pub struct Stats {
     pub batches: u64,
     pub texture_uploads: u64,
     pub target_uploads: u64,
+    /// Copies of a render target taken so a draw can sample it, and their
+    /// total size in pixels.
+    pub snapshots: u64,
+    pub snapshot_pixels: u64,
 }
 
 impl Hw {
@@ -892,7 +896,8 @@ impl Hw {
                     .dst_offset(off)
                     .extent(vk::Extent3D { width: (x1 - x0) as u32, height: (y1 - y0) as u32, depth: 1 });
                 unsafe { self.vk.device.cmd_copy_image(self.cmd(), t.color.image, vk::ImageLayout::GENERAL, t.snapshot.as_ref().unwrap().image, vk::ImageLayout::GENERAL, &[copy]) };
-                barrier(&self.vk.device, self.cmd());
+                barrier(&self.vk.device, self.cmd());                self.stats.snapshots += 1;
+                self.stats.snapshot_pixels += ((x1 - x0) * (y1 - y0)) as u64;
             }
         }
         Ok(self.targets[&bp].snapshot.as_ref().unwrap().view)
@@ -920,6 +925,8 @@ impl Hw {
                         .extent(vk::Extent3D { width: t.color.extent.width, height: t.color.extent.height, depth: 1 });
                     unsafe { self.vk.device.cmd_copy_image(self.cmd(), t.color.image, vk::ImageLayout::GENERAL, snap.image, vk::ImageLayout::GENERAL, &[copy]) };
                     barrier(&self.vk.device, self.cmd());
+                    self.stats.snapshots += 1;
+                    self.stats.snapshot_pixels += (t.color.extent.width * t.color.extent.height) as u64;
                     self.targets.get_mut(&bp).unwrap().snapshot_valid = true;
                     if let Some(b) = was {
                         self.begin_rendering(b);
