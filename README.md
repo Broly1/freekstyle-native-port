@@ -419,6 +419,8 @@ Debugging switches (environment variables):
 | `FREEK_VU_TOP`       | Periodically list the most-run VU microprogram entry points |
 | `FREEK_RECORD=out.mkv:V:S` | Record S seconds of video from vblank V (needs ffmpeg) |
 | `FREEK_FRAME_GAPS`   | Report hitches: long gaps between game frames, slow presents |
+| `FREEK_GS_RECORD=file` / `FREEK_GS_REPLAY=file` | Save everything the game sends the renderer / draw a saved stream instead of running the game. A replay draws the same frames every run, so `FREEK_SHOT` pictures from two builds can be compared byte for byte (recordings grow by up to ~180 MB per second) |
+| `FREEK_DRAW_CHECK`   | Work out every draw the renderer takes a shortcut on in full again, and report differences |
 
 When guest code calls an address the analyzer missed, the runtime says so.
 Add the address to `freekstyle/seeds.txt` and regenerate.

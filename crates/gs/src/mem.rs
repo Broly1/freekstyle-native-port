@@ -151,6 +151,9 @@ pub struct Vram {
     data: Box<[u8]>,
     /// Write generation per page, for cache invalidation.
     pub page_gen: Box<[u32]>,
+    /// Pixels written so far: lets renderers skip per-page checks while
+    /// nothing has been written.
+    writes: u64,
 }
 
 impl Default for Vram {
@@ -161,7 +164,7 @@ impl Default for Vram {
 
 impl Vram {
     pub fn new() -> Vram {
-        Vram { data: vec![0; VRAM_SIZE].into_boxed_slice(), page_gen: vec![0; PAGES].into_boxed_slice() }
+        Vram { data: vec![0; VRAM_SIZE].into_boxed_slice(), page_gen: vec![0; PAGES].into_boxed_slice(), writes: 0 }
     }
 
     fn r32(&self, word: u32) -> u32 {
@@ -207,8 +210,14 @@ impl Vram {
         }
     }
 
+    /// Pixels written so far.
+    pub fn writes(&self) -> u64 {
+        self.writes
+    }
+
     /// Write one pixel, preserving bits the format does not own.
     pub fn write(&mut self, psm: Psm, bp: u32, bw: u32, x: u32, y: u32, v: u32) {
+        self.writes += 1;
         match psm {
             Psm::Ct32 | Psm::Z32 => self.w32(addr32(bp, bw, x, y, psm == Psm::Z32), v),
             Psm::Ct24 | Psm::Z24 => {

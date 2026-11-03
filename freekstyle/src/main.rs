@@ -34,6 +34,7 @@
 //! The disc image (raw .bin or .iso) defaults to game/Freekstyle.bin.
 
 mod audio;
+mod gsrec;
 mod profile;
 #[allow(clippy::all)]
 mod gen;
@@ -178,6 +179,8 @@ fn main() {
     // Converted pictures live next to the disc image (see lsc2png).
     let images_dir = std::path::Path::new(&opts.disc).parent().unwrap_or(std::path::Path::new(".")).join("images");
     let (gs_tx, gs_rx) = std::sync::mpsc::channel();
+    let replay = env::var("FREEK_GS_REPLAY").ok();
+    if replay.is_none() {
     thread::Builder::new()
         .name("ee-main".into())
         .stack_size(STACK_SIZE)
@@ -202,6 +205,12 @@ fn main() {
         })
         .expect("spawn EE thread");
     thread::spawn(watchdog);
+    }
+    let gs_rx = match (replay, env::var("FREEK_GS_RECORD").ok()) {
+        (Some(path), _) => gsrec::replay(path),
+        (None, Some(path)) => gsrec::record(gs_rx, path),
+        _ => gs_rx,
+    };
 
     if opts.headless {
         headless_gs(gs_rx);

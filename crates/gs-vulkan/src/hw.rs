@@ -144,6 +144,16 @@ enum TexRef {
     Target(u32),
 }
 
+/// The previous draw's batch, with what it was worked out from.
+#[derive(Clone, Copy)]
+struct LastDraw {
+    state_gen: u64,
+    vram_writes: u64,
+    hw_gen: u64,
+    sprite: bool,
+    key: BatchKey,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 struct BatchKey {
     target: u32,
@@ -304,6 +314,16 @@ pub struct Hw {
     white: Image,
     rendering: Option<u32>,
     batch: Option<BatchKey>,
+    /// For reusing the previous draw's batch (see `draw_inner`).
+    last_draw: Option<LastDraw>,
+    /// Bumped by everything outside drawing that changes what a draw
+    /// works out (presenting, uploads, movies, resizing).
+    draw_gen: u64,
+    /// FREEK_TARGET_LOG, read once.
+    target_log: bool,
+    /// FREEK_DRAW_CHECK: work out every reused batch again and report
+    /// differences (a debugging aid for `draw_inner`).
+    draw_check: bool,
     verts: Vec<GpuVertex>,
     texture_bytes: u64,
     pub stats: Stats,
@@ -333,6 +353,8 @@ pub struct Hw {
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Stats {
     pub draws: u64,
+    /// Draws that reused the previous draw's batch.
+    pub fast_draws: u64,
     /// Times the displayed frame buffer changed (game frames shown).
     pub flips: u64,
     pub batches: u64,
@@ -420,6 +442,10 @@ impl Hw {
                 white,
                 rendering: None,
                 batch: None,
+                last_draw: None,
+                draw_gen: 0,
+                target_log: std::env::var_os("FREEK_TARGET_LOG").is_some(),
+                draw_check: std::env::var_os("FREEK_DRAW_CHECK").is_some(),
                 verts: Vec::new(),
                 texture_bytes: 0,
                 stats: Stats::default(),
@@ -595,7 +621,7 @@ impl Hw {
         let mut t = Target { bp, bw, psm, w, h: need_h, sy, color, depth, snapshot: None, snapshot_valid: false, fresh: true };
         // Growing: keep the old picture.
         if let Some(old) = self.targets.remove(&key) {
-            if std::env::var_os("FREEK_TARGET_LOG").is_some() {
+            if self.target_log {
                 eprintln!("[target] recreate bp={bp:#x}: bw {} -> {bw}, h {} -> {need_h}, sy {} -> {sy} at vblank {}", old.bw, old.h, old.sy, self.vblank);
             }
             let clear = vk::ClearColorValue { float32: [0.0; 4] };
@@ -702,7 +728,7 @@ impl Hw {
             // Prefer the target drawn with the texture's own width.
             let found = self.targets.get_key_value(&target_key(t.tbp0(), t.tbw())).or_else(|| self.targets.iter().find(|(_, rt)| rt.bp == t.tbp0()));
             if let Some((&k, rt)) = found {
-                if std::env::var_os("FREEK_TARGET_LOG").is_some() {
+                if self.target_log {
                     // Each kind of render-to-texture effect once, when first
                     // seen: line these up with what happened on screen.
                     static SEEN: std::sync::Mutex<Vec<(u32, u32, u64)>> = std::sync::Mutex::new(Vec::new());
@@ -1065,6 +1091,47 @@ impl Hw {
     }
 
     fn draw_inner(&mut self, gs: &Gs, shape: Shape, v: &[Vertex]) -> Result<()> {
+        // Primitives in a row with nothing changed in between (the
+        // triangles of a strip, the letters of a line of text) share the
+        // batch: skip working it out again.
+        let sprite = shape == Shape::Sprite;
+        let same = self.last_draw.is_some_and(|l| {
+            l.state_gen == gs.state_gen
+                && l.vram_writes == gs.vram.writes()
+                && l.hw_gen == self.draw_gen
+                && l.sprite == sprite
+                && self.batch == Some(l.key)
+        }) && self.trace_frame.is_none()
+            && self.trace_tex.is_none();
+        let key = if same {
+            self.stats.fast_draws += 1;
+            let key = self.last_draw.unwrap().key;
+            if self.draw_check {
+                static BAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let full = self.batch_key(gs, shape, v)?;
+                let bad = if full != Some(key) { BAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 } else { BAD.load(std::sync::atomic::Ordering::Relaxed) };
+                if self.stats.fast_draws % 1_000_000 == 0 || (full != Some(key) && bad <= 5) {
+                    eprintln!("[draw-check] {} reused batches, {bad} differed", self.stats.fast_draws);
+                }
+            }
+            key
+        } else {
+            self.last_draw = None;
+            let Some(key) = self.batch_key(gs, shape, v)? else { return Ok(()) };
+            if self.batch != Some(key) {
+                self.flush();
+                self.batch = Some(key);
+            }
+            self.last_draw = Some(LastDraw { state_gen: gs.state_gen, vram_writes: gs.vram.writes(), hw_gen: self.draw_gen, sprite, key });
+            key
+        };
+        self.add_vertices(gs, shape, v, key.tex);
+        Ok(())
+    }
+
+    /// Everything a draw sets up before its vertices: target, texture,
+    /// pipeline state. None when the draw can't change anything.
+    fn batch_key(&mut self, gs: &Gs, shape: Shape, v: &[Vertex]) -> Result<Option<BatchKey>> {
         let attrs = gs.attrs();
         let ctx = *gs.context();
         if self.trace_tex.is_some_and(|tbp| attrs.textured() && ctx.tex0.tbp0() == tbp) {
@@ -1083,11 +1150,11 @@ impl Hw {
         let (fb, zb, test) = (ctx.frame, ctx.zbuf, ctx.test);
         let (sx0, sy0, sx1, sy1) = ctx.scissor.rect();
         if sx1 < sx0 || sy1 < sy0 {
-            return Ok(());
+            return Ok(None);
         }
         let color_off = fb.mask() == u32::MAX;
         if color_off && zb.masked() {
-            return Ok(());
+            return Ok(None);
         }
         let ysc = self.vertical_scale(gs);
         let bp = self.target(fb.bp(), fb.bw(), fb.psm(), sy1 + 1, ysc)?;
@@ -1188,12 +1255,13 @@ impl Hw {
             depth: (!zb.masked(), ztst),
             palette,
         };
-        if self.batch != Some(key) {
-            self.flush();
-            self.batch = Some(key);
-        }
+        Ok(Some(key))
+    }
 
-        // Vertices.
+    fn add_vertices(&mut self, gs: &Gs, shape: Shape, v: &[Vertex], tex: TexRef) {
+        let attrs = gs.attrs();
+        let ctx = *gs.context();
+        let (zb, tex0) = (ctx.zbuf, ctx.tex0);
         let zscale = match zb.psm() {
             Psm::Z32 => 1.0 / 4_294_967_296.0,
             Psm::Z24 => 1.0 / 16_777_216.0,
@@ -1248,7 +1316,6 @@ impl Hw {
             }
         }
         self.stats.draws += 1;
-        Ok(())
     }
 
     /// In widescreen the frame is shown stretched by 4/3, so 2D overlays
@@ -1311,6 +1378,7 @@ impl Hw {
 
     /// Present the frame buffer the display circuits point at.
     pub fn present(&mut self, gs: &Gs) {
+        self.draw_gen += 1;
         self.end_rendering();
         // A traced frame ends here.
         if self.trace_frame.is_some_and(|f| self.vblank >= f) {
@@ -1510,6 +1578,7 @@ impl Hw {
     /// Log every draw of four frames starting `delay` vblanks from now (for
     /// glitches seen while playing).
     pub fn trace_in(&mut self, delay: u64) {
+        self.draw_gen += 1;
         eprintln!("[draw] --- trace requested at vblank {} for vblank {} ---", self.vblank, self.vblank + delay);
         self.trace_frame = Some(self.vblank + delay);
         self.trace_left = 4;
@@ -1519,6 +1588,7 @@ impl Hw {
     /// frame's picture to `captures/`, to match a glitch on screen with its
     /// draws.
     pub fn trace_shot(&mut self, delay: u64) {
+        self.draw_gen += 1;
         let at = self.vblank + delay.max(1);
         let _ = std::fs::create_dir_all("captures");
         // Draws logged from `at` on are shown at the next present.
@@ -1532,6 +1602,7 @@ impl Hw {
     /// while playing; frame n of the video is vblank start + n (see the
     /// FREEK_PAD_LOG button log for the same numbering).
     pub fn toggle_recording(&mut self) {
+        self.draw_gen += 1;
         if self.record.is_some() {
             self.stop_recording();
             return;
@@ -1566,6 +1637,7 @@ impl Hw {
 
     /// Show a movie frame (4:3, whatever the game's display mode).
     pub fn present_movie(&mut self, f: &gs::MovieFrame) {
+        self.draw_gen += 1;
         self.end_rendering();
         if self.movie.as_ref().is_none_or(|m| (m.extent.width, m.extent.height) != (f.w, f.h)) {
             match self.vk.create_image(f.w, f.h, COLOR, vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST, "movie") {
@@ -1596,6 +1668,7 @@ impl Hw {
 
     /// The movie is over: back to the GS display.
     pub fn end_movie(&mut self) {
+        self.draw_gen += 1;
         if let Some(img) = self.movie.take() {
             self.frames[self.slot].garbage.push(Garbage::Image(img));
         }
@@ -1696,6 +1769,7 @@ impl Hw {
     }
 
     pub fn resize(&mut self, size: (u32, u32)) {
+        self.draw_gen += 1;
         if let Err(e) = self.vk.recreate_swapchain(size) {
             eprintln!("[gs] swapchain: {e}");
             return;
@@ -1883,6 +1957,7 @@ impl gs::Backend for Hw {
     }
 
     fn mem_written(&mut self, gs: &Gs, r: MemRect) {
+        self.draw_gen += 1;
         if self.trace_frame.is_some_and(|f| self.vblank >= f) {
             eprintln!("[draw] transfer bp={:#x} bw={} psm={:?} rect=({},{} {}x{})", r.bp, r.bw, r.psm, r.x, r.y, r.w, r.h);
         }

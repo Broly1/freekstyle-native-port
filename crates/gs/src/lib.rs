@@ -153,9 +153,16 @@ pub struct Gs {
     pub clut_psm: Psm,
     /// Bumped on every CLUT load, so renderers can cache work on it.
     pub clut_gen: u64,
+    /// Bumped whenever anything a draw depends on may have changed (every
+    /// register except vertex data, CLUT loads, display registers), so
+    /// renderers can reuse per-draw work between primitives. VRAM writes
+    /// are counted separately (`Vram::writes`).
+    pub state_gen: u64,
     cbp_cache: [u32; 2],
     pub display: Display,
-    queue: Vec<Vertex>,
+    /// Vertices kept for the next primitive (at most 3).
+    queue: [Vertex; 3],
+    queued: usize,
     transfer: Transfer,
     gif: GifState,
     /// Internal Q from the most recent packed ST write.
@@ -201,9 +208,11 @@ impl Gs {
             clut: [0; 256],
             clut_psm: Psm::Ct32,
             clut_gen: 0,
+            state_gen: 0,
             cbp_cache: [u32::MAX; 2],
             display: Display::default(),
-            queue: Vec::with_capacity(4),
+            queue: [Vertex::default(); 3],
+            queued: 0,
             transfer: Transfer::default(),
             gif: GifState::default(),
             packed_q: 1.0,
@@ -215,6 +224,7 @@ impl Gs {
 
     /// Privileged register write (PMODE, DISPFB, DISPLAY, BGCOLOR, ...).
     pub fn write_priv(&mut self, offset: u32, v: u64) {
+        self.state_gen += 1;
         let d = &mut self.display;
         match offset {
             0x00 => d.pmode = v,
@@ -350,12 +360,18 @@ impl Gs {
     }
 
     fn set_prim(&mut self, v: u64) {
+        if self.prim.0 != v {
+            self.state_gen += 1;
+        }
         self.prim = Prim(v);
-        self.queue.clear();
+        self.queued = 0;
     }
 
     /// Write a GS register (A+D, REGLIST or packed after conversion).
     pub fn write_reg(&mut self, reg: u8, v: u64, b: &mut dyn Backend) {
+        if !matches!(reg, PRIM | RGBAQ | ST | UV | XYZF2 | XYZF3 | XYZ2 | XYZ3 | FOG) {
+            self.state_gen += 1;
+        }
         match reg {
             PRIM => self.set_prim(v & 0x7ff),
             RGBAQ => {
@@ -428,18 +444,21 @@ impl Gs {
             v: self.uv.1,
             fog: self.fog,
         };
-        self.queue.push(v);
+        // The queue holds at most what the next primitive reuses (two
+        // vertices), so there is always room for this one.
+        self.queue[self.queued] = v;
+        self.queued += 1;
         let kind = self.prim.kind();
         let need = match kind {
             0 => 1,
             1 | 2 | 6 => 2,
             3..=5 => 3,
             _ => {
-                self.queue.clear();
+                self.queued = 0;
                 return;
             }
         };
-        if self.queue.len() < need {
+        if self.queued < need {
             return;
         }
         if kick {
@@ -450,7 +469,7 @@ impl Gs {
                 _ => Shape::Triangle,
             };
             let mut verts = [Vertex::default(); 3];
-            verts[..need].copy_from_slice(&self.queue[self.queue.len() - need..]);
+            verts[..need].copy_from_slice(&self.queue[self.queued - need..self.queued]);
             // Flat shading uses the last vertex's colour.
             if !self.attrs().gouraud() || shape == Shape::Sprite {
                 let c = verts[need - 1].rgba;
@@ -462,20 +481,21 @@ impl Gs {
             b.draw(self, shape, &verts[..need]);
         }
         // Keep what the next primitive reuses.
+        let n = self.queued;
         match kind {
             2 => {
-                self.queue.drain(..self.queue.len() - 1);
+                self.queue[0] = self.queue[n - 1];
+                self.queued = 1;
             }
             4 => {
-                self.queue.drain(..self.queue.len() - 2);
+                self.queue.copy_within(n - 2..n, 0);
+                self.queued = 2;
             }
             5 => {
-                let first = self.queue[0];
-                let last = *self.queue.last().unwrap();
-                self.queue.clear();
-                self.queue.extend([first, last]);
+                self.queue[1] = self.queue[n - 1];
+                self.queued = 2;
             }
-            _ => self.queue.clear(),
+            _ => self.queued = 0,
         }
     }
 
@@ -528,6 +548,7 @@ impl Gs {
         }
         self.clut_psm = cpsm;
         self.clut_gen += 1;
+        self.state_gen += 1;
     }
 
     // ---- transfers ----
@@ -764,5 +785,29 @@ mod tests {
         assert_eq!(*shape, Shape::Sprite);
         assert_eq!(v[0].rgba, [0x60, 0x50, 0x40, 0x80]);
         assert_eq!((v[1].x, v[1].y), (64.0, 32.0));
+    }
+
+    /// Draws for `kind` from vertices at x = 0, 1, 2, ... (y = 0), as lists
+    /// of x coordinates.
+    fn connected(kind: u64, n: u32, kick: impl Fn(u32) -> bool) -> Vec<Vec<f32>> {
+        let mut gs = Gs::new();
+        let mut r = Rec::default();
+        let mut data = vec![tag(1 + n as u64, true, None, 0, &[0xe]), ad(PRIM, kind)];
+        for i in 0..n {
+            data.push(ad(if kick(i) { XYZ2 } else { XYZ3 }, i as u64 * 16));
+        }
+        gs.write_gif(&data, &mut r);
+        r.draws.iter().map(|(_, v)| v.iter().map(|v| v.x).collect()).collect()
+    }
+
+    #[test]
+    fn strips_and_fans_reuse_vertices() {
+        assert_eq!(connected(2, 4, |_| true), [vec![0.0, 1.0], vec![1.0, 2.0], vec![2.0, 3.0]]);
+        assert_eq!(connected(4, 5, |_| true), [vec![0.0, 1.0, 2.0], vec![1.0, 2.0, 3.0], vec![2.0, 3.0, 4.0]]);
+        assert_eq!(connected(5, 5, |_| true), [vec![0.0, 1.0, 2.0], vec![0.0, 2.0, 3.0], vec![0.0, 3.0, 4.0]]);
+        // XYZ3 adds a vertex without drawing; the strip still moves on.
+        assert_eq!(connected(4, 5, |i| i != 3), [vec![0.0, 1.0, 2.0], vec![2.0, 3.0, 4.0]]);
+        assert_eq!(connected(3, 6, |_| true), [vec![0.0, 1.0, 2.0], vec![3.0, 4.0, 5.0]]);
+        assert_eq!(connected(1, 4, |_| true), [vec![0.0, 1.0], vec![2.0, 3.0]]);
     }
 }
