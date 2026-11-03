@@ -664,6 +664,9 @@ class Installer:
             run(["cp", "-r", GAME / "images", PREFIX / "game"], sudo=True)
         if (GAME / "movies" / "hd").is_dir():
             run(["cp", "-r", GAME / "movies" / "hd", PREFIX / "game" / "movies"], sudo=True)
+        if (GAME / "textures" / "hd").is_dir():
+            run(["mkdir", "-p", PREFIX / "game" / "textures"], sudo=True)
+            run(["cp", "-r", GAME / "textures" / "hd", PREFIX / "game" / "textures"], sudo=True)
         plain = glob.glob(str(GAME / "movies" / "*.mkv"))
         if plain:
             run(["cp"] + plain + [PREFIX / "game" / "movies"], sudo=True)
