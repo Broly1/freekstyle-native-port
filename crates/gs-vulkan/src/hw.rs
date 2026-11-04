@@ -1102,18 +1102,20 @@ impl Hw {
         // triangles of a strip, the letters of a line of text) share the
         // batch: skip working it out again.
         let sprite = shape == Shape::Sprite;
-        let same = self.last_draw.is_some_and(|l| {
+        // (By reference: the key is ~150 bytes, and copying it for every
+        // triangle showed up in profiles as memcpy.)
+        let same = self.last_draw.as_ref().is_some_and(|l| {
             l.state_gen == gs.state_gen
                 && l.vram_writes == gs.vram.writes()
                 && l.hw_gen == self.draw_gen
                 && l.sprite == sprite
-                && self.batch == Some(l.key)
+                && self.batch.as_ref() == Some(&l.key)
         }) && self.trace_frame.is_none()
             && self.trace_tex.is_none();
-        let key = if same {
+        let tex = if same {
             self.stats.fast_draws += 1;
-            let key = self.last_draw.unwrap().key;
             if self.draw_check {
+                let key = self.last_draw.as_ref().unwrap().key;
                 static BAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let full = self.batch_key(gs, shape, v)?;
                 let bad = if full != Some(key) { BAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 } else { BAD.load(std::sync::atomic::Ordering::Relaxed) };
@@ -1121,7 +1123,7 @@ impl Hw {
                     eprintln!("[draw-check] {} reused batches, {bad} differed", self.stats.fast_draws);
                 }
             }
-            key
+            self.last_draw.as_ref().unwrap().key.tex
         } else {
             self.last_draw = None;
             let Some(key) = self.batch_key(gs, shape, v)? else { return Ok(()) };
@@ -1130,9 +1132,9 @@ impl Hw {
                 self.batch = Some(key);
             }
             self.last_draw = Some(LastDraw { state_gen: gs.state_gen, vram_writes: gs.vram.writes(), hw_gen: self.draw_gen, sprite, key });
-            key
+            key.tex
         };
-        self.add_vertices(gs, shape, v, key.tex);
+        self.add_vertices(gs, shape, v, tex);
         Ok(())
     }
 

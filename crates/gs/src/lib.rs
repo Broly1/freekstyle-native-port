@@ -159,6 +159,17 @@ pub struct Gs {
     /// are counted separately (`Vram::writes`).
     pub state_gen: u64,
     cbp_cache: [u32; 2],
+    /// Last value written to each plain state register (bit n of
+    /// `reg_known` set once register n was written): writing the same
+    /// value again changes nothing, and must not cost renderers their
+    /// per-draw shortcuts. The game rewrites the same CLAMP, TEX1, ALPHA,
+    /// TEST... values before most meshes (about 70% of such writes).
+    reg_last: [u64; 128],
+    reg_known: u128,
+    /// What the last CLUT load read (TEX0 CLUT fields, CSM2 position,
+    /// VRAM write count): the same load with VRAM untouched since gives
+    /// the same CLUT.
+    clut_src: Option<(u64, u64, u64)>,
     pub display: Display,
     /// Vertices kept for the next primitive (at most 3).
     queue: [Vertex; 3],
@@ -210,6 +221,9 @@ impl Gs {
             clut_gen: 0,
             state_gen: 0,
             cbp_cache: [u32::MAX; 2],
+            reg_last: [0; 128],
+            reg_known: 0,
+            clut_src: None,
             display: Display::default(),
             queue: [Vertex::default(); 3],
             queued: 0,
@@ -369,8 +383,22 @@ impl Gs {
 
     /// Write a GS register (A+D, REGLIST or packed after conversion).
     pub fn write_reg(&mut self, reg: u8, v: u64, b: &mut dyn Backend) {
-        if !matches!(reg, PRIM | RGBAQ | ST | UV | XYZF2 | XYZF3 | XYZ2 | XYZ3 | FOG) {
-            self.state_gen += 1;
+        match reg {
+            PRIM | RGBAQ | ST | UV | XYZF2 | XYZF3 | XYZ2 | XYZ3 | FOG => {}
+            // TEX0/TEX2 may load the CLUT; `load_clut` and the TEX0 change
+            // check below count what actually changed.
+            TEX0_1 | TEX0_2 | TEX2_1 | TEX2_2 => {}
+            // Registers that act when written.
+            TRXDIR | HWREG | SIGNAL | FINISH | LABEL => self.state_gen += 1,
+            _ => {
+                let bit = 1u128 << (reg & 127);
+                if self.reg_known & bit != 0 && self.reg_last[(reg & 127) as usize] == v {
+                    return;
+                }
+                self.reg_known |= bit;
+                self.reg_last[(reg & 127) as usize] = v;
+                self.state_gen += 1;
+            }
         }
         match reg {
             PRIM => self.set_prim(v & 0x7ff),
@@ -390,6 +418,9 @@ impl Gs {
             FOG => self.fog = (v >> 56) as u8,
             TEX0_1 | TEX0_2 => {
                 let n = (reg - TEX0_1) as usize;
+                if self.ctx[n].tex0 != Tex0(v) {
+                    self.state_gen += 1;
+                }
                 self.ctx[n].tex0 = Tex0(v);
                 self.load_clut(Tex0(v), b);
             }
@@ -398,6 +429,9 @@ impl Gs {
                 let n = (reg - TEX2_1) as usize;
                 let mask = 0x3f << 20 | !0u64 << 37;
                 let t = Tex0((self.ctx[n].tex0.0 & !mask) | (v & mask));
+                if self.ctx[n].tex0 != t {
+                    self.state_gen += 1;
+                }
                 self.ctx[n].tex0 = t;
                 self.load_clut(t, b);
             }
@@ -468,17 +502,21 @@ impl Gs {
                 6 => Shape::Sprite,
                 _ => Shape::Triangle,
             };
-            let mut verts = [Vertex::default(); 3];
-            verts[..need].copy_from_slice(&self.queue[self.queued - need..self.queued]);
-            // Flat shading uses the last vertex's colour.
+            // What the previous primitive left is always one vertex short
+            // of this one, so the queue holds exactly this primitive.
+            debug_assert_eq!(self.queued, need);
+            self.stats.prims += 1;
             if !self.attrs().gouraud() || shape == Shape::Sprite {
+                // Flat shading uses the last vertex's colour.
+                let mut verts = self.queue;
                 let c = verts[need - 1].rgba;
                 for v in &mut verts[..need] {
                     v.rgba = c;
                 }
+                b.draw(self, shape, &verts[..need]);
+            } else {
+                b.draw(self, shape, &self.queue[..need]);
             }
-            self.stats.prims += 1;
-            b.draw(self, shape, &verts[..need]);
         }
         // Keep what the next primitive reuses.
         let n = self.queued;
@@ -530,6 +568,13 @@ impl Gs {
         // 32-bit ones at 16.
         let offset = if eight { 0 } else { t.csa() as usize * 16 % 256 };
         b.mem_read(self, MemRect { bp: t.cbp(), bw: 1, psm: cpsm, x: 0, y: 0, w: 16, h: 16 });
+        // TEX0 bits 37 up: CBP, CPSM, CSM, CSA (and the unused CLD, which
+        // is handled above). CSM2 also reads TEXCLUT.
+        let src = (t.0 >> 37 & !(7 << 24), if t.csm2() { self.texclut } else { 0 } | (t.psm() as u64) << 32, self.vram.writes());
+        if self.clut_src == Some(src) {
+            return;
+        }
+        self.clut_src = Some(src);
         for i in 0..n {
             let (x, y) = if t.csm2() {
                 // CSM2: one linear row at (COU*16, COV).
@@ -710,6 +755,31 @@ mod tests {
 
     fn ad(reg: u8, v: u64) -> u128 {
         v as u128 | (reg as u128) << 64
+    }
+
+    /// Rewriting a register's current value leaves `state_gen` alone; a
+    /// new value, or a CLUT load after VRAM changed, moves it.
+    #[test]
+    fn repeated_writes_keep_state() {
+        let mut gs = Gs::new();
+        let mut b = Rec::default();
+        gs.write_reg(CLAMP_1, 5, &mut b);
+        let g = gs.state_gen;
+        gs.write_reg(CLAMP_1, 5, &mut b);
+        assert_eq!(gs.state_gen, g);
+        gs.write_reg(CLAMP_1, 6, &mut b);
+        assert!(gs.state_gen > g);
+
+        // T8 texture, CLUT at block 0x100 in CT32, CLD=1 (always load).
+        let tex0 = 0x13u64 << 20 | 0x100 << 37 | 1 << 61;
+        gs.write_reg(TEX0_1, tex0, &mut b);
+        let (g, c) = (gs.state_gen, gs.clut_gen);
+        gs.write_reg(TEX0_1, tex0, &mut b);
+        assert_eq!((gs.state_gen, gs.clut_gen), (g, c));
+        gs.vram.write(Psm::Ct32, 0x100, 1, 0, 0, 0x1234);
+        gs.write_reg(TEX0_1, tex0, &mut b);
+        assert!(gs.state_gen > g && gs.clut_gen > c);
+        assert_eq!(gs.clut[0], 0x1234);
     }
 
     #[test]
