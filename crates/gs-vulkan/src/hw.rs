@@ -1102,14 +1102,11 @@ impl Hw {
         // triangles of a strip, the letters of a line of text) share the
         // batch: skip working it out again.
         let sprite = shape == Shape::Sprite;
-        // (By reference: the key is ~150 bytes, and copying it for every
-        // triangle showed up in profiles as memcpy.)
+        // `batch` only changes below, where `last_draw` is set to the same
+        // key (or cleared), so a `last_draw` is always the current batch.
         let same = self.last_draw.as_ref().is_some_and(|l| {
-            l.state_gen == gs.state_gen
-                && l.vram_writes == gs.vram.writes()
-                && l.hw_gen == self.draw_gen
-                && l.sprite == sprite
-                && self.batch.as_ref() == Some(&l.key)
+            debug_assert!(self.batch.as_ref() == Some(&l.key));
+            l.state_gen == gs.state_gen && l.vram_writes == gs.vram.writes() && l.hw_gen == self.draw_gen && l.sprite == sprite
         }) && self.trace_frame.is_none()
             && self.trace_tex.is_none();
         let tex = if same {
@@ -1127,7 +1124,7 @@ impl Hw {
         } else {
             self.last_draw = None;
             let Some(key) = self.batch_key(gs, shape, v)? else { return Ok(()) };
-            if self.batch != Some(key) {
+            if self.batch.as_ref() != Some(&key) {
                 self.flush();
                 self.batch = Some(key);
             }
