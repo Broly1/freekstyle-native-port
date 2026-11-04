@@ -23,6 +23,22 @@ pub struct Blend {
 }
 
 impl Blend {
+    /// Whether the factors read the shader's second (dual-source) output.
+    pub fn dual_source(&self) -> bool {
+        let src1 = |f: vk::BlendFactor| matches!(f, vk::BlendFactor::SRC1_ALPHA | vk::BlendFactor::ONE_MINUS_SRC1_ALPHA);
+        self.enable && (src1(self.src) || src1(self.dst))
+    }
+
+    /// The same blend with the factor taken from the output alpha.
+    pub fn single_source(self) -> Blend {
+        let f = |f: vk::BlendFactor| match f {
+            vk::BlendFactor::SRC1_ALPHA => vk::BlendFactor::SRC_ALPHA,
+            vk::BlendFactor::ONE_MINUS_SRC1_ALPHA => vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+            f => f,
+        };
+        Blend { src: f(self.src), dst: f(self.dst), ..self }
+    }
+
     pub const OFF: Blend = Blend {
         enable: false,
         op: vk::BlendOp::ADD,

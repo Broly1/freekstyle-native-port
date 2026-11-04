@@ -25,8 +25,15 @@ layout(push_constant) uniform Push {
     uint amask;
 } pc;
 
+#ifdef DUAL_SOURCE
 layout(location = 0, index = 0) out vec4 o_color;
 layout(location = 0, index = 1) out vec4 o_blend;
+#else
+// Without the second output Intel GPUs before Xe2 run the shader at SIMD16
+// or wider instead of SIMD8. Blends with the source alpha factor that
+// don't write alpha get the factor as the output alpha (FACTOR_A).
+layout(location = 0) out vec4 o_color;
+#endif
 
 // flags layout (see hw.rs):
 //  0     TME      1-2  TFX     3  TCC     4  FGE
@@ -34,8 +41,10 @@ layout(location = 0, index = 1) out vec4 o_blend;
 //  11-12 source scale: 0 none, 1 (1+As), 2 (1+FIX)
 //  13    RTTEX    14   DATE     15   DATM     16   FBA     17   AMERGE
 //  18    PAL8H    19-24 dest blend A B D     25   DBLEND
+//  26    FACTOR_A: output the blend factor as alpha (alpha not written)
 const uint TME = 1u, TCC = 8u, FGE = 16u, ATE = 32u, DATE = 16384u, DATM = 32768u;
 const uint FBA = 65536u, AMERGE = 131072u, PAL8H = 262144u, DBLEND = 33554432u;
+const uint FACTOR_A = 67108864u;
 
 vec3 blend_sel(uint s, vec3 cs, vec3 cd) {
     return s == 0u ? cs : s == 1u ? cd : vec3(0.0);
@@ -138,6 +147,11 @@ void main() {
         uint m = keep_a ? 0xffu : pc.amask;
         a = (a & ~m) | (d & m);
     }
+    float factor = clamp(c.a / 128.0, 0.0, 1.0);
+#ifdef DUAL_SOURCE
     o_color = vec4(c.rgb / 255.0, float(a) / 255.0);
-    o_blend = vec4(0.0, 0.0, 0.0, clamp(c.a / 128.0, 0.0, 1.0));
+    o_blend = vec4(0.0, 0.0, 0.0, factor);
+#else
+    o_color = vec4(c.rgb / 255.0, (pc.flags & FACTOR_A) != 0u ? factor : float(a) / 255.0);
+#endif
 }

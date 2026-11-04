@@ -87,6 +87,7 @@ const F_PAL8H: u32 = 1 << 18;
 /// Blend with destination alpha (C = 1), done in the shader; A, B and D
 /// selectors in bits 19-20, 21-22 and 23-24.
 const F_DBLEND: u32 = 1 << 25;
+const F_FACTOR_A: u32 = 1 << 26;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct PipeKey {
@@ -286,6 +287,8 @@ pub struct Hw {
     layout: vk::PipelineLayout,
     vert: vk::ShaderModule,
     frag: vk::ShaderModule,
+    /// The fragment shader with the dual-source blend output.
+    frag_dual: vk::ShaderModule,
     pipelines: FastMap<PipeKey, vk::Pipeline>,
     samplers: FastMap<SamplerKey, vk::Sampler>,
     targets: FastMap<u32, Target>,
@@ -324,6 +327,8 @@ pub struct Hw {
     /// FREEK_DRAW_CHECK: work out every reused batch again and report
     /// differences (a debugging aid for `draw_inner`).
     draw_check: bool,
+    /// FREEK_GPU_TIMES: GPU time per kind of work.
+    gpu_timer: Option<crate::gputime::GpuTimer>,
     verts: Vec<GpuVertex>,
     texture_bytes: u64,
     pub stats: Stats,
@@ -364,6 +369,11 @@ pub struct Stats {
     /// total size in pixels.
     pub snapshots: u64,
     pub snapshot_pixels: u64,
+    /// Batches drawn with the dual-source shader (SIMD8 on Intel before
+    /// Xe2), and the vertices in them and in all batches.
+    pub dual_batches: u64,
+    pub dual_vertices: u64,
+    pub vertices: u64,
 }
 
 impl Hw {
@@ -412,8 +422,10 @@ impl Hw {
             };
             let vert = module(include_bytes!(concat!(env!("OUT_DIR"), "/gs.vert.spv")))?;
             let frag = module(include_bytes!(concat!(env!("OUT_DIR"), "/gs.frag.spv")))?;
+            let frag_dual = module(include_bytes!(concat!(env!("OUT_DIR"), "/gs_dual.frag.spv")))?;
             let white = vk.create_image(1, 1, COLOR, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST, "white")?;
             let rendered = (0..vk.swapchain.images.len()).map(|_| dev.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap()).collect();
+            let gpu_timer = crate::gputime::GpuTimer::new(&vk.instance, vk.physical, &dev, vk.queue_family, FRAMES);
             let mut hw = Hw {
                 vk,
                 cmd_pool,
@@ -426,6 +438,7 @@ impl Hw {
                 layout,
                 vert,
                 frag,
+                frag_dual,
                 pipelines: FastMap::default(),
                 samplers: FastMap::default(),
                 targets: FastMap::default(),
@@ -450,6 +463,7 @@ impl Hw {
                 draw_gen: 0,
                 target_log: std::env::var_os("FREEK_TARGET_LOG").is_some(),
                 draw_check: std::env::var_os("FREEK_DRAW_CHECK").is_some(),
+                gpu_timer,
                 verts: Vec::new(),
                 texture_bytes: 0,
                 stats: Stats::default(),
@@ -486,6 +500,30 @@ impl Hw {
         self.frames[self.slot].cmd
     }
 
+    /// FREEK_GPU_TIMES: book GPU time from here on to `label`.
+    fn mark(&mut self, label: crate::gputime::Label) {
+        if let Some(t) = &mut self.gpu_timer {
+            t.mark(&self.vk.device, self.frames[self.slot].cmd, self.slot, label);
+        }
+    }
+
+    /// FREEK_GPU_TIMES: back to drawing into the open target, or between.
+    fn mark_resume(&mut self) {
+        if self.gpu_timer.is_none() {
+            return;
+        }
+        let label = match self.rendering {
+            Some(bp) => self.draw_label(bp),
+            None => ("between", 0, 0),
+        };
+        self.mark(label);
+    }
+
+    fn draw_label(&self, bp: u32) -> crate::gputime::Label {
+        let t = &self.targets[&bp];
+        ("draw", t.w * self.cfg.scale_x, t.h * t.sy)
+    }
+
     fn begin_frame(&mut self) {
         let dev = self.vk.device.clone();
         let f = &mut self.frames[self.slot];
@@ -495,6 +533,10 @@ impl Hw {
             let _ = dev.reset_descriptor_pool(f.pool, vk::DescriptorPoolResetFlags::empty());
             let _ = dev.reset_command_buffer(f.cmd, vk::CommandBufferResetFlags::empty());
             let _ = dev.begin_command_buffer(f.cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
+        }
+        if let Some(t) = &mut self.gpu_timer {
+            t.begin(&dev, f.cmd, self.slot);
+            t.mark(&dev, f.cmd, self.slot, ("between", 0, 0));
         }
         f.vbuf_used = 0;
         f.staging_used = 0;
@@ -531,6 +573,7 @@ impl Hw {
         let bytes = unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
         let (buf, off) = self.stage(bytes)?;
         let img = self.vk.create_image(w, h, COLOR, usage | vk::ImageUsageFlags::TRANSFER_DST, name)?;
+        self.mark(("upload", 0, 0));
         let dev = &self.vk.device;
         let cmd = self.frames[self.slot].cmd;
         transition(dev, cmd, img.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
@@ -540,12 +583,14 @@ impl Hw {
             .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
         unsafe { dev.cmd_copy_buffer_to_image(cmd, buf, img.image, vk::ImageLayout::GENERAL, &[region]) };
         barrier(dev, cmd);
+        self.mark_resume();
         Ok(img)
     }
 
     /// Upload a mip chain into a new image in GENERAL layout.
     fn upload_levels(&mut self, levels: &[crate::retexture::Level]) -> Result<Image> {
         let img = self.vk.create_image_levels(levels[0].w, levels[0].h, levels.len() as u32, COLOR, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST, "HD texture")?;
+        self.mark(("upload", 0, 0));
         transition_levels(&self.vk.device, self.frames[self.slot].cmd, img.image, vk::ImageAspectFlags::COLOR, levels.len() as u32, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
         for (i, l) in levels.iter().enumerate() {
             let bytes = unsafe { std::slice::from_raw_parts(l.px.as_ptr() as *const u8, l.px.len() * 4) };
@@ -557,6 +602,7 @@ impl Hw {
             unsafe { self.vk.device.cmd_copy_buffer_to_image(self.frames[self.slot].cmd, buf, img.image, vk::ImageLayout::GENERAL, &[region]) };
         }
         barrier(&self.vk.device, self.frames[self.slot].cmd);
+        self.mark_resume();
         Ok(img)
     }
 
@@ -567,6 +613,7 @@ impl Hw {
         if self.rendering.take().is_some() {
             unsafe { self.vk.device.cmd_end_rendering(self.cmd()) };
             barrier(&self.vk.device, self.cmd());
+            self.mark(("between", 0, 0));
         }
     }
 
@@ -593,6 +640,10 @@ impl Hw {
             .clear_value(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 0.0, stencil: 0 } });
         let area = vk::Rect2D { offset: vk::Offset2D::default(), extent: vk::Extent2D { width: t.w * s, height: t.h * t.sy } };
         let info = vk::RenderingInfo::default().render_area(area).layer_count(1).color_attachments(&color).depth_attachment(&depth);
+        if self.gpu_timer.is_some() {
+            let l = self.draw_label(bp);
+            self.mark(l);
+        }
         unsafe { self.vk.device.cmd_begin_rendering(self.cmd(), &info) };
         self.rendering = Some(bp);
     }
@@ -686,6 +737,7 @@ impl Hw {
         let px = gs::tex::decode_rect(vram, psm, bp, bw, x, y, w, h, texa);
         self.end_rendering();
         let tmp = self.upload_image(w, h, &px, vk::ImageUsageFlags::TRANSFER_SRC, "target upload")?;
+        self.mark(("upload into target", 0, 0));
         let s = self.cfg.scale_x as i32;
         let t = self.targets.get_mut(&key).unwrap();
         let sy = t.sy as i32;
@@ -708,6 +760,9 @@ impl Hw {
         unsafe { self.vk.device.cmd_blit_image(cmd, tmp.image, vk::ImageLayout::GENERAL, t.color.image, vk::ImageLayout::GENERAL, &[blit], vk::Filter::NEAREST) };
         barrier(&self.vk.device, cmd);
         t.snapshot_valid = false;
+        if let Some(g) = &mut self.gpu_timer {
+            g.mark(&self.vk.device, cmd, self.slot, ("between", 0, 0));
+        }
         let was_fresh = std::mem::replace(&mut t.fresh, false);
         if was_fresh {
             let t = &self.targets[&key];
@@ -887,6 +942,8 @@ impl Hw {
             let y1 = ((y1 * sy).ceil() as i32 + 1).min(scissor.offset.y + scissor.extent.height as i32).min(ext.height as i32);
             if x1 > x0 && y1 > y0 {
                 self.end_rendering();
+                let ext = self.targets[&bp].color.extent;
+                self.mark(("copy part of", ext.width, ext.height));
                 let t = &self.targets[&bp];
                 let off = vk::Offset3D { x: x0, y: y0, z: 0 };
                 let copy = vk::ImageCopy::default()
@@ -896,7 +953,9 @@ impl Hw {
                     .dst_offset(off)
                     .extent(vk::Extent3D { width: (x1 - x0) as u32, height: (y1 - y0) as u32, depth: 1 });
                 unsafe { self.vk.device.cmd_copy_image(self.cmd(), t.color.image, vk::ImageLayout::GENERAL, t.snapshot.as_ref().unwrap().image, vk::ImageLayout::GENERAL, &[copy]) };
-                barrier(&self.vk.device, self.cmd());                self.stats.snapshots += 1;
+                barrier(&self.vk.device, self.cmd());
+                self.mark(("between", 0, 0));
+                self.stats.snapshots += 1;
                 self.stats.snapshot_pixels += ((x1 - x0) * (y1 - y0)) as u64;
             }
         }
@@ -917,6 +976,8 @@ impl Hw {
                     // flushed the batch already.
                     let was = self.rendering;
                     self.end_rendering();
+                    let ext = self.targets[&bp].color.extent;
+                    self.mark(("copy all of", ext.width, ext.height));
                     let t = &self.targets[&bp];
                     let snap = t.snapshot.as_ref().unwrap();
                     let copy = vk::ImageCopy::default()
@@ -927,6 +988,7 @@ impl Hw {
                     barrier(&self.vk.device, self.cmd());
                     self.stats.snapshots += 1;
                     self.stats.snapshot_pixels += (t.color.extent.width * t.color.extent.height) as u64;
+                    self.mark(("between", 0, 0));
                     self.targets.get_mut(&bp).unwrap().snapshot_valid = true;
                     if let Some(b) = was {
                         self.begin_rendering(b);
@@ -964,7 +1026,7 @@ impl Hw {
         let entry = c"main";
         let stages = [
             vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(self.vert).name(entry),
-            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(self.frag).name(entry),
+            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(if k.blend.dual_source() { self.frag_dual } else { self.frag }).name(entry),
         ];
         let binding = [vk::VertexInputBindingDescription { binding: 0, stride: std::mem::size_of::<GpuVertex>() as u32, input_rate: vk::VertexInputRate::VERTEX }];
         let attr = |location, format, offset| vk::VertexInputAttributeDescription { location, binding: 0, format, offset };
@@ -1090,6 +1152,11 @@ impl Hw {
             dev.cmd_draw(cmd, verts.len() as u32, 1, 0, 0);
         }
         self.stats.batches += 1;
+        self.stats.vertices += verts.len() as u64;
+        if k.pipe.blend.dual_source() {
+            self.stats.dual_batches += 1;
+            self.stats.dual_vertices += verts.len() as u64;
+        }
         if let Some(t) = self.targets.get_mut(&k.target) {
             t.snapshot_valid = false;
         }
@@ -1172,7 +1239,7 @@ impl Hw {
         // Destination alpha as the factor goes through the shader: targets
         // keep the alpha byte, the factor is byte / 0x80.
         let dst_blend = attrs.blend() && bc == 1;
-        let blend = if attrs.blend() && !dst_blend { blend::map(ctx.alpha.abcd()) } else { Blend::OFF };
+        let mut blend = if attrs.blend() && !dst_blend { blend::map(ctx.alpha.abcd()) } else { Blend::OFF };
         let fm = fb.mask();
         let mut write_mask = 0;
         for (n, bit) in [vk::ColorComponentFlags::R, vk::ColorComponentFlags::G, vk::ColorComponentFlags::B, vk::ColorComponentFlags::A].iter().enumerate() {
@@ -1182,6 +1249,13 @@ impl Hw {
         }
         if fb.psm() == Psm::Ct24 {
             write_mask &= !vk::ColorComponentFlags::A.as_raw();
+        }
+        // Alpha isn't written: the source alpha factor can travel as the
+        // output alpha, sparing the dual-source shader (SIMD8 on Intel
+        // before Xe2).
+        let factor_a = blend.dual_source() && write_mask & vk::ColorComponentFlags::A.as_raw() == 0;
+        if factor_a {
+            blend = blend.single_source();
         }
         let tex0 = ctx.tex0;
         let mut flags = 0;
@@ -1215,6 +1289,9 @@ impl Hw {
         }
         if dst_blend {
             flags |= F_DBLEND | ba << 19 | bb << 21 | bd << 23;
+        }
+        if factor_a {
+            flags |= F_FACTOR_A;
         }
         let palette = (rt_tex && tex0.psm() == Psm::T8h).then_some(self.palette);
         if palette.is_some() {
@@ -1685,6 +1762,7 @@ impl Hw {
     /// Show `src` (an image, the rectangle to show, its aspect ratio) in
     /// the window, or just black.
     fn submit_and_present(&mut self, src: Option<(vk::Image, [vk::Offset3D; 2], (i32, i32))>) {
+        self.mark(("present", 0, 0));
         if self.cfg.blur_bars && !self.cfg.stretch && self.blur.is_empty() {
             for (w, h) in BLUR_CHAIN {
                 match self.vk.create_image(w, h, COLOR, vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST, "blur") {
@@ -1743,6 +1821,7 @@ impl Hw {
             }
             transition(&dev, cmd, sw, vk::ImageAspectFlags::COLOR, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR);
         }
+        self.mark(("end", 0, 0));
         unsafe {
             let _ = dev.end_command_buffer(cmd);
             let cmds = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
@@ -1950,6 +2029,9 @@ impl Drop for Hw {
     fn drop(&mut self) {
         unsafe {
             let _ = self.vk.device.device_wait_idle();
+            if let Some(t) = &mut self.gpu_timer {
+                t.destroy(&self.vk.device);
+            }
             self.vk.device.destroy_command_pool(self.cmd_pool, None);
         }
     }

@@ -6,6 +6,7 @@
 //! buffer in the window.
 
 mod blend;
+mod gputime;
 mod hw;
 mod icons;
 mod pictures;
