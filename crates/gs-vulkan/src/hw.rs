@@ -389,7 +389,10 @@ impl Hw {
                 .map_err(e("command buffers"))?;
             let mut frames = Vec::new();
             for (n, &cmd) in cmds.iter().enumerate() {
-                let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: MAX_SETS * 3 }];
+                let sizes = [
+                    vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: MAX_SETS * 3 },
+                    vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: MAX_SETS },
+                ];
                 frames.push(Frame {
                     cmd,
                     fence: dev.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None).map_err(e("fence"))?,
@@ -403,15 +406,21 @@ impl Hw {
                 });
             }
             // 0: the texture; 1: a snapshot of the target being drawn, read
-            // by the destination alpha test and blends; 2: a palette.
-            let binding = |n| {
+            // by the destination alpha test and blends; 2: a palette;
+            // 3: the shared sampler.
+            let binding = |n, ty| {
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(n)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_type(ty)
                     .descriptor_count(1)
                     .stage_flags(vk::ShaderStageFlags::FRAGMENT)
             };
-            let bindings = [binding(0), binding(1), binding(2)];
+            let bindings = [
+                binding(0, vk::DescriptorType::SAMPLED_IMAGE),
+                binding(1, vk::DescriptorType::SAMPLED_IMAGE),
+                binding(2, vk::DescriptorType::SAMPLED_IMAGE),
+                binding(3, vk::DescriptorType::SAMPLER),
+            ];
             let set_layout = dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None).map_err(e("set layout"))?;
             let ranges = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, offset: 0, size: std::mem::size_of::<Push>() as u32 }];
             let sets = [set_layout];
@@ -1127,13 +1136,15 @@ impl Hw {
                 eprintln!("[gs] out of descriptor sets this frame");
                 return;
             };
-            let img = [vk::DescriptorImageInfo { sampler, image_view: view, image_layout: vk::ImageLayout::GENERAL }];
-            let dst_img = [vk::DescriptorImageInfo { sampler, image_view: dst, image_layout: vk::ImageLayout::GENERAL }];
-            let pal_img = [vk::DescriptorImageInfo { sampler, image_view: pal, image_layout: vk::ImageLayout::GENERAL }];
+            let img = [vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: view, image_layout: vk::ImageLayout::GENERAL }];
+            let dst_img = [vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: dst, image_layout: vk::ImageLayout::GENERAL }];
+            let pal_img = [vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: pal, image_layout: vk::ImageLayout::GENERAL }];
+            let smp = [vk::DescriptorImageInfo { sampler, image_view: vk::ImageView::null(), image_layout: vk::ImageLayout::UNDEFINED }];
             let writes = [
-                vk::WriteDescriptorSet::default().dst_set(sets[0]).dst_binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&img),
-                vk::WriteDescriptorSet::default().dst_set(sets[0]).dst_binding(1).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&dst_img),
-                vk::WriteDescriptorSet::default().dst_set(sets[0]).dst_binding(2).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&pal_img),
+                vk::WriteDescriptorSet::default().dst_set(sets[0]).dst_binding(0).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&img),
+                vk::WriteDescriptorSet::default().dst_set(sets[0]).dst_binding(1).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&dst_img),
+                vk::WriteDescriptorSet::default().dst_set(sets[0]).dst_binding(2).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&pal_img),
+                vk::WriteDescriptorSet::default().dst_set(sets[0]).dst_binding(3).descriptor_type(vk::DescriptorType::SAMPLER).image_info(&smp),
             ];
             dev.update_descriptor_sets(&writes, &[]);
             let t = &self.targets[&k.target];

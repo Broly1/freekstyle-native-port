@@ -14,3 +14,6 @@ ash-window = "=0.13.0"
 raw-window-handle = "=0.6.2"
 png = "0.17.16"
 gpu-allocator = { version = "=0.27.0", default-features = false, features = ["vulkan"] }
+
+[build-dependencies]
+naga = { version = "27", features = ["glsl-in", "spv-out"] }

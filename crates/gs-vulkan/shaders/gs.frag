@@ -9,11 +9,12 @@ layout(location = 0) noperspective in vec4 v_color;
 layout(location = 1) noperspective in vec3 v_stq;
 layout(location = 2) noperspective in float v_fog;
 
-layout(set = 0, binding = 0) uniform sampler2D tex;
+layout(set = 0, binding = 0) uniform texture2D tex;
 // Snapshot of the target being drawn (destination alpha, masked alpha).
-layout(set = 0, binding = 1) uniform sampler2D dst;
+layout(set = 0, binding = 1) uniform texture2D dst;
 // Palette for T8h reads of a render target.
-layout(set = 0, binding = 2) uniform sampler2D pal;
+layout(set = 0, binding = 2) uniform texture2D pal;
+layout(set = 0, binding = 3) uniform sampler tex_sampler;
 
 layout(push_constant) uniform Push {
     vec2 rt_size;
@@ -83,7 +84,7 @@ void main() {
             uint i = uint(texelFetch(tex, p, 0).a * 255.0 + 0.5);
             t = floor(texelFetch(pal, ivec2(int(i), 0), 0) * 255.0 + 0.5);
         } else {
-            t = floor(texture(tex, uv) * 255.0 + 0.5);
+            t = floor(texture(sampler2D(tex, tex_sampler), uv) * 255.0 + 0.5);
         }
         bool tcc = (pc.flags & TCC) != 0u;
         switch ((pc.flags >> 1) & 3u) {

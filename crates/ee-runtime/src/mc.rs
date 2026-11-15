@@ -55,6 +55,8 @@ impl Card {
     pub fn new() -> Card {
         let base = std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
+            .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
+            .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
             .unwrap_or_else(|| PathBuf::from("."));
         Card { root: base.join("freekstyle/saves"), cwd: "/".into(), files: Vec::new(), seen: false, dir_iter: Vec::new() }
