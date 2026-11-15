@@ -1,7 +1,8 @@
 //! `freekstyle.toml`: the settings the launcher edits and the game reads at
 //! startup. Keys are stored by winit `KeyCode` name ("KeyZ", "ArrowUp",
-//! "Digit1"), gamepad buttons by gilrs `Button` name ("South", "DPadUp",
-//! "LeftTrigger2"), so neither side needs the other's input library.
+//! "Digit1"), gamepad buttons by canonical controller name ("South",
+//! "DPadUp", "LeftTrigger2") or raw joystick input ("JoyButton0",
+//! "JoyHat0Up", "JoyAxis0+"), so neither side needs the other's input library.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -14,6 +15,32 @@ pub const FILE: &str = "freekstyle.toml";
 /// Gamepad mappings (SDL_GameControllerDB lines) for controllers the
 /// gamepad library's database lacks; the game and launcher both add them.
 pub const GAMEPAD_MAPPINGS: &str = include_str!("gamecontrollerdb.txt");
+
+/// Default radial deadzone applied to both analog sticks.
+pub const DEFAULT_STICK_DEADZONE: f32 = 0.15;
+
+/// Candidate locations for an optional user-supplied `gamecontrollerdb.txt`
+/// next to the executable, in the working directory, or beside `freekstyle.toml`.
+pub fn external_gamepad_db_paths() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("gamecontrollerdb.txt"));
+        }
+    }
+    candidates.push(PathBuf::from("gamecontrollerdb.txt"));
+    if let Some(dir) = path().parent().filter(|d| !d.as_os_str().is_empty()) {
+        candidates.push(dir.join("gamecontrollerdb.txt"));
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in candidates {
+        let canonical = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+        if p.is_file() && !out.iter().any(|existing| std::fs::canonicalize(existing).unwrap_or_else(|_| existing.clone()) == canonical) {
+            out.push(p);
+        }
+    }
+    out
+}
 
 /// Where the launcher writes and the game looks: `freekstyle.toml` in the
 /// working directory (the port or install directory, which also holds
@@ -29,6 +56,8 @@ pub fn path() -> &'static Path {
         }
         let config = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
+            .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
+            .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
             .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".config")))
             .unwrap_or_default();
         config.join("freekstyle").join(FILE)
@@ -70,6 +99,8 @@ pub struct Config {
     /// The player the keyboard controls, 1 or 2. Gamepads take player 1
     /// and 2 in the order they connect.
     pub keyboard_player: u32,
+    /// Analog stick radial deadzone in `0.0..=0.5`.
+    pub stick_deadzone: f32,
     pub bindings: Vec<Binding>,
 }
 
@@ -155,6 +186,7 @@ impl Default for Config {
             emulated_audio: false,
             language: String::new(),
             keyboard_player: 1,
+            stick_deadzone: DEFAULT_STICK_DEADZONE,
             bindings: default_bindings(),
         }
     }
@@ -178,6 +210,15 @@ impl Config {
         }
         c.bindings.sort_by_key(|b| PS2_BUTTONS.iter().position(|p| p.0 == b.button));
         Ok(c)
+    }
+
+    /// Validated analog stick deadzone clamped to `0.0..=0.5`.
+    pub fn deadzone(&self) -> f32 {
+        if self.stick_deadzone.is_finite() {
+            self.stick_deadzone.clamp(0.0, 0.5)
+        } else {
+            DEFAULT_STICK_DEADZONE
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {

@@ -47,8 +47,7 @@ use std::{env, fs, process, thread};
 
 use ee_runtime::pad::{button, Input};
 use ee_runtime::Cpu;
-use gilrs::ff::{BaseEffect, BaseEffectType, Effect, EffectBuilder, Repeat, Replay, Ticks};
-use gilrs::{Axis, Button, EventType, Gamepad, GamepadId, Gilrs};
+use freek_input::{ControllerManager, PadMap};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -72,6 +71,7 @@ struct Options {
     mute: bool,
     emulated_audio: bool,
     keyboard_player: u32,
+    stick_deadzone: f32,
     bindings: Vec<freek_config::Binding>,
 }
 
@@ -84,6 +84,7 @@ fn options() -> Options {
         eprintln!("{}: res must be 1080, 1440 or 4k, got {:?}", freek_config::path().display(), c.res);
         process::exit(2);
     });
+    let stick_deadzone = c.deadzone();
     let mut o = Options {
         elf: c.elf,
         disc: c.disc,
@@ -100,6 +101,7 @@ fn options() -> Options {
         mute: c.mute,
         emulated_audio: c.emulated_audio,
         keyboard_player: c.keyboard_player,
+        stick_deadzone,
         bindings: c.bindings,
     };
     let mut positional = Vec::new();
@@ -221,16 +223,26 @@ fn main() {
         process::exit(1);
     });
     event_loop.set_control_flow(ControlFlow::Poll);
-    let gilrs = gilrs::GilrsBuilder::new().add_mappings(freek_config::GAMEPAD_MAPPINGS).build().map_err(|e| eprintln!("[input] gamepads unavailable: {e}")).ok();
-    let (key_map, pad_map) = input_maps(&opts.bindings);
+    let controllers = ControllerManager::new().map_err(|e| eprintln!("[input] gamepads unavailable: {e}")).ok();
+    let key_map = key_map(&opts.bindings);
+    let pad_map = PadMap::compile(&opts.bindings);
     let keyboard_player = (opts.keyboard_player.clamp(1, 2) - 1) as usize;
-    let mut app = App { opts, rx: gs_rx, window: None, renderer: None, last_title: Instant::now(), last_frame: 0, gilrs, players: [None; 2], rumble: [None, None], rumble_at: [Instant::now(); 2], keyboard_player, keys: Vec::new(), last_buttons: 0, traces: 0, key_map, pad_map };
-    if let Some(g) = &app.gilrs {
-        let pads: Vec<_> = g.gamepads().filter(|(_, p)| p.is_connected()).map(|(id, _)| id).collect();
-        for id in pads {
-            app.seat(id);
-        }
-    }
+    let mut app = App {
+        opts,
+        rx: gs_rx,
+        window: None,
+        renderer: None,
+        last_title: Instant::now(),
+        last_frame: 0,
+        controllers,
+        keyboard_player,
+        focused: true,
+        keys: Vec::new(),
+        last_buttons: 0,
+        traces: 0,
+        key_map,
+        pad_map,
+    };
     profile::start_if_requested("FREEK_PROFILE_GS", "profile_gs.txt");
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("event loop: {e}");
@@ -245,16 +257,10 @@ struct App {
     renderer: Option<gs_vulkan::Renderer>,
     last_title: Instant,
     last_frame: u64,
-    gilrs: Option<Gilrs>,
-    /// Each player's running rumble: the motor speeds and their effect.
-    rumble: [Option<((u16, u16), Effect)>; 2],
-    rumble_at: [Instant; 2],
-    /// The gamepad playing as player 1 and 2, in the order they connected.
-    /// A pad that drops off leaves its seat empty until a pad connects
-    /// again, so the other player keeps theirs.
-    players: [Option<GamepadId>; 2],
+    controllers: Option<ControllerManager>,
     /// The player (0 or 1) the keyboard controls.
     keyboard_player: usize,
+    focused: bool,
     /// Mapped keys held down; several keys can share a button.
     keys: Vec<KeyCode>,
     last_buttons: u16,
@@ -262,31 +268,8 @@ struct App {
     /// Bound keys (winit KeyCode names) and gamepad buttons, with the PS2
     /// buttons each one presses.
     key_map: HashMap<String, u16>,
-    pad_map: Vec<(Button, u16)>,
+    pad_map: PadMap,
 }
-
-/// gilrs buttons by the names freekstyle.toml uses (their Debug names).
-const PAD_BUTTONS: [Button; 19] = [
-    Button::South,
-    Button::East,
-    Button::North,
-    Button::West,
-    Button::C,
-    Button::Z,
-    Button::LeftTrigger,
-    Button::LeftTrigger2,
-    Button::RightTrigger,
-    Button::RightTrigger2,
-    Button::Select,
-    Button::Start,
-    Button::Mode,
-    Button::LeftThumb,
-    Button::RightThumb,
-    Button::DPadUp,
-    Button::DPadDown,
-    Button::DPadLeft,
-    Button::DPadRight,
-];
 
 /// A key's name in freekstyle.toml: its winit KeyCode name, except that
 /// modifiers bind by either side ("Shift", not "ShiftLeft").
@@ -299,172 +282,47 @@ fn key_name(code: KeyCode) -> String {
     }
 }
 
-/// Resolve the bindings into lookup tables; unknown names are reported
-/// and skipped.
-fn input_maps(bindings: &[freek_config::Binding]) -> (HashMap<String, u16>, Vec<(Button, u16)>) {
+/// Resolve the configured keyboard bindings into a winit KeyCode lookup table.
+fn key_map(bindings: &[freek_config::Binding]) -> HashMap<String, u16> {
     let mut keys = HashMap::new();
-    let mut pad = Vec::new();
     for b in bindings {
         let Some(bit) = freek_config::button_bit(&b.button) else { continue };
         for k in &b.keys {
             *keys.entry(k.clone()).or_insert(0) |= bit;
         }
-        for name in &b.pad {
-            match PAD_BUTTONS.iter().find(|p| format!("{p:?}") == *name) {
-                Some(&p) => pad.push((p, bit)),
-                None => eprintln!("[input] {}: unknown gamepad button {name:?}", freek_config::path().display()),
-            }
-        }
     }
-    (keys, pad)
-}
-
-/// A gamepad's SDL GUID as written in gamecontrollerdb.txt.
-fn uuid_hex(u: [u8; 16]) -> String {
-    u.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// One gamepad's state as a PS2 controller.
-fn pad_input(pad: Gamepad, pad_map: &[(Button, u16)]) -> Input {
-    let mut input = Input::default();
-    // Analog triggers press past a quarter; whatever is bound to L2/R2 also
-    // gives their pressure.
-    for &(b, m) in pad_map {
-        let v = pad.button_data(b).map(|d| d.value()).unwrap_or(0.0);
-        let analog = matches!(b, Button::LeftTrigger2 | Button::RightTrigger2);
-        if if analog { v > 0.25 } else { pad.is_pressed(b) } {
-            input.buttons |= m;
-        }
-        let pressure = (v * 255.0) as u8;
-        if m & button::L2 != 0 {
-            input.l2 = input.l2.max(pressure);
-        }
-        if m & button::R2 != 0 {
-            input.r2 = input.r2.max(pressure);
-        }
-    }
-    // PS2 sticks: 0 = left/up, 0x80 = centre, 0xff = right/down.
-    let axis = |a, invert: bool| {
-        let v = pad.value(a);
-        let v = if invert { -v } else { v };
-        (128.0 + v * 127.5).clamp(0.0, 255.0) as u8
-    };
-    input.sticks = [axis(Axis::RightStickX, false), axis(Axis::RightStickY, true), axis(Axis::LeftStickX, false), axis(Axis::LeftStickY, true)];
-    input
-}
-
-/// Host motor strengths for the game's (small, large) speeds. A DualShock
-/// 2's large motor barely turns at the 50-110 the game holds while riding,
-/// but a modern pad shakes at any speed, so the curve silences that and
-/// leaves landings and crashes strong. The small motor is on or off there
-/// and much too harsh at full strength here.
-fn rumble_strength((small, large): (u8, u8)) -> (u16, u16) {
-    const QUIET: f32 = 110.0;
-    let x = ((large as f32 - QUIET) / (255.0 - QUIET)).max(0.0);
-    (if small != 0 { 8_000 } else { 0 }, (x * x * 50_000.0) as u16)
+    keys
 }
 
 impl App {
     /// Run each player's pad motors at the speeds the game asked for. An
     /// effect's strength is fixed, so a new speed needs a new effect.
     fn update_rumble(&mut self) {
-        let Some(g) = &mut self.gilrs else { return };
-        let motors = ee_runtime::pad::motors().map(rumble_strength);
-        for n in 0..2 {
-            let Some(id) = self.players[n].filter(|&id| g.connected_gamepad(id).is_some_and(|p| p.is_ff_supported())) else {
-                self.rumble[n] = None;
-                continue;
-            };
-            if self.rumble[n].as_ref().is_some_and(|r| r.0 == motors[n]) || (self.rumble[n].is_none() && motors[n] == (0, 0)) {
-                continue;
-            }
-            // The game fades its motors every frame; this is often enough.
-            if motors[n] != (0, 0) && self.rumble_at[n].elapsed() < Duration::from_millis(50) {
-                continue;
-            }
-            self.rumble[n] = None;
-            if motors[n] == (0, 0) {
-                continue;
-            }
-            self.rumble_at[n] = Instant::now();
-            let (weak, strong) = motors[n];
-            let motor = |kind| BaseEffect { kind, scheduling: Replay { play_for: Ticks::from_ms(1000), ..Default::default() }, ..Default::default() };
-            let effect = EffectBuilder::new()
-                .add_effect(motor(BaseEffectType::Weak { magnitude: weak }))
-                .add_effect(motor(BaseEffectType::Strong { magnitude: strong }))
-                .repeat(Repeat::Infinitely)
-                .gamepads(&[id])
-                .finish(g);
-            match effect.and_then(|e| e.play().map(|_| e)) {
-                Ok(e) => self.rumble[n] = Some((motors[n], e)),
-                Err(e) => eprintln!("[input] rumble: {e}"),
-            }
-        }
-    }
-
-    /// Give a newly connected gamepad the first free player seat.
-    fn seat(&mut self, id: GamepadId) {
-        let Some(g) = &self.gilrs else { return };
-        let pad = g.gamepad(id);
-        let mut name = pad.name().to_string();
-        if pad.mapping_source() == gilrs::MappingSource::None {
-            // Buttons then follow Linux codes, which put X and Y (and more)
-            // in the wrong places on many generic pads.
-            name += &format!(" [no layout mapping for {}; add one to freek-config's gamecontrollerdb.txt]", uuid_hex(pad.uuid()));
-        }
-        if !pad.is_ff_supported() {
-            name += " [no rumble]";
-        }
-        if self.players.contains(&Some(id)) {
-            return;
-        }
-        match self.players.iter().position(Option::is_none) {
-            Some(n) => {
-                self.players[n] = Some(id);
-                eprintln!("[input] gamepad connected: {name} (player {})", n + 1);
-            }
-            None => eprintln!("[input] gamepad connected: {name} (not playing: both players have one)"),
+        if let Some(c) = &mut self.controllers {
+            c.set_rumble(ee_runtime::pad::motors(), self.focused);
         }
     }
 
     /// Combine gamepad and keyboard state into the two PS2 controllers.
     fn update_input(&mut self) {
         let keys = self.keys.iter().filter_map(|&k| self.key_map.get(&key_name(k))).fold(0, |a, b| a | b);
-        let mut events = Vec::new();
-        if let Some(g) = &mut self.gilrs {
-            while let Some(ev) = g.next_event() {
-                events.push((ev.id, ev.event));
+        let mut players: [Option<Input>; 2] = match &mut self.controllers {
+            Some(c) => {
+                c.poll_events();
+                c.read_players(&self.pad_map, self.opts.stick_deadzone, self.focused)
             }
-        }
-        // Logged so a flaky controller shows up next to the game's output.
-        for (id, event) in events {
-            match event {
-                EventType::Connected => self.seat(id),
-                EventType::Disconnected => {
-                    let name = self.gilrs.as_ref().map(|g| g.gamepad(id).name().to_string()).unwrap_or_default();
-                    match self.players.iter().position(|&p| p == Some(id)) {
-                        Some(n) => {
-                            self.players[n] = None;
-                            eprintln!("[input] gamepad disconnected: {name} (player {})", n + 1);
-                        }
-                        None => eprintln!("[input] gamepad disconnected: {name}"),
-                    }
-                }
-                _ => {}
-            }
-        }
-        let mut players: [Option<Input>; 2] = [None; 2];
-        if let Some(g) = &self.gilrs {
-            for (n, id) in self.players.iter().enumerate() {
-                if let Some(pad) = id.and_then(|id| g.connected_gamepad(id)) {
-                    players[n] = Some(pad_input(pad, &self.pad_map));
-                }
-            }
-        }
+            None => [None; 2],
+        };
         // Player 1 is always plugged in; the keyboard plugs in its player.
         players[0].get_or_insert_with(Input::default);
         let input = players[self.keyboard_player].get_or_insert_with(Input::default);
         input.buttons |= keys;
+        if keys & button::L2 != 0 {
+            input.l2 = 0xff;
+        }
+        if keys & button::R2 != 0 {
+            input.r2 = 0xff;
+        }
         // D-pad keys (WASD, arrows) also push the left stick, so the keyboard
         // steers whether the game reads the D-pad or the stick. Per axis the
         // larger deflection wins: a resting or drifting gamepad stick never
@@ -516,8 +374,11 @@ impl ApplicationHandler for App {
             .with_title("Freekstyle")
             .with_inner_size(PhysicalSize::new(w, h))
             .with_window_icon(window_icon());
-        attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(attrs, "freekstyle", "freekstyle");
-        attrs = winit::platform::x11::WindowAttributesExtX11::with_name(attrs, "freekstyle", "freekstyle");
+        #[cfg(target_os = "linux")]
+        {
+            attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(attrs, "freekstyle", "freekstyle");
+            attrs = winit::platform::x11::WindowAttributesExtX11::with_name(attrs, "freekstyle", "freekstyle");
+        }
         if self.opts.fullscreen {
             attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
         }
@@ -565,7 +426,12 @@ impl ApplicationHandler for App {
                 }
             }
             // Releases while unfocused never arrive: drop everything held.
-            WindowEvent::Focused(false) => self.keys.clear(),
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if !focused {
+                    self.keys.clear();
+                }
+            }
             WindowEvent::KeyboardInput { event: KeyEvent { logical_key, state: ElementState::Pressed, .. }, .. } => match logical_key {
                 Key::Named(NamedKey::Escape) => el.exit(),
                 Key::Named(NamedKey::F12) => {

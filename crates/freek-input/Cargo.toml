@@ -1,0 +1,12 @@
+[package]
+name = "freek-input"
+description = "Universal gamepad/joystick input and rumble via SDL3, shared by the game and its launcher"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+ee-runtime = { path = "../ee-runtime" }
+freek-config = { path = "../freek-config" }
+sdl3 = { version = "0.22.1", features = ["build-from-source-static"] }

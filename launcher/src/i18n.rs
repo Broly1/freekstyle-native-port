@@ -119,6 +119,7 @@ pub struct Tr {
     pub keyboard_plays: &'static str,
     pub player_n: &'static str,
     pub players_help: &'static str,
+    pub stick_deadzone: &'static str,
     pub ps2_button: &'static str,
     pub keyboard: &'static str,
     pub controller: &'static str,
@@ -232,6 +233,7 @@ pub const EN: Tr = Tr {
     dpad: "D-pad",
     ls_click: "LS click",
     rs_click: "RS click",
+    stick_deadzone: "Stick deadzone:",
 
     game_comment: "Freekstyle, native port",
     launcher_comment: "Freekstyle display settings and controls",
@@ -321,6 +323,7 @@ pub const PT_BR: Tr = Tr {
     dpad: "Direcional",
     ls_click: "Clique LS",
     rs_click: "Clique RS",
+    stick_deadzone: "Zona morta:",
 
     game_comment: "Freekstyle, port nativo",
     launcher_comment: "Vídeo e controles do Freekstyle",
@@ -410,6 +413,7 @@ pub const ES: Tr = Tr {
     dpad: "Cruceta",
     ls_click: "Clic LS",
     rs_click: "Clic RS",
+    stick_deadzone: "Zona muerta:",
 
     game_comment: "Freekstyle, port nativo",
     launcher_comment: "Pantalla y controles de Freekstyle",
@@ -499,6 +503,7 @@ pub const FR: Tr = Tr {
     dpad: "Croix",
     ls_click: "Clic LS",
     rs_click: "Clic RS",
+    stick_deadzone: "Zone morte :",
 
     game_comment: "Freekstyle, portage natif",
     launcher_comment: "Affichage et commandes de Freekstyle",

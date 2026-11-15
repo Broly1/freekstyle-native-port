@@ -17,11 +17,12 @@ use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText};
 use freek_config::{Config, PS2_BUTTONS};
-use gilrs::{EventType, Gilrs};
+use freek_input::ControllerManager;
 use i18n::{fill, Lang, Tr};
 
 /// The game's icon (the devil face) at each hicolor size KDE and GNOME
 /// look up.
+#[cfg(target_os = "linux")]
 const ICONS: [(u32, &[u8]); 9] = [
     (16, include_bytes!("../../freekstyle/assets/icon/16.png")),
     (22, include_bytes!("../../freekstyle/assets/icon/22.png")),
@@ -64,25 +65,28 @@ fn main() -> eframe::Result {
     if let Err(e) = std::env::set_current_dir(&root) {
         eprintln!("{}: {e}", root.display());
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("--install-menu") {
-        let data = args.get(1).map(PathBuf::from).or_else(user_data);
-        let Some(data) = data else { std::process::exit(1) };
-        if let Err(e) = install_desktop_entries(&root, &data) {
-            eprintln!("{}: {e}", data.display());
-            std::process::exit(1);
+    #[cfg(target_os = "linux")]
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().map(String::as_str) == Some("--install-menu") {
+            let data = args.get(1).map(PathBuf::from).or_else(user_data);
+            let Some(data) = data else { std::process::exit(1) };
+            if let Err(e) = install_desktop_entries(&root, &data) {
+                eprintln!("{}: {e}", data.display());
+                std::process::exit(1);
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
-    // A system install has its menu entries in /usr/share already; the
-    // user's own (from running a build in a source folder) would hide them.
-    let launcher = std::env::current_exe().unwrap_or_default();
-    let system = Path::new("/usr/share/applications/freekstyle-launcher.desktop");
-    let installed = std::fs::read_to_string(system).is_ok_and(|e| e.contains(&format!("Exec=\"{}\"", launcher.display())));
-    if let Some(data) = user_data() {
-        let done = if installed { remove_desktop_entries(&data) } else { install_desktop_entries(&root, &data) };
-        if let Err(e) = done {
-            eprintln!("[launcher] desktop entries: {e}");
+        // A system install has its menu entries in /usr/share already; the
+        // user's own (from running a build in a source folder) would hide them.
+        let launcher = std::env::current_exe().unwrap_or_default();
+        let system = Path::new("/usr/share/applications/freekstyle-launcher.desktop");
+        let installed = std::fs::read_to_string(system).is_ok_and(|e| e.contains(&format!("Exec=\"{}\"", launcher.display())));
+        if let Some(data) = user_data() {
+            let done = if installed { remove_desktop_entries(&data) } else { install_desktop_entries(&root, &data) };
+            if let Err(e) = done {
+                eprintln!("[launcher] desktop entries: {e}");
+            }
         }
     }
     let options = eframe::NativeOptions {
@@ -117,11 +121,13 @@ fn game_binary() -> PathBuf {
 
 /// The user's data directory (~/.local/share), where their own menu
 /// entries and icons go.
+#[cfg(target_os = "linux")]
 fn user_data() -> Option<PathBuf> {
     std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share")))
 }
 
 /// Remove the menu entries and icons from `data`.
+#[cfg(target_os = "linux")]
 fn remove_desktop_entries(data: &Path) -> std::io::Result<()> {
     for name in ["freekstyle.desktop", "freekstyle-launcher.desktop"] {
         let _ = std::fs::remove_file(data.join("applications").join(name));
@@ -145,6 +151,7 @@ fn remove_desktop_entries(data: &Path) -> std::io::Result<()> {
 /// compositors pick the icon. Only the launcher is listed in the menu (in
 /// Games, for KDE, GNOME, Cinnamon, XFCE and other freedesktop menus); the
 /// game's entry is there for its window icon.
+#[cfg(target_os = "linux")]
 fn install_desktop_entries(root: &Path, data: &Path) -> std::io::Result<()> {
     let launcher = std::env::current_exe()?;
     let game = game_binary();
@@ -228,7 +235,7 @@ struct Launcher {
     saved: Config,
     tab: Tab,
     capture: Option<Capture>,
-    gilrs: Option<Gilrs>,
+    controllers: Option<ControllerManager>,
     game: Option<Child>,
     status: String,
     logo: Option<egui::TextureHandle>,
@@ -269,7 +276,7 @@ impl Launcher {
             config,
             tab: Tab::Play,
             capture: None,
-            gilrs: gilrs::GilrsBuilder::new().add_mappings(freek_config::GAMEPAD_MAPPINGS).build().ok(),
+            controllers: ControllerManager::new().ok(),
             game: None,
             status,
             logo,
@@ -321,14 +328,9 @@ impl Launcher {
     }
 
     fn poll_gamepad(&mut self) -> (Option<String>, Option<String>) {
-        let Some(g) = &mut self.gilrs else { return (None, None) };
-        let mut pressed = None;
-        while let Some(ev) = g.next_event() {
-            if let EventType::ButtonPressed(b, _) = ev.event {
-                pressed = Some(format!("{b:?}"));
-            }
-        }
-        let name = g.gamepads().find(|(_, p)| p.is_connected()).map(|(_, p)| p.name().to_string());
+        let Some(c) = &mut self.controllers else { return (None, None) };
+        let pressed = c.poll_events();
+        let name = c.primary_controller_name();
         (name, pressed)
     }
 
@@ -438,6 +440,7 @@ impl Launcher {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button(t.reset_defaults).clicked() {
                     self.config.bindings = freek_config::default_bindings();
+                    self.config.stick_deadzone = freek_config::DEFAULT_STICK_DEADZONE;
                     self.capture = None;
                 }
             });
@@ -451,6 +454,13 @@ impl Launcher {
                 ui.selectable_value(&mut self.config.keyboard_player, n, fill(t.player_n, &[&n.to_string()]));
             }
             ui.label(RichText::new(t.players_help).color(MUTED));
+        });
+        ui.horizontal(|ui| {
+            ui.label(t.stick_deadzone);
+            let mut dz_pct = (self.config.deadzone() * 100.0).round() as u32;
+            if ui.add(egui::Slider::new(&mut dz_pct, 0..=50).suffix("%")).changed() {
+                self.config.stick_deadzone = dz_pct as f32 / 100.0;
+            }
         });
         ui.add_space(4.0);
         let mut remove = None;
@@ -677,6 +687,15 @@ fn input_label(t: &Tr, name: &str, keyboard: bool) -> String {
         "DPadDown" => return format!("{} ↓", t.dpad),
         "DPadLeft" => return format!("{} ←", t.dpad),
         "DPadRight" => return format!("{} →", t.dpad),
+        "Touchpad" => "Touchpad",
+        "Misc1" => "Share / Mic",
+        "LeftPaddle1" => "L4",
+        "LeftPaddle2" => "L5",
+        "RightPaddle1" => "R4",
+        "RightPaddle2" => "R5",
+        s if s.starts_with("JoyButton") => return format!("Btn {}", &s["JoyButton".len()..]),
+        s if s.starts_with("JoyHat") => return format!("Hat {}", &s["JoyHat".len()..]),
+        s if s.starts_with("JoyAxis") => return format!("Axis {}", &s["JoyAxis".len()..]),
         other => other,
     }
     .to_string()
