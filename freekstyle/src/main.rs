@@ -33,6 +33,10 @@
 //!
 //! The disc image (raw .bin or .iso) defaults to game/Freekstyle.bin.
 
+// On Windows, a release build is a windowed program: no console window
+// opens beside it (debug builds keep theirs, for the log).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod audio;
 mod gsrec;
 mod profile;

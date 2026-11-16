@@ -34,9 +34,23 @@ pub fn find(dir: &Path, disc_path: &str) -> Option<PathBuf> {
     [dir.join("hd"), dir.to_path_buf()].into_iter().map(|d| d.join(format!("{stem}.mkv"))).find(|p| p.is_file())
 }
 
+/// An ffmpeg tool. On Windows it gets no console window: the game is a
+/// windowed program, so one would pop up for every movie.
+fn tool(name: &str) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(name);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Width, height and frame rate of the first video stream.
 fn probe(path: &Path) -> Option<(u32, u32, f64)> {
-    let out = Command::new("ffprobe")
+    let out = tool("ffprobe")
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate", "-of", "csv=p=0"])
         .arg(path)
         .output()
@@ -51,7 +65,7 @@ fn probe(path: &Path) -> Option<(u32, u32, f64)> {
 /// ffmpeg decoding `path` to raw data on its stdout. Its complaints are
 /// dropped: skipping a movie closes the pipe it writes to.
 fn decoder(path: &Path, output: &[&str]) -> Result<Child, String> {
-    Command::new("ffmpeg")
+    tool("ffmpeg")
         .args(["-nostdin", "-i"])
         .arg(path)
         .args(output)

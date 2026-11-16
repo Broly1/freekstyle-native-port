@@ -9,6 +9,10 @@
 //! `freekstyle-launcher --install-menu /usr/share` (run by linux-install.py for a
 //! system install) puts them in the system menu instead.
 
+// On Windows, a release build is a windowed program: no console window
+// opens beside it (debug builds keep theirs, for the log).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod i18n;
 
 use std::path::{Path, PathBuf};

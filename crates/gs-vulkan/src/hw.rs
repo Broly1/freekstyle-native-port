@@ -1614,11 +1614,14 @@ impl Hw {
     /// Start the encoder for a recording of `ow`x`oh` RGBA frames: a thread
     /// feeding ffmpeg, so encoding never holds up the frame.
     fn start_encoder(path: &str, (ow, oh): (u32, u32)) -> Option<std::sync::mpsc::Sender<Vec<u8>>> {
-        let child = std::process::Command::new("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb0", "-s", &format!("{ow}x{oh}"), "-r", "60", "-i", "-"])
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb0", "-s", &format!("{ow}x{oh}"), "-r", "60", "-i", "-"])
             .args(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-pix_fmt", "yuv420p", path])
-            .stdin(std::process::Stdio::piped())
-            .spawn();
+            .stdin(std::process::Stdio::piped());
+        // No console window beside the (windowed) game on Windows.
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
+        let child = cmd.spawn();
         let mut child = match child {
             Ok(c) => c,
             Err(e) => {
