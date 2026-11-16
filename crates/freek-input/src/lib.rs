@@ -327,11 +327,11 @@ pub struct ControllerManager {
 impl ControllerManager {
     /// Initialize SDL3 controller subsystems and load built-in + external DBs.
     pub fn new() -> Result<Self, String> {
-        // Required on Windows when another library (winit/eframe) owns the
-        // window and SDL_INIT_VIDEO is not used.
         // SDL would otherwise take SIGINT/SIGTERM and turn them into a quit
         // event nobody reads, so Ctrl+C and kill would no longer stop us.
         sdl3::hint::set("SDL_NO_SIGNAL_HANDLERS", "1");
+        // Required on Windows when another library (winit/eframe) owns the
+        // window and SDL_INIT_VIDEO is not used.
         sdl3::hint::set("SDL_JOYSTICK_THREAD", "1");
         sdl3::hint::set("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
         sdl3::hint::set("SDL_JOYSTICK_HIDAPI", "1");
@@ -392,6 +392,12 @@ impl ControllerManager {
         let mut captured = None;
 
         for event in pending {
+            // A controller takes a player seat on its first real input, not
+            // when it appears: a wireless receiver with no pad paired shows
+            // up as a gamepad too, and would otherwise sit on player 1.
+            if let Some(id) = self.activity(&event) {
+                self.seat(id);
+            }
             match event {
                 Event::GamepadAdded { which, .. } | Event::GamepadRemapped { which, .. } => {
                     self.add_device(which);
@@ -471,10 +477,12 @@ impl ControllerManager {
     }
 
     /// Name of the player 1 (or first connected) controller, for UI status.
+    /// Before any controller has been used, the first one found.
     pub fn primary_controller_name(&self) -> Option<String> {
         self.players[0]
             .or(self.players[1])
             .and_then(|id| self.devices.get(&id))
+            .or_else(|| self.devices.values().next())
             .filter(|d| d.connected())
             .map(DeviceState::name)
     }
@@ -557,7 +565,7 @@ impl ControllerManager {
                     if already_seated {
                         eprintln!("[input] controller remapped as SDL gamepad: {name}");
                     } else {
-                        self.seat(id, &name, "gamepad");
+                        eprintln!("[input] controller found (gamepad): {name}; press a button to play");
                     }
                 }
                 Err(e) => eprintln!("[input] failed to open gamepad {id}: {e}"),
@@ -592,7 +600,7 @@ impl ControllerManager {
                     },
                 );
                 eprintln!("[input] unmapped controller GUID: {guid} (using raw joystick fallback)");
-                self.seat(id, &name, "joystick");
+                eprintln!("[input] controller found (joystick): {name}; press a button to play");
             }
             Err(e) => eprintln!("[input] failed to open joystick {id}: {e}"),
         }
@@ -610,11 +618,38 @@ impl ControllerManager {
         }
     }
 
-    fn seat(&mut self, id: JoystickId, name: &str, kind: &str) {
+    /// The controller an event shows someone using: a button, a trigger or
+    /// stick pushed well past rest, or a hat moved. Raw joystick axes don't
+    /// count, as their rest positions are guesses taken when they opened.
+    fn activity(&self, event: &Event) -> Option<JoystickId> {
+        let id = match *event {
+            Event::GamepadButtonDown { which, .. } => which,
+            Event::GamepadAxisMotion { which, axis, value, .. } => {
+                let pushed = match axis {
+                    Axis::TriggerLeft | Axis::TriggerRight => value >= TRIGGER_PRESS_THRESHOLD,
+                    _ => value.unsigned_abs() >= JOY_AXIS_DIGITAL_THRESHOLD as u16,
+                };
+                if !pushed {
+                    return None;
+                }
+                which
+            }
+            Event::JoyButtonDown { which, .. } => which,
+            Event::JoyHatMotion { which, state, .. } if HatDir::first_from_state(state).is_some() => which,
+            _ => return None,
+        };
+        self.devices.contains_key(&id).then_some(id)
+    }
+
+    /// Give a controller the first free player seat.
+    fn seat(&mut self, id: JoystickId) {
         if self.players.contains(&Some(id)) {
             return;
         }
+        let Some(dev) = self.devices.get(&id) else { return };
+        let (name, kind) = (dev.name(), if dev.is_gamepad() { "gamepad" } else { "joystick" });
         let Some(slot) = self.players.iter().position(Option::is_none) else {
+            eprintln!("[input] {name}: not playing, both players have a controller");
             return;
         };
         self.players[slot] = Some(id);
