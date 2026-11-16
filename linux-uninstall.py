@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Remove Freekstyle and what install.py added, without touching anything
+"""Remove Freekstyle and what linux-install.py added, without touching anything
 else on the system.
 
 It lists what it finds and asks about each part:
@@ -7,15 +7,15 @@ It lists what it finds and asks about each part:
     freekstyle-launcher command)                                 [default: yes]
   - menu entries the launcher made for your user                 [default: yes]
   - build output in the source folder (target/, the generated game code,
-    and the files install.py recorded creating; never your disc dump)
+    and the files linux-install.py recorded creating; never your disc dump)
                                                                  [default: yes]
   - your saves and settings                                      [default: no]
-  - packages install.py installed (only those it recorded, and only those
-    no other installed software still needs)                     [default: no]
-  - Rust, if install.py installed it with rustup                 [default: no]
-  - RPM Fusion, if install.py enabled it (Fedora)                [default: no]
+  - packages linux-install.py installed (only those it recorded, and only
+    those no other installed software still needs)               [default: no]
+  - Rust, if linux-install.py installed it with rustup           [default: no]
+  - RPM Fusion, if linux-install.py enabled it (Fedora)          [default: no]
 
-What install.py did is read from ~/.local/state/freekstyle/install.json.
+What linux-install.py did is read from ~/.local/state/freekstyle/install.json.
 Only files and packages listed there or known to belong to the game are
 removed. --dry-run shows what would happen and changes nothing.
 
@@ -44,7 +44,7 @@ MENU_NAMES = ("freekstyle.desktop", "freekstyle-launcher.desktop")
 # ---- Messages ----
 
 def _language():
-    """As in install.py and the launcher: 0 English, 1 Portuguese (Brazil),
+    """As in linux-install.py and the launcher: 0 English, 1 Portuguese (Brazil),
     2 Spanish, 3 French."""
     for v in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
         value = os.environ.get(v)
@@ -65,10 +65,10 @@ MESSAGES = {
     "title": ("Uninstall Freekstyle", "Desinstalar o Freekstyle", "Desinstalar Freekstyle", "Désinstaller Freekstyle"),
     "nothing": ("Nothing of Freekstyle was found to remove.", "Nada do Freekstyle foi encontrado para remover.",
                 "No se encontró nada de Freekstyle para quitar.", "Rien de Freekstyle n'a été trouvé à supprimer."),
-    "no_state": ("(no record from install.py was found, so only the game's own files are offered)",
-                 "(nenhum registro do install.py foi encontrado, então só os arquivos do próprio jogo são oferecidos)",
-                 "(no se encontró registro de install.py, así que solo se ofrecen los archivos del propio juego)",
-                 "(aucun relevé d'install.py trouvé, seuls les fichiers du jeu lui-même sont proposés)"),
+    "no_state": ("(no record from linux-install.py was found, so only the game's own files are offered)",
+                 "(nenhum registro do linux-install.py foi encontrado, então só os arquivos do próprio jogo são oferecidos)",
+                 "(no se encontró registro de linux-install.py, así que solo se ofrecen los archivos del propio juego)",
+                 "(aucun relevé d'linux-install.py trouvé, seuls les fichiers du jeu lui-même sont proposés)"),
     "system": ("The installed game: %s, the app menu entry and the freekstyle-launcher command (needs sudo)",
                "O jogo instalado: %s, o item do menu e o comando freekstyle-launcher (precisa de sudo)",
                "El juego instalado: %s, la entrada del menú y el comando freekstyle-launcher (necesita sudo)",
@@ -80,22 +80,22 @@ MESSAGES = {
               "Archivos de compilación en %s (el juego compilado, código generado, archivos extraídos y convertidos; tu imagen del disco se queda)",
               "Fichiers de compilation dans %s (le jeu compilé, le code généré, les fichiers extraits et convertis ; votre image disque reste)"),
     "data": ("Your saves and settings: %s", "Seus saves e configurações: %s", "Tus partidas guardadas y ajustes: %s", "Vos sauvegardes et réglages : %s"),
-    "packages": ("Packages install.py installed: %s", "Pacotes que o install.py instalou: %s",
-                 "Paquetes que instaló install.py: %s", "Paquets installés par install.py : %s"),
+    "packages": ("Packages linux-install.py installed: %s", "Pacotes que o linux-install.py instalou: %s",
+                 "Paquetes que instaló linux-install.py: %s", "Paquets installés par linux-install.py : %s"),
     "packages_note": ("only those no other installed software needs are removed; the rest stay",
                       "só são removidos os que nenhum outro programa instalado usa; o resto fica",
                       "solo se quitan los que ningún otro programa instalado necesita; el resto se queda",
                       "seuls ceux dont aucun autre logiciel installé n'a besoin sont supprimés ; les autres restent"),
-    "rust": ("Rust, installed by install.py with rustup: removes ~/.cargo and ~/.rustup",
-             "A Rust, instalada pelo install.py com rustup: remove ~/.cargo e ~/.rustup",
-             "Rust, instalado por install.py con rustup: quita ~/.cargo y ~/.rustup",
-             "Rust, installé par install.py avec rustup : supprime ~/.cargo et ~/.rustup"),
+    "rust": ("Rust, installed by linux-install.py with rustup: removes ~/.cargo and ~/.rustup",
+             "A Rust, instalada pelo linux-install.py com rustup: remove ~/.cargo e ~/.rustup",
+             "Rust, instalado por linux-install.py con rustup: quita ~/.cargo y ~/.rustup",
+             "Rust, installé par linux-install.py avec rustup : supprime ~/.cargo et ~/.rustup"),
     "rust_tools": ("also removes these programs installed with cargo: %s", "também remove estes programas instalados com cargo: %s",
                    "también quita estos programas instalados con cargo: %s", "supprime aussi ces programmes installés avec cargo : %s"),
-    "rpmfusion": ("RPM Fusion, enabled by install.py for the full ffmpeg (ffmpeg-free comes back)",
-                  "O RPM Fusion, ativado pelo install.py para o ffmpeg completo (o ffmpeg-free volta)",
-                  "RPM Fusion, activado por install.py para el ffmpeg completo (vuelve ffmpeg-free)",
-                  "RPM Fusion, activé par install.py pour le ffmpeg complet (ffmpeg-free revient)"),
+    "rpmfusion": ("RPM Fusion, enabled by linux-install.py for the full ffmpeg (ffmpeg-free comes back)",
+                  "O RPM Fusion, ativado pelo linux-install.py para o ffmpeg completo (o ffmpeg-free volta)",
+                  "RPM Fusion, activado por linux-install.py para el ffmpeg completo (vuelve ffmpeg-free)",
+                  "RPM Fusion, activé par linux-install.py pour le ffmpeg complet (ffmpeg-free revient)"),
     "remove_q": ("Remove?", "Remover?", "¿Quitar?", "Supprimer ?"),
     "removing": ("Removing", "Removendo", "Quitando", "Suppression"),
     "kept_used": ("kept, other software needs it: %s", "mantido, outro programa usa: %s", "se queda, otro programa lo necesita: %s",
@@ -170,7 +170,7 @@ def load_state():
 def is_source(folder):
     """A Freekstyle source folder: the paths below are only deleted there."""
     try:
-        return (folder / "install.py").is_file() and 'name = "freekstyle"' in (folder / "freekstyle" / "Cargo.toml").read_text()
+        return (folder / "linux-install.py").is_file() and 'name = "freekstyle"' in (folder / "freekstyle" / "Cargo.toml").read_text()
     except OSError:
         return False
 
@@ -260,7 +260,7 @@ def user_menu_paths():
 
 def build_paths(state):
     """Build output in the source folder: target/ and the generated code
-    (pure build output), plus the files install.py recorded creating. The
+    (pure build output), plus the files linux-install.py recorded creating. The
     disc dump is never among them."""
     source = Path(state.get("source") or HERE)
     if not is_source(source):
@@ -486,7 +486,7 @@ class Uninstaller:
             STATE.write_text(json.dumps(self.state, indent=2))
 
 def main():
-    parser = argparse.ArgumentParser(description="Remove Freekstyle and what install.py added (see the top of this file).")
+    parser = argparse.ArgumentParser(description="Remove Freekstyle and what linux-install.py added (see the top of this file).")
     parser.add_argument("-y", "--yes", action="store_true", help="don't ask: take each part's default (with --all: everything)")
     parser.add_argument("--all", action="store_true", help="default to removing everything, saves, packages and Rust included")
     parser.add_argument("--dry-run", action="store_true", help="show what would be removed and change nothing")

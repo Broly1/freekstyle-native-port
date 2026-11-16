@@ -40,15 +40,15 @@ go in `game/`, which git ignores.
 The port needs the North American release (SLUS-20367); nothing from the
 game is in this repository. You need Python 3 (preinstalled on most
 distributions), Rust 1.95 or newer (distributions often ship an older one;
-`install.py` then installs current Rust with rustup), a Vulkan driver and,
+`linux-install.py` then installs current Rust with rustup), a Vulkan driver and,
 for the optional movies, ffmpeg with MPEG-2 (and libplacebo for their CRT
 look; most distributions' ffmpeg has both, Fedora's needs RPM Fusion, which
-`install.py` offers to enable).
+`linux-install.py` offers to enable).
 
 **Quick way**: dump your disc (step 1 below) into `game/`, then run
 
 ```sh
-./install.py
+./linux-install.py
 ```
 
 It shows what is present and what is missing, installs the missing pieces
@@ -61,14 +61,14 @@ it offers to install the game to the system, like a game from a store:
 (KDE, GNOME, Cinnamon, XFCE and other freedesktop menus) and
 `freekstyle-launcher` on the command line. The source folder is then no
 longer needed to play; settings go to `~/.config/freekstyle`, saves to
-`~/.local/share/freekstyle/saves`. `./uninstall.py` (also copied to
-`/opt/freekstyle/uninstall.py`) removes the game and what `install.py`
+`~/.local/share/freekstyle/saves`. `./linux-uninstall.py` (also copied to
+`/opt/freekstyle/linux-uninstall.py`) removes the game and what `linux-install.py`
 added: it lists each part and asks, keeping your saves and settings,
 packages and Rust unless you say otherwise, and removes a package only if
 nothing else installed needs it (`--dry-run` shows what it would do). Or keep it in the folder and start
 `./target/release/freekstyle-launcher`. Steps already done are skipped, so
 running it again after a `git pull` only redoes what changed. For an
-unattended run: `./install.py --yes --system` (or `--here`).
+unattended run: `./linux-install.py --yes --system` (or `--here`).
 
 The same by hand:
 
@@ -246,7 +246,7 @@ must be installed to see them. Start or Cross skips a movie.
 None of this is needed to play. It makes the game look sharper: an HD
 texture pack with redrawn steel menu frames, AI-upscaled pictures with
 16:9 versions for widescreen, and AI-upscaled intro movies. Run every
-command from the repository root, after `install.py` has finished.
+command from the repository root, after `linux-install.py` has finished.
 
 ### What you need
 

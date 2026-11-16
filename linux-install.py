@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Set up Freekstyle from your own disc dump.
 
-Put the dump (.bin or .iso) in game/ and run ./install.py. It installs what
+Put the dump (.bin or .iso) in game/ and run ./linux-install.py. It installs what
 is missing (asking first), copies what the port needs off the disc,
 generates the game code and builds it, converts the pictures and movies,
 and offers to install the game to the system (/opt/freekstyle, with the
 launcher in the app menu's Games section). Steps already done are skipped,
 so it is safe to run again after a `git pull`. What it adds (packages,
 Rust, files, the system install) is recorded in
-~/.local/state/freekstyle/install.json, so that ./uninstall.py can remove
+~/.local/state/freekstyle/install.json, so that ./linux-uninstall.py can remove
 exactly that and nothing else.
 
 It speaks English, Brazilian Portuguese, Spanish or French, following the
@@ -38,7 +38,7 @@ MENU = [Path("/usr/share/applications/freekstyle.desktop"), Path("/usr/share/app
 # Free space wanted for the build (it ends up around 7 GB) and the copies.
 SPACE_GB = 10
 # What this script added (packages, Rust, RPM Fusion, files, the system
-# install), for uninstall.py: kept outside the source folder so it
+# install), for linux-uninstall.py: kept outside the source folder so it
 # survives that folder being deleted.
 STATE = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "freekstyle" / "install.json"
 
@@ -156,10 +156,10 @@ MESSAGES = {
     "choose": ("Choose [1]: ", "Escolha [1]: ", "Elige [1]: ", "Choix [1] : "),
     "copying_disc": ("copying the disc image...", "copiando a imagem do disco...", "copiando la imagen del disco...", "copie de l'image du disque..."),
     "done": ("Done in %s", "Pronto em %s", "Listo en %s", "Terminé en %s"),
-    "done_system": ("Freekstyle is in your app menu under Games (also: freekstyle-launcher in a\nterminal). This folder isn't needed to play any more; ./uninstall.py\n(or /opt/freekstyle/uninstall.py) removes it and what this script added.",
-                    "O Freekstyle está no menu de aplicativos, em Jogos (ou: freekstyle-launcher\nno terminal). Esta pasta não é mais necessária para jogar; ./uninstall.py\n(ou /opt/freekstyle/uninstall.py) remove o jogo e o que este script adicionou.",
-                    "Freekstyle está en el menú de aplicaciones, en Juegos (o: freekstyle-launcher\nen una terminal). Esta carpeta ya no hace falta para jugar; ./uninstall.py\n(o /opt/freekstyle/uninstall.py) quita el juego y lo que añadió este script.",
-                    "Freekstyle est dans le menu des applications, dans Jeux (ou : freekstyle-launcher\ndans un terminal). Ce dossier n'est plus nécessaire pour jouer ; ./uninstall.py\n(ou /opt/freekstyle/uninstall.py) supprime le jeu et ce que ce script a ajouté."),
+    "done_system": ("Freekstyle is in your app menu under Games (also: freekstyle-launcher in a\nterminal). This folder isn't needed to play any more; ./linux-uninstall.py\n(or /opt/freekstyle/linux-uninstall.py) removes it and what this script added.",
+                    "O Freekstyle está no menu de aplicativos, em Jogos (ou: freekstyle-launcher\nno terminal). Esta pasta não é mais necessária para jogar; ./linux-uninstall.py\n(ou /opt/freekstyle/linux-uninstall.py) remove o jogo e o que este script adicionou.",
+                    "Freekstyle está en el menú de aplicaciones, en Juegos (o: freekstyle-launcher\nen una terminal). Esta carpeta ya no hace falta para jugar; ./linux-uninstall.py\n(o /opt/freekstyle/linux-uninstall.py) quita el juego y lo que añadió este script.",
+                    "Freekstyle est dans le menu des applications, dans Jeux (ou : freekstyle-launcher\ndans un terminal). Ce dossier n'est plus nécessaire pour jouer ; ./linux-uninstall.py\n(ou /opt/freekstyle/linux-uninstall.py) supprime le jeu et ce que ce script a ajouté."),
     "done_here": ("Start the game with:   ./target/release/freekstyle-launcher", "Inicie o jogo com:   ./target/release/freekstyle-launcher",
                   "Inicia el juego con:   ./target/release/freekstyle-launcher", "Lancez le jeu avec :   ./target/release/freekstyle-launcher"),
     "failed_cmd": ("this command failed (exit %s): %s", "este comando falhou (saída %s): %s", "este comando falló (salida %s): %s", "cette commande a échoué (code %s) : %s"),
@@ -431,7 +431,7 @@ class Installer:
             os.environ["PATH"] = "%s%s%s" % (cargo_bin, os.pathsep, os.environ["PATH"])
 
     def record(self, key, value):
-        """Note something this script added, for uninstall.py. Lists
+        """Note something this script added, for linux-uninstall.py. Lists
         (packages, files) grow; other keys are set."""
         if isinstance(value, list):
             have_ = self.state.setdefault(key, [])
@@ -671,7 +671,9 @@ class Installer:
         if plain:
             run(["cp"] + plain + [PREFIX / "game" / "movies"], sudo=True)
         # The uninstaller goes along, for when this folder is gone.
-        run(["install", "-m", "755", ROOT / "uninstall.py", PREFIX], sudo=True)
+        run(["install", "-m", "755", ROOT / "linux-uninstall.py", PREFIX], sudo=True)
+        # Its name before the Windows scripts arrived.
+        run(["rm", "-f", PREFIX / "uninstall.py"], sudo=True)
         run(["chmod", "-R", "a+rX", PREFIX], sudo=True)
         run(["ln", "-sf", PREFIX / "freekstyle-launcher", "/usr/local/bin/freekstyle-launcher"], sudo=True)
         # Run from the install, so the entries point there (not this folder).
@@ -703,7 +705,7 @@ def refresh_menus(ui):
 
 def main():
     parser = argparse.ArgumentParser(description="Set up Freekstyle from your own disc dump (see README.md).")
-    parser.add_argument("--uninstall", action="store_true", help="run uninstall.py (removes the game and what this script added)")
+    parser.add_argument("--uninstall", action="store_true", help="run linux-uninstall.py (removes the game and what this script added)")
     parser.add_argument("-y", "--yes", action="store_true", help="answer yes to every question (installs packages and Rust without asking)")
     where = parser.add_mutually_exclusive_group()
     where.add_argument("--system", action="store_true", help="install to %s at the end without asking" % PREFIX)
@@ -714,7 +716,7 @@ def main():
         print(paint("31", t("error")), t("root"), file=sys.stderr)
         return 1
     if args.uninstall:
-        uninstaller = ROOT / "uninstall.py"
+        uninstaller = ROOT / "linux-uninstall.py"
         os.execv(sys.executable, [sys.executable, str(uninstaller)] + (["--yes"] if args.yes else []))
     start = time.monotonic()
     installer = None
