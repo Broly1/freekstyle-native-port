@@ -244,9 +244,9 @@ must be installed to see them. Start or Cross skips a movie.
 ## HD extras (optional)
 
 None of this is needed to play. It makes the game look sharper: an HD
-texture pack with redrawn steel menu frames, AI-upscaled pictures with
-16:9 versions for widescreen, and AI-upscaled intro movies. Run every
-command from the repository root, after `linux-install.py` has finished.
+texture pack with redrawn steel menu frames, and AI-upscaled pictures with
+16:9 versions for widescreen. Run every command from the repository root,
+after `linux-install.py` has finished.
 
 ### What you need
 
@@ -322,36 +322,6 @@ tools/widen-pictures.py
 After recording more, run both lines again: only new textures are added.
 Tick *HD textures* in the launcher (on by default).
 
-### 4. AI-upscaled intro movies
-
-About 3 hours on a mid-range GPU, and up to 25 GB of free space while it
-runs. If you stop it, run it again: it carries on from the frames already
-done.
-
-```sh
-W=game/movies/work
-for m in intro prod1; do
-  M=$(echo $m | tr a-z A-Z)
-  mkdir -p $W/$m/frames $W/$m/ai $W/$m/todo
-  ./target/release/flm2mkv --extract game/movies/flm/$M.FLM $W/$m
-  [ -e $W/$m/frames/00001.png ] || ffmpeg -loglevel error -r 30000/1001 -i $W/$m/$m.m2v \
-    -vf "setfield=tff,bwdif=mode=send_field:parity=tff:deint=all" $W/$m/frames/%05d.png
-  rm -f $W/$m/todo/*
-  # The newest frame may be half-written if a run was stopped: redo it.
-  [ -z "$(ls $W/$m/ai)" ] || rm "$W/$m/ai/$(ls -t $W/$m/ai | head -1)"
-  for f in $W/$m/frames/*.png; do [ -e $W/$m/ai/$(basename $f) ] || ln "$f" $W/$m/todo/; done
-  [ -z "$(ls $W/$m/todo)" ] || $E -i $W/$m/todo -o $W/$m/ai -n realesrgan-x4plus -f png
-  tools/movie_declick.py $W/$m/$m.wav $W/$m/fixed.wav 5
-  ffmpeg -loglevel error -y -framerate 60000/1001 -i $W/$m/ai/%05d.png -i $W/$m/fixed.wav \
-    -vf "scale=1440:1080:flags=lanczos+accurate_rnd+full_chroma_int:out_color_matrix=bt709,setsar=1" \
-    -c:v libvpx-vp9 -crf 18 -b:v 0 -deadline good -cpu-used 2 -row-mt 1 -tile-columns 2 -pix_fmt yuv420p \
-    -colorspace bt709 -color_primaries bt709 -color_trc bt709 \
-    -c:a libopus -b:a 160k -shortest game/movies/hd/$m.mkv
-  rm -r $W/$m
-done
-rmdir $W 2>/dev/null || true
-```
-
 ### If you installed the game to the system
 
 The game in `/opt/freekstyle` has its own copy of `game/`. Copy the extras
@@ -359,7 +329,6 @@ into it:
 
 ```sh
 sudo cp -r game/images /opt/freekstyle/game/
-sudo cp -r game/movies/hd /opt/freekstyle/game/movies/
 sudo mkdir -p /opt/freekstyle/game/textures && sudo cp -r game/textures/hd /opt/freekstyle/game/textures/
 ```
 
