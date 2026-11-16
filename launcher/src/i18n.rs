@@ -210,8 +210,8 @@ pub const EN: Tr = Tr {
     add_binding: "Add a binding",
 
     game_running: "Game running",
-    hd_button: "Building…",
-    hd_making: "Building HD textures: {} of {}",
+    hd_button: "Building HD shaders…",
+    hd_making: "Building HD shaders: {} of {}",
     hd_skip: "Skip",
     game_closed: "Game closed",
     game_exited: "Game exited: {}",
@@ -305,8 +305,8 @@ pub const PT_BR: Tr = Tr {
     add_binding: "Adicionar atribuição",
 
     game_running: "Jogo em execução",
-    hd_button: "Construindo…",
-    hd_making: "Construindo texturas HD: {} de {}",
+    hd_button: "Construindo shaders HD…",
+    hd_making: "Construindo shaders HD: {} de {}",
     hd_skip: "Pular",
     game_closed: "Jogo fechado",
     game_exited: "O jogo saiu: {}",
@@ -400,8 +400,8 @@ pub const ES: Tr = Tr {
     add_binding: "Añadir asignación",
 
     game_running: "Juego en ejecución",
-    hd_button: "Construyendo…",
-    hd_making: "Construyendo texturas HD: {} de {}",
+    hd_button: "Construyendo shaders HD…",
+    hd_making: "Construyendo shaders HD: {} de {}",
     hd_skip: "Saltar",
     game_closed: "Juego cerrado",
     game_exited: "El juego terminó: {}",
@@ -495,8 +495,8 @@ pub const FR: Tr = Tr {
     add_binding: "Ajouter une affectation",
 
     game_running: "Jeu en cours",
-    hd_button: "Construction…",
-    hd_making: "Construction des textures HD : {} sur {}",
+    hd_button: "Construction des shaders HD…",
+    hd_making: "Construction des shaders HD : {} sur {}",
     hd_skip: "Passer",
     game_closed: "Jeu fermé",
     game_exited: "Le jeu s'est arrêté : {}",

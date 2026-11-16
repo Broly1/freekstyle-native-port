@@ -432,9 +432,10 @@ impl Launcher {
                 ui.label(RichText::new(t.subtitle).color(MUTED));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let running = self.game.is_some() || self.hd.is_some();
-                let label = if self.hd.is_some() { t.hd_button } else if running { t.running } else { t.play };
-                let play = egui::Button::new(RichText::new(label).size(22.0).strong().color(INK))
+                let building = self.hd.is_some();
+                let running = self.game.is_some() || building;
+                let label = if building { t.hd_button } else if running { t.running } else { t.play };
+                let play = egui::Button::new(RichText::new(label).size(if building { 16.0 } else { 22.0 }).strong().color(INK))
                     .fill(if running { MAROON } else { ACCENT })
                     .min_size(egui::vec2(150.0, 48.0))
                     .corner_radius(10.0);
@@ -445,17 +446,25 @@ impl Launcher {
         });
     }
 
-    /// Beside the tabs while the HD textures are made: Skip, the bar, and
-    /// how far it is.
+    /// While the HD textures are made: Skip, the bar and how far it is,
+    /// laid out right to left in the room `ui` has left. The bar narrows
+    /// with the window, and below a few blocks only Skip and the
+    /// percentage stay.
     fn hd_progress(&mut self, ui: &mut egui::Ui) {
         let t = self.tr();
         let Some(job) = &self.hd else { return };
         let (done, total) = *job.progress.lock().unwrap();
         let fraction = if total == 0 { 0.0 } else { done as f32 / total as f32 };
-        ui.add_space(24.0);
-        let skip = ui.button(t.hd_skip).clicked();
-        segmented_bar(ui, fraction).on_hover_text(fill(t.hd_making, &[&done.to_string(), &total.to_string()]));
-        ui.label(RichText::new(format!("{:>3.0}%", fraction * 100.0)).strong().monospace());
+        let detail = fill(t.hd_making, &[&done.to_string(), &total.to_string()]);
+        ui.add_space(16.0);
+        ui.label(RichText::new(format!("{:>3.0}%", fraction * 100.0)).strong().monospace()).on_hover_text(&detail);
+        // Room for the bar once Skip and a gap from the tabs are counted.
+        let skip_width = ui.fonts_mut(|f| f.layout_no_wrap(t.hd_skip.to_string(), egui::TextStyle::Button.resolve(ui.style()), INK).size().x) + 2.0 * ui.spacing().button_padding.x;
+        let room = ui.available_width() - skip_width - 3.0 * ui.spacing().item_spacing.x - 16.0;
+        if room >= SEGMENTED_MIN {
+            segmented_bar(ui, fraction, room.min(SEGMENTED_MAX)).on_hover_text(&detail);
+        }
+        let skip = ui.available_width() >= skip_width && ui.button(t.hd_skip).clicked();
         if skip {
             if let Some(job) = self.hd.take() {
                 job.stop();
@@ -669,7 +678,6 @@ impl eframe::App for Launcher {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Play, RichText::new(t.settings_tab).size(16.0));
                 ui.selectable_value(&mut self.tab, Tab::Controls, RichText::new(t.controls_tab).size(16.0));
-                self.hd_progress(ui);
                 // Top right, so it can be found without reading the current language.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let lang = &mut self.config.language;
@@ -681,6 +689,9 @@ impl eframe::App for Launcher {
                         }
                     });
                     ui.label(RichText::new(t.language).color(MUTED));
+                    // Between the tabs and the language, in whatever room
+                    // is left there, so it never covers either.
+                    self.hd_progress(ui);
                 });
             });
         });
@@ -704,18 +715,22 @@ impl eframe::App for Launcher {
     }
 }
 
-/// A bar of separate blocks inside a frame, filled from the left.
-fn segmented_bar(ui: &mut egui::Ui, fraction: f32) -> egui::Response {
-    const BLOCKS: usize = 30;
+const SEGMENTED_MIN: f32 = 60.0;
+const SEGMENTED_MAX: f32 = 306.0;
+
+/// A bar of separate blocks inside a frame, filled from the left, as many
+/// blocks as fit in `width`.
+fn segmented_bar(ui: &mut egui::Ui, fraction: f32, width: f32) -> egui::Response {
     const BLOCK: f32 = 8.0;
     const GAP: f32 = 2.0;
     const PAD: f32 = 3.0;
-    let size = egui::vec2(BLOCKS as f32 * (BLOCK + GAP) - GAP + 2.0 * PAD, 18.0);
+    let blocks = (((width - 2.0 * PAD + GAP) / (BLOCK + GAP)).floor() as usize).max(1);
+    let size = egui::vec2(blocks as f32 * (BLOCK + GAP) - GAP + 2.0 * PAD, 18.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, MUTED), egui::StrokeKind::Inside);
-    let filled = (fraction.clamp(0.0, 1.0) * BLOCKS as f32).round() as usize;
-    for i in 0..BLOCKS {
+    let filled = (fraction.clamp(0.0, 1.0) * blocks as f32).round() as usize;
+    for i in 0..blocks {
         let x = rect.left() + PAD + i as f32 * (BLOCK + GAP);
         let block = egui::Rect::from_min_size(egui::pos2(x, rect.top() + PAD), egui::vec2(BLOCK, rect.height() - 2.0 * PAD));
         if i < filled {
