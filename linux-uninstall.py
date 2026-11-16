@@ -256,7 +256,7 @@ def system_paths():
 
 def user_menu_paths():
     paths = [DATA / "applications" / n for n in MENU_NAMES if (DATA / "applications" / n).is_file()]
-    return paths + glob.glob(str(DATA / "icons" / "hicolor" / "*" / "apps" / "freekstyle-*.png"))
+    return paths + [Path(p) for p in glob.glob(str(DATA / "icons" / "hicolor" / "*" / "apps" / "freekstyle-*.png"))]
 
 def build_paths(state):
     """Build output in the source folder: target/ and the generated code
