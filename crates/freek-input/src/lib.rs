@@ -329,6 +329,9 @@ impl ControllerManager {
     pub fn new() -> Result<Self, String> {
         // Required on Windows when another library (winit/eframe) owns the
         // window and SDL_INIT_VIDEO is not used.
+        // SDL would otherwise take SIGINT/SIGTERM and turn them into a quit
+        // event nobody reads, so Ctrl+C and kill would no longer stop us.
+        sdl3::hint::set("SDL_NO_SIGNAL_HANDLERS", "1");
         sdl3::hint::set("SDL_JOYSTICK_THREAD", "1");
         sdl3::hint::set("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
         sdl3::hint::set("SDL_JOYSTICK_HIDAPI", "1");
