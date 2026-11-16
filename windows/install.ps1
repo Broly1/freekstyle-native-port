@@ -199,10 +199,10 @@ $Messages = @{
                  'pulado: este ffmpeg não decodifica os vídeos (MPEG-2), então o jogo os pula. Instale um ffmpeg completo e rode de novo.',
                  'omitido: este ffmpeg no decodifica los vídeos (MPEG-2), así que el juego los omite. Instala un ffmpeg completo y vuelve a ejecutarlo.',
                  'ignoré : ce ffmpeg ne décode pas les vidéos (MPEG-2), le jeu les saute donc. Installez un ffmpeg complet, puis relancez.')
-    movie_audio = @('turned down {0} movie soundtrack(s) that went over full volume (they crackled)',
-                    '{0} trilha(s) de vídeo que passavam do volume máximo (estalavam) foram abaixadas',
-                    'se bajó el volumen de {0} banda(s) sonora(s) de vídeo que superaban el máximo (crujían)',
-                    '{0} bande(s) son de vidéo qui dépassaient le volume maximal (grésillaient) ont été baissées')
+    movie_audio = @('fixed the sound of {0} movie(s) (crackle and clicks)',
+                    'som de {0} vídeo(s) corrigido (chiado e estalos)',
+                    'se corrigió el sonido de {0} vídeo(s) (crujidos y chasquidos)',
+                    'son de {0} vidéo(s) corrigé (grésillements et clics)')
     crt = @('with the CRT look', 'com o visual CRT', 'con aspecto CRT', 'avec le rendu CRT')
     no_crt = @('movies converted without the CRT look (it needs a graphics card)',
                'vídeos convertidos sem o visual CRT (ele precisa de uma placa de vídeo)',
@@ -411,16 +411,6 @@ function Test-Vulkan { return Test-Path (Join-Path $env:SystemRoot 'System32\vul
 
 # The movies are MPEG-2, which some ffmpeg builds leave out.
 function Test-FfmpegMpeg2 { return (Output ffmpeg -hide_banner -decoders) -match '(?m)^ V.{5} mpeg2video ' }
-
-# Highest sample of a movie's soundtrack in dB (0 is full scale), or $null.
-function Get-MoviePeak([string]$Path) {
-    $err = Output ffmpeg -hide_banner -nostats -i $Path -vn -af 'aformat=sample_fmts=flt,astats=measure_perchannel=none:measure_overall=Peak_level' -f null -
-    $found = [regex]::Matches($err, 'Peak level dB: (-?[0-9.]+|-inf)')
-    if ($found.Count -eq 0) { return $null }
-    $last = $found[$found.Count - 1].Groups[1].Value
-    if ($last -eq '-inf') { return $null }
-    return [double]::Parse($last, [Globalization.CultureInfo]::InvariantCulture)
-}
 
 # ---- Rust ----
 
@@ -688,7 +678,7 @@ function Step-Movies {
     }
     if ((Test-Path (Join-Path $movies 'hd\intro.mkv')) -or (Test-Path (Join-Path $movies 'intro.mkv'))) {
         Good (T 'already')
-        Repair-MovieHeadroom $movies
+        Update-MovieAudio $movies
         return
     }
     if (-not (Test-FfmpegMpeg2)) {
@@ -713,31 +703,8 @@ function Step-Movies {
     }
 }
 
-# Movies converted before flm2mkv left headroom go over full scale after
-# Opus encoding, and the game's 16-bit decode clips that into a crackle.
-# Re-encode just their audio about 3 dB lower; the video is copied untouched.
-function Repair-MovieHeadroom([string]$Movies) {
-    $fixed = 0
-    $all = @(Get-ChildItem (Join-Path $Movies '*.mkv') -ErrorAction SilentlyContinue) + @(Get-ChildItem (Join-Path $Movies 'hd\*.mkv') -ErrorAction SilentlyContinue)
-    foreach ($mkv in $all) {
-        $peak = Get-MoviePeak $mkv.FullName
-        if ($null -eq $peak -or $peak -lt -0.1) { continue }
-        $tmp = Join-Path $mkv.DirectoryName ($mkv.BaseName + '.headroom.mkv')
-        $gain = '{0:0.00}dB' -f (-3.0 - $peak)
-        $gain = $gain.Replace(',', '.')
-        $ok = TryRun @('ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', $mkv.FullName, '-map', '0', '-c', 'copy',
-                       '-af', "volume=$gain", '-c:a', 'libopus', '-b:a', '160k', $tmp) -Quiet
-        if ($ok -and (Test-Path $tmp)) {
-            Move-Item $tmp $mkv.FullName -Force
-            $fixed++
-        } else {
-            Remove-Item $tmp -ErrorAction SilentlyContinue
-        }
-    }
-    if ($fixed) { Good (T 'movie_audio' $fixed) }
-}
-
-function Convert-Movies([string]$Movies, [string]$Flm) {
+# The movies' .FLM files from the disc, where missing.
+function Get-Flm([string]$Flm) {
     foreach ($m in $MovieList) {
         $folder, $name = $m.Split('/')
         if (-not (Test-Path (Join-Path $Flm "$name.FLM"))) {
@@ -745,6 +712,34 @@ function Convert-Movies([string]$Movies, [string]$Flm) {
                  'game/Freekstyle.bin', "\SXDATA\$folder\$name.FLM", $Flm) -Quiet
         }
     }
+}
+
+# Movies made before flm2mkv's current sound repair (prod1's clipped peaks
+# and clicks, headroom for all) get their soundtrack made again from the
+# disc; the video is copied untouched, so hand-made movies keep their
+# picture. flm2mkv skips the ones already done.
+function Update-MovieAudio([string]$Movies) {
+    $flm = Join-Path $Movies 'flm'
+    $madeFlm = -not (Test-Path $flm)
+    $flm2mkv = Join-Path $Root 'target\release\flm2mkv.exe'
+    $fixed = 0
+    try {
+        foreach ($folder in @($Movies, (Join-Path $Movies 'hd'))) {
+            if (-not (Get-ChildItem (Join-Path $folder '*.mkv') -ErrorAction SilentlyContinue)) { continue }
+            Get-Flm $flm
+            Write-Log "> $flm2mkv --audio $flm $folder"
+            $out = Output $flm2mkv --audio $flm $folder
+            Write-Log $out
+            if ($out -match '(?m)^updated (\d+)') { $fixed += [int]$Matches[1] }
+        }
+    } finally {
+        if ($madeFlm -and (Test-Path $flm)) { Record 'files' @($flm.Substring($Root.Length).TrimStart('\')) }
+    }
+    if ($fixed) { Good (T 'movie_audio' $fixed) }
+}
+
+function Convert-Movies([string]$Movies, [string]$Flm) {
+    Get-Flm $Flm
     $flm2mkv = Join-Path $Root 'target\release\flm2mkv.exe'
     $hd = Join-Path $Movies 'hd'
     # The CRT look needs ffmpeg's libplacebo filter and a Vulkan GPU (not a

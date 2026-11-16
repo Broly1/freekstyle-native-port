@@ -161,10 +161,10 @@ MESSAGES = {
                  "pulado: este ffmpeg não decodifica os vídeos (MPEG-2), então o jogo os pula. Instale um ffmpeg completo e rode de novo.",
                  "omitido: este ffmpeg no decodifica los vídeos (MPEG-2), así que el juego los omite. Instala un ffmpeg completo y vuelve a ejecutarlo.",
                  "ignoré : ce ffmpeg ne décode pas les vidéos (MPEG-2), le jeu les saute donc. Installez un ffmpeg complet, puis relancez."),
-    "movie_audio": ("turned down %d movie soundtrack(s) that went over full volume (they crackled)",
-                    "%d trilha(s) de vídeo que passavam do volume máximo (estalavam) foram abaixadas",
-                    "se bajó el volumen de %d banda(s) sonora(s) de vídeo que superaban el máximo (crujían)",
-                    "%d bande(s) son de vidéo qui dépassaient le volume maximal (grésillaient) ont été baissées"),
+    "movie_audio": ("fixed the sound of %d movie(s) (crackle and clicks)",
+                    "som de %d vídeo(s) corrigido (chiado e estalos)",
+                    "se corrigió el sonido de %d vídeo(s) (crujidos y chasquidos)",
+                    "son de %d vidéo(s) corrigé (grésillements et clics)"),
     "crt": ("with the CRT look", "com o visual CRT", "con aspecto CRT", "avec le rendu CRT"),
     "no_crt": ("CRT look unavailable (needs ffmpeg with libplacebo and a GPU); converting the movies without it",
                "visual CRT indisponível (precisa de ffmpeg com libplacebo e uma GPU); convertendo os vídeos sem ele",
@@ -382,18 +382,6 @@ def ffmpeg_mpeg2():
     """The movies are MPEG-2, which some ffmpeg builds (Fedora's
     ffmpeg-free) leave out."""
     return re.search(r"^ V.{5} mpeg2video ", output(["ffmpeg", "-hide_banner", "-decoders"]), re.M) is not None
-
-def movie_peak(path):
-    """Highest sample of a movie's soundtrack in dB (0 is full scale), or
-    None if ffmpeg can't tell."""
-    try:
-        err = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-vn", "-af",
-                              "aformat=sample_fmts=flt,astats=measure_perchannel=none:measure_overall=Peak_level",
-                              "-f", "null", "-"], capture_output=True, text=True).stderr
-    except OSError:
-        return None
-    found = re.findall(r"Peak level dB: (-?[0-9.]+|-inf)", err)
-    return float(found[-1]) if found and found[-1] != "-inf" else None
 
 def pkg_installed(family, pkg):
     if family == "arch":
@@ -664,7 +652,7 @@ class Installer:
             return
         if (movies / "hd" / "intro.mkv").is_file() or (movies / "intro.mkv").is_file():
             self.ui.good(t("already"))
-            self.movie_headroom(movies)
+            self.movie_audio(movies)
             return
         if not ffmpeg_mpeg2():
             self.ui.warn(t("no_mpeg2"))
@@ -681,34 +669,42 @@ class Installer:
             made += [p for p in movies.glob("hd/*.mkv") if p not in before and (movies / "hd") in before]
             self.record("files", [str(p.relative_to(ROOT)) for p in made])
 
-    def movie_headroom(self, movies):
-        """Movies converted before flm2mkv left headroom go over full scale
-        after Opus encoding, and the game's 16-bit decode clips that into a
-        crackle. Re-encode just their audio about 3 dB lower; the video is
-        copied untouched, so hand-made movies keep their picture."""
-        fixed = 0
-        for mkv in sorted(movies.glob("*.mkv")) + sorted(movies.glob("hd/*.mkv")):
-            peak = movie_peak(mkv)
-            if peak is None or peak < -0.1:
-                continue
-            tmp = mkv.with_name(mkv.stem + ".headroom.mkv")
-            ok = self.ui.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", mkv, "-map", "0", "-c", "copy",
-                              "-af", "volume=%.2fdB" % (-3.0 - peak), "-c:a", "libopus", "-b:a", "160k", tmp],
-                             quiet=True, check=False)
-            if ok and tmp.is_file():
-                os.replace(tmp, mkv)
-                fixed += 1
-            else:
-                tmp.unlink(missing_ok=True)
-        if fixed:
-            self.ui.good(t("movie_audio") % fixed)
-
-    def convert_movies(self, movies, flm):
+    def extract_flm(self, flm):
+        """The movies' .FLM files from the disc, where missing."""
         for m in MOVIES:
             folder, name = m.split("/")
             if not (flm / (name + ".FLM")).is_file():
                 self.cargo("run", "--release", "-q", "-p", "ee-runtime", "--bin", "disc-extract", "--",
                            "game/Freekstyle.bin", "\\SXDATA\\%s\\%s.FLM" % (folder, name), flm, quiet=True)
+
+    def movie_audio(self, movies):
+        """Movies made before flm2mkv's current sound repair (prod1's
+        clipped peaks and clicks, headroom for all) get their soundtrack made
+        again from the disc; the video is copied untouched, so hand-made
+        movies keep their picture. flm2mkv skips the ones already done."""
+        flm = movies / "flm"
+        made_flm = not flm.exists()
+        flm2mkv = ROOT / "target" / "release" / "flm2mkv"
+        fixed = 0
+        try:
+            for folder in (movies, movies / "hd"):
+                if not any(folder.glob("*.mkv")):
+                    continue
+                self.extract_flm(flm)
+                cmd = [str(flm2mkv), "--audio", str(flm), str(folder)]
+                self.ui.log.write("$ %s\n" % " ".join(cmd))
+                r = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+                self.ui.log.write(r.stdout + r.stderr)
+                found = re.search(r"^updated (\d+)", r.stdout, re.M)
+                fixed += int(found.group(1)) if found else 0
+        finally:
+            if made_flm and flm.exists():
+                self.record("files", [str(flm.relative_to(ROOT))])
+        if fixed:
+            self.ui.good(t("movie_audio") % fixed)
+
+    def convert_movies(self, movies, flm):
+        self.extract_flm(flm)
         flm2mkv = ROOT / "target" / "release" / "flm2mkv"
         # The CRT look needs ffmpeg's libplacebo filter and a Vulkan GPU (not
         # a software one, as in most virtual machines): try a tiny clip first.

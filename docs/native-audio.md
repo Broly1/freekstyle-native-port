@@ -445,12 +445,16 @@ The movie soundtracks are PS-ADPCM at 22050 Hz, mastered hot. `prod1` has
 301 samples the decoder clamps, and after conversion to Opus its decoded
 audio went over full scale 1933 times; the game decodes movies to 16-bit
 (`movie.rs`), so each over was hard-clipped into a crackle.
-`tools/movie_declick.py` rebuilds clamped samples and clicks from the
-surrounding audio and leaves headroom before encoding. Some clicks remain:
-on loud hits the original encoder fell back to unpredicted 4-bit frames
-(2.0 s and 21.7 s are the clearest), and those are on the disc.
+`flm2mkv` (`flm::fix_audio`, `crates/flm/src/declick.rs`) rebuilds the
+clamped samples and clicks of a soundtrack mastered that hot (more than 100
+clamped samples; only `prod1` is) from the surrounding audio, by AR
+interpolation, and turns every soundtrack down so it peaks at 23000 at
+most. Some clicks remain: on loud hits the original encoder fell back to
+unpredicted 4-bit frames (2.0 s and 21.7 s are the clearest), and those are
+on the disc.
 
-`flm2mkv` turns any soundtrack peaking above 23000 down to that level, so
-every converted movie keeps that headroom. `linux-install.py` also checks movies converted
-before that: any soundtrack reaching full scale has its audio re-encoded
-about 3 dB lower, with the video copied as it is.
+Each converted soundtrack is tagged `FREEKSTYLE_AUDIO=2`. When the movies
+are already there, both installers run `flm2mkv --audio`, which makes the
+soundtrack of any movie without the current tag again from the .FLM, with
+the video copied as it is; a clean install and an old one end up with the
+same sound.

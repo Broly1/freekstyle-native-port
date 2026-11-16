@@ -10,6 +10,8 @@
 //!
 //! Video is 512x448 at 29.97 fps; audio is 22050 Hz stereo.
 
+pub mod declick;
+
 pub const AUDIO_RATE: u32 = 22_050;
 pub const VIDEO_FPS: (u32, u32) = (30_000, 1_001);
 
@@ -96,6 +98,39 @@ impl Vag {
 /// Opus overshoots hot, clipped audio by up to about 20%, and the game
 /// decodes movies to 16-bit, so anything over full scale would crackle.
 pub const PEAK: i32 = 23_000;
+
+/// More samples than this at the decoder's limits mark a soundtrack
+/// mastered hot (`prod1`, about 300), whose clipped peaks and clicks are
+/// repaired; the others (none, or a couple) are left as they are.
+const HOT: usize = 100;
+
+/// What [`fix_audio`] did.
+pub struct AudioFix {
+    /// Samples rebuilt by [`declick`] (0 when the soundtrack wasn't hot).
+    pub rebuilt: usize,
+    /// Gain for headroom (1.0 when it was already quiet enough).
+    pub gain: f32,
+}
+
+/// Prepare a soundtrack for Opus: repair a hot one ([`declick`]), then
+/// turn it down so its peak is at most [`PEAK`]. Interleaved stereo.
+pub fn fix_audio(pcm: &mut [i16]) -> AudioFix {
+    let clamped = pcm.iter().filter(|&&s| s == i16::MAX || s == i16::MIN).count();
+    if clamped <= HOT {
+        return AudioFix { rebuilt: 0, gain: headroom(pcm) };
+    }
+    let mut ch: Vec<Vec<f64>> = (0..2).map(|c| pcm.iter().skip(c).step_by(2).map(|&s| s as f64).collect()).collect();
+    let rebuilt = declick::declick(&mut ch);
+    // In floating point: rebuilt peaks reach past 16 bits.
+    let peak = ch.iter().flatten().fold(0.0f64, |m, s| m.max(s.abs()));
+    let gain = if peak > PEAK as f64 { PEAK as f64 / peak } else { 1.0 };
+    for (c, x) in ch.iter().enumerate() {
+        for (s, v) in pcm.iter_mut().skip(c).step_by(2).zip(x) {
+            *s = (v * gain).round().clamp(-32768.0, 32767.0) as i16;
+        }
+    }
+    AudioFix { rebuilt, gain: gain as f32 }
+}
 
 /// Turns `pcm` down so its peak is at most `PEAK`; returns the gain used
 /// (1.0 when it was already quiet enough).
