@@ -70,6 +70,13 @@ $WingetPackages = @{
 # game finds it, and leaves with the build output.
 $FfmpegUrl = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip'
 $Release = Join-Path $Root 'target\release'
+# Real-ESRGAN, the AI upscaler freekstyle-hd uses for the HD pictures and
+# the texture pack built while playing. Only the program and the two models
+# it uses are kept.
+$EsrganUrl = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-windows.zip'
+$EsrganSha256 = 'abc02804e17982a3be33675e4d471e91ea374e65b70167abc09e31acb412802d'
+$EsrganKeep = @('realesrgan-ncnn-vulkan.exe', 'vcomp140.dll', 'models\realesrgan-x4plus.bin', 'models\realesrgan-x4plus.param',
+                'models\realesrgan-x4plus-anime.bin', 'models\realesrgan-x4plus-anime.param')
 
 # ---- Messages ----
 
@@ -167,6 +174,24 @@ $Messages = @{
                  'Generando el código del juego y compilando (unos minutos la primera vez)', 'Génération du code du jeu et compilation (quelques minutes la première fois)')
     pictures = @('Title and menu pictures', 'Imagens de título e menu', 'Imágenes de título y menú', 'Images de titre et de menu')
     already = @('already done', 'já feito', 'ya hecho', 'déjà fait')
+    hd = @('HD pictures and textures', 'Imagens e texturas em HD', 'Imágenes y texturas en HD', 'Images et textures HD')
+    hd_get = @('Downloading Real-ESRGAN, the AI upscaler (about 45 MB, from github.com/xinntao/Real-ESRGAN)...',
+               'Baixando o Real-ESRGAN, o upscaler por IA (uns 45 MB, de github.com/xinntao/Real-ESRGAN)...',
+               'Descargando Real-ESRGAN, el escalador por IA (unos 45 MB, de github.com/xinntao/Real-ESRGAN)...',
+               "Téléchargement de Real-ESRGAN, l'agrandisseur par IA (environ 45 Mo, depuis github.com/xinntao/Real-ESRGAN)...")
+    hd_failed = @('could not download Real-ESRGAN ({0}); the game uses its original pictures and textures.',
+                  'não foi possível baixar o Real-ESRGAN ({0}); o jogo usa as imagens e texturas originais.',
+                  'no se pudo descargar Real-ESRGAN ({0}); el juego usa sus imágenes y texturas originales.',
+                  "impossible de télécharger Real-ESRGAN ({0}) ; le jeu garde ses images et textures d'origine.")
+    hd_no_gpu = @('no HD pictures or textures: they need a graphics card ({0})',
+                  'sem imagens nem texturas em HD: elas precisam de uma placa de vídeo ({0})',
+                  'sin imágenes ni texturas en HD: necesitan una tarjeta gráfica ({0})',
+                  "pas d'images ni de textures HD : il faut une carte graphique ({0})")
+    hd_pictures = @('HD pictures for 4:3 and 16:9', 'imagens em HD para 4:3 e 16:9', 'imágenes en HD para 4:3 y 16:9', 'images HD pour 4:3 et 16:9')
+    hd_textures = @('HD textures are made as you play: what you see gets sharper the next time you start the game.',
+                    'As texturas em HD são feitas enquanto você joga: o que você vê fica mais nítido na próxima vez que abrir o jogo.',
+                    'Las texturas en HD se hacen mientras juegas: lo que ves se ve más nítido la próxima vez que abras el juego.',
+                    'Les textures HD se font pendant que vous jouez : ce que vous voyez devient plus net au prochain lancement du jeu.')
     movies = @('Movies', 'Vídeos', 'Vídeos', 'Vidéos')
     no_ffmpeg = @('skipped: no ffmpeg (the game skips its movies)', 'pulado: sem ffmpeg (o jogo pula os vídeos)',
                   'omitido: no hay ffmpeg (el juego omite sus vídeos)', 'ignoré : pas de ffmpeg (le jeu saute ses vidéos)')
@@ -233,7 +258,7 @@ function Write-Log([string]$Text) {
 }
 
 $script:StepNumber = 0
-$StepTotal = 7
+$StepTotal = 8
 
 function Step([string]$Title) {
     $script:StepNumber++
@@ -593,7 +618,7 @@ function Step-Build {
     Step (T 'building')
     Run @('cargo', 'run', '--release', '-q', '-p', 'ee-recomp', '--', 'game/SLUS_203.67', 'freekstyle/src/gen',
          'freekstyle/hle.txt', 'freekstyle/seeds.txt', 'freekstyle/vu_dumps')
-    Run @('cargo', 'build', '--release', '-p', 'freekstyle', '-p', 'freekstyle-launcher', '-p', 'flm')
+    Run @('cargo', 'build', '--release', '-p', 'freekstyle', '-p', 'freekstyle-launcher', '-p', 'flm', '-p', 'freekstyle-hd')
 }
 
 function Step-Pictures {
@@ -604,6 +629,54 @@ function Step-Pictures {
         Run @('cargo', 'run', '--release', '-q', '-p', 'ee-runtime', '--bin', 'lsc2png')
         Record 'files' @('game\images')
     }
+}
+
+# Real-ESRGAN beside the game for freekstyle-hd, which makes the HD pictures
+# now and the texture pack as the game is played. Without a GPU it is
+# removed again: the game then never tries to use it.
+function Step-Hd {
+    Step (T 'hd')
+    $esrgan = Join-Path $Release 'realesrgan'
+    if (-not (Test-Path (Join-Path $esrgan 'realesrgan-ncnn-vulkan.exe'))) {
+        Say (T 'hd_get')
+        $zip = Join-Path $Root 'target\realesrgan.zip'
+        $unpacked = Join-Path $Root 'target\realesrgan-zip'
+        try {
+            Write-Log "> download $EsrganUrl"
+            Invoke-WebRequest $EsrganUrl -OutFile $zip -UseBasicParsing
+            if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() -ne $EsrganSha256) { throw 'checksum mismatch' }
+            Expand-Archive $zip $unpacked -Force
+            foreach ($f in $EsrganKeep) {
+                $to = Join-Path $esrgan $f
+                New-Item -ItemType Directory -Force (Split-Path $to) | Out-Null
+                Copy-Item (Join-Path $unpacked $f) $to -Force
+            }
+        } catch {
+            Write-Log "error: $_"
+            Remove-Item $esrgan -Recurse -Force -ErrorAction SilentlyContinue
+            Warn (T 'hd_failed' $_)
+            return
+        } finally {
+            Remove-Item $zip, $unpacked -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $tool = Join-Path $Release 'freekstyle-hd.exe'
+    $check = Output $tool check
+    Write-Log "> freekstyle-hd check`r`n$check"
+    if ($check.Trim() -ne 'ok') {
+        $reason = ((($check -split "`n") | Where-Object { $_.Trim() }) | Select-Object -Last 1)
+        $reason = "$reason".Replace('freekstyle-hd: ', '').Replace('; nothing to do', '').Trim()
+        Remove-Item $esrgan -Recurse -Force -ErrorAction SilentlyContinue
+        Good (T 'hd_no_gpu' $reason)
+        return
+    }
+    $hd = Join-Path $Game 'images\hd'
+    $before = Test-Path $hd
+    if (TryRun @($tool, 'pictures', (Join-Path $Game 'images')) -Quiet) {
+        Good (T 'hd_pictures')
+        if (-not $before) { Record 'files' @('game\images\hd') }
+    }
+    Say (T 'hd_textures')
 }
 
 function Step-Movies {
@@ -779,7 +852,9 @@ function Install-System([string]$PlanFile) {
         Write-Log "`r`n== install to $Prefix (administrator)"
         if (Test-Path (Join-Path $Prefix 'game')) { Remove-Item (Join-Path $Prefix 'game') -Recurse -Force }
         New-Item -ItemType Directory -Force (Join-Path $Prefix 'game\movies') | Out-Null
-        Copy-Item (Join-Path $release 'freekstyle.exe'), (Join-Path $release 'freekstyle-launcher.exe') $Prefix -Force
+        Copy-Item (Join-Path $release 'freekstyle.exe'), (Join-Path $release 'freekstyle-launcher.exe'), (Join-Path $release 'freekstyle-hd.exe') $Prefix -Force
+        if (Test-Path (Join-Path $Prefix 'realesrgan')) { Remove-Item (Join-Path $Prefix 'realesrgan') -Recurse -Force }
+        if (Test-Path (Join-Path $release 'realesrgan')) { Copy-Item (Join-Path $release 'realesrgan') $Prefix -Recurse }
         Copy-Item (Join-Path $game 'SLUS_203.67'), (Join-Path $game 'Freekstyle.bin') (Join-Path $Prefix 'game')
         if (Test-Path (Join-Path $game 'images')) { Copy-Item (Join-Path $game 'images') (Join-Path $Prefix 'game') -Recurse }
         if (Test-Path (Join-Path $game 'movies\hd')) { Copy-Item (Join-Path $game 'movies\hd') (Join-Path $Prefix 'game\movies') -Recurse }
@@ -848,6 +923,7 @@ function Main {
         Step-Program
         Step-Build
         Step-Pictures
+        Step-Hd
         Step-Movies
         $installed = Step-Install
     } catch [Failure] {

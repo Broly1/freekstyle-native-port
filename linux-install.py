@@ -26,12 +26,21 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.request
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 GAME = ROOT / "game"
 LOG = ROOT / "install.log"
 SLUS_SHA256 = "debcb4b0731741a389a0c890296609eb99d111952e97a250ea4c3cfc04a6d80a"
+# Real-ESRGAN, the AI upscaler freekstyle-hd uses for the HD pictures and
+# the texture pack built while playing. Only the program and the two models
+# it uses are kept.
+ESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip"
+ESRGAN_SHA256 = "e5aa6eb131234b87c0c51f82b89390f5e3e642b7b70f2b9bbe95b6a285a40c96"
+ESRGAN_KEEP = ("realesrgan-ncnn-vulkan", "models/realesrgan-x4plus.bin", "models/realesrgan-x4plus.param",
+               "models/realesrgan-x4plus-anime.bin", "models/realesrgan-x4plus-anime.param")
 MOVIES = ["OPENING/BIGLOGO", "OPENING/EAGAMES", "OPENING/EAS_BIG", "OPENING/INTRO", "ABOUTEA/PROD1"]
 PREFIX = Path("/opt/freekstyle")
 MENU = [Path("/usr/share/applications/freekstyle.desktop"), Path("/usr/share/applications/freekstyle-launcher.desktop")]
@@ -127,6 +136,24 @@ MESSAGES = {
                  "Generando el código del juego y compilando (unos minutos la primera vez)", "Génération du code du jeu et compilation (quelques minutes la première fois)"),
     "pictures": ("Title and menu pictures", "Imagens de título e menu", "Imágenes de título y menú", "Images de titre et de menu"),
     "already": ("already done", "já feito", "ya hecho", "déjà fait"),
+    "hd": ("HD pictures and textures", "Imagens e texturas em HD", "Imágenes y texturas en HD", "Images et textures HD"),
+    "hd_get": ("Downloading Real-ESRGAN, the AI upscaler (about 45 MB, from github.com/xinntao/Real-ESRGAN)...",
+               "Baixando o Real-ESRGAN, o upscaler por IA (uns 45 MB, de github.com/xinntao/Real-ESRGAN)...",
+               "Descargando Real-ESRGAN, el escalador por IA (unos 45 MB, de github.com/xinntao/Real-ESRGAN)...",
+               "Téléchargement de Real-ESRGAN, l'agrandisseur par IA (environ 45 Mo, depuis github.com/xinntao/Real-ESRGAN)..."),
+    "hd_failed": ("could not download Real-ESRGAN (%s); the game uses its original pictures and textures.",
+                  "não foi possível baixar o Real-ESRGAN (%s); o jogo usa as imagens e texturas originais.",
+                  "no se pudo descargar Real-ESRGAN (%s); el juego usa sus imágenes y texturas originales.",
+                  "impossible de télécharger Real-ESRGAN (%s) ; le jeu garde ses images et textures d'origine."),
+    "hd_no_gpu": ("no HD pictures or textures: they need a graphics card (%s)",
+                  "sem imagens nem texturas em HD: elas precisam de uma placa de vídeo (%s)",
+                  "sin imágenes ni texturas en HD: necesitan una tarjeta gráfica (%s)",
+                  "pas d'images ni de textures HD : il faut une carte graphique (%s)"),
+    "hd_pictures": ("HD pictures for 4:3 and 16:9", "imagens em HD para 4:3 e 16:9", "imágenes en HD para 4:3 y 16:9", "images HD pour 4:3 et 16:9"),
+    "hd_textures": ("HD textures are made as you play: what you see gets sharper the next time you start the game.",
+                    "As texturas em HD são feitas enquanto você joga: o que você vê fica mais nítido na próxima vez que abrir o jogo.",
+                    "Las texturas en HD se hacen mientras juegas: lo que ves se ve más nítido la próxima vez que abras el juego.",
+                    "Les textures HD se font pendant que vous jouez : ce que vous voyez devient plus net au prochain lancement du jeu."),
     "movies": ("Movies", "Vídeos", "Vídeos", "Vidéos"),
     "no_ffmpeg": ("skipped: no ffmpeg (the game skips its movies)", "pulado: sem ffmpeg (o jogo pula os vídeos)",
                   "omitido: no hay ffmpeg (el juego omite sus vídeos)", "ignoré : pas de ffmpeg (le jeu saute ses vidéos)"),
@@ -255,10 +282,23 @@ class Ui:
         else:
             p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  stdin=subprocess.DEVNULL, text=True, errors="replace", bufsize=1)
+            # From cargo, only its progress lines and errors are shown: the
+            # compiler's warnings (unused code and the like) say nothing
+            # about whether the build works, and go to the log only.
+            cargo = cmd[0] == "cargo"
+            in_error = False
             for line in p.stdout:
                 self.log.write(line)
-                if not quiet:
-                    sys.stdout.write("    " + line)
+                if quiet:
+                    continue
+                if cargo:
+                    if line.startswith("error"):
+                        in_error = True
+                    elif re.match(r"(warning|\s+(Compiling|Finished|Running|Building))", line):
+                        in_error = False
+                    if not (in_error or re.match(r"\s+(Compiling|Finished)", line)):
+                        continue
+                sys.stdout.write("    " + line)
             code = p.wait()
         self.log.write("(exit %d)\n" % code)
         if code != 0 and check:
@@ -417,7 +457,7 @@ def rust_ok():
 class Installer:
     def __init__(self, args):
         self.args = args
-        self.ui = Ui(args.yes, 7)
+        self.ui = Ui(args.yes, 8)
         self.family = distro_family()
         try:
             self.state = json.loads(STATE.read_text())
@@ -564,7 +604,7 @@ class Installer:
         self.ui.step(t("building"))
         self.cargo("run", "--release", "-q", "-p", "ee-recomp", "--", "game/SLUS_203.67", "freekstyle/src/gen",
                    "freekstyle/hle.txt", "freekstyle/seeds.txt", "freekstyle/vu_dumps")
-        self.cargo("build", "--release", "-p", "freekstyle", "-p", "freekstyle-launcher", "-p", "flm")
+        self.cargo("build", "--release", "-p", "freekstyle", "-p", "freekstyle-launcher", "-p", "flm", "-p", "freekstyle-hd")
 
     def pictures(self):
         self.ui.step(t("pictures"))
@@ -573,6 +613,48 @@ class Installer:
         else:
             self.cargo("run", "--release", "-q", "-p", "ee-runtime", "--bin", "lsc2png")
             self.record("files", ["game/images"])
+
+    def hd(self):
+        """Real-ESRGAN beside the game for freekstyle-hd, which makes the HD
+        pictures now and the texture pack as the game is played. Without a
+        GPU it is removed again: the game then never tries to use it."""
+        self.ui.step(t("hd"))
+        release = ROOT / "target" / "release"
+        esrgan = release / "realesrgan"
+        if not (esrgan / "realesrgan-ncnn-vulkan").is_file():
+            self.ui.say(t("hd_get"))
+            self.ui.log.write("> download %s\n" % ESRGAN_URL)
+            zip_path = ROOT / "target" / "realesrgan.zip"
+            try:
+                with urllib.request.urlopen(ESRGAN_URL, timeout=60) as r, open(zip_path, "wb") as f:
+                    shutil.copyfileobj(r, f)
+                if hashlib.sha256(zip_path.read_bytes()).hexdigest() != ESRGAN_SHA256:
+                    raise ValueError("checksum mismatch")
+                with zipfile.ZipFile(zip_path) as z:
+                    for name in ESRGAN_KEEP:
+                        z.extract(name, esrgan)
+                (esrgan / "realesrgan-ncnn-vulkan").chmod(0o755)
+            except Exception as e:
+                self.ui.log.write("error: %s\n" % e)
+                shutil.rmtree(esrgan, ignore_errors=True)
+                self.ui.warn(t("hd_failed", e))
+                return
+            finally:
+                zip_path.unlink(missing_ok=True)
+        tool = str(release / "freekstyle-hd")
+        check = subprocess.run([tool, "check"], capture_output=True, text=True)
+        self.ui.log.write("> freekstyle-hd check\n%s%s(exit %d)\n" % (check.stdout, check.stderr, check.returncode))
+        if check.returncode != 0:
+            reason = (check.stderr.strip().splitlines() or ["?"])[-1].replace("freekstyle-hd: ", "").replace("; nothing to do", "")
+            shutil.rmtree(esrgan, ignore_errors=True)
+            self.ui.good(t("hd_no_gpu", reason))
+            return
+        before = (GAME / "images" / "hd").is_dir()
+        if self.ui.run([tool, "pictures", GAME / "images"], quiet=True, check=False):
+            self.ui.good(t("hd_pictures"))
+            if not before:
+                self.record("files", ["game/images/hd"])
+        self.ui.say(t("hd_textures"))
 
     def movies(self):
         self.ui.step(t("movies"))
@@ -656,7 +738,10 @@ class Installer:
         release = ROOT / "target" / "release"
         run(["rm", "-rf", PREFIX / "game"], sudo=True)
         run(["mkdir", "-p", PREFIX / "game" / "movies"], sudo=True)
-        run(["install", "-m", "755", release / "freekstyle", release / "freekstyle-launcher", PREFIX], sudo=True)
+        run(["install", "-m", "755", release / "freekstyle", release / "freekstyle-launcher", release / "freekstyle-hd", PREFIX], sudo=True)
+        run(["rm", "-rf", PREFIX / "realesrgan"], sudo=True)
+        if (release / "realesrgan").is_dir():
+            run(["cp", "-rL", release / "realesrgan", PREFIX], sudo=True)
         run(["install", "-m", "644", GAME / "SLUS_203.67", PREFIX / "game"], sudo=True)
         self.ui.say(t("copying_disc"))
         run(["cp", "-L", "--reflink=auto", GAME / "Freekstyle.bin", PREFIX / "game" / "Freekstyle.bin"], sudo=True)
@@ -724,7 +809,7 @@ def main():
     try:
         installer = Installer(args)
         ui = installer.ui
-        for step in (installer.dump, installer.tools, installer.program, installer.build, installer.pictures, installer.movies):
+        for step in (installer.dump, installer.tools, installer.program, installer.build, installer.pictures, installer.hd, installer.movies):
             step()
         system = installer.install()
     except Failure as e:

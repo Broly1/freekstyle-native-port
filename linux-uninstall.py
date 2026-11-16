@@ -9,6 +9,8 @@ It lists what it finds and asks about each part:
   - build output in the source folder (target/, the generated game code,
     and the files linux-install.py recorded creating; never your disc dump)
                                                                  [default: yes]
+  - the HD textures made while playing (they are made again as you play)
+                                                                 [default: yes]
   - your saves and settings                                      [default: no]
   - packages linux-install.py installed (only those it recorded, and only
     those no other installed software still needs)               [default: no]
@@ -79,6 +81,8 @@ MESSAGES = {
               "Arquivos de compilação em %s (o jogo compilado, código gerado, arquivos extraídos e convertidos; sua imagem do disco fica)",
               "Archivos de compilación en %s (el juego compilado, código generado, archivos extraídos y convertidos; tu imagen del disco se queda)",
               "Fichiers de compilation dans %s (le jeu compilé, le code généré, les fichiers extraits et convertis ; votre image disque reste)"),
+    "hd": ("HD textures made while playing: %s (made again as you play)", "Texturas em HD feitas enquanto você jogava: %s (feitas de novo enquanto joga)",
+           "Texturas en HD hechas mientras jugabas: %s (se hacen de nuevo mientras juegas)", "Textures HD faites pendant vos parties : %s (refaites en jouant)"),
     "data": ("Your saves and settings: %s", "Seus saves e configurações: %s", "Tus partidas guardadas y ajustes: %s", "Vos sauvegardes et réglages : %s"),
     "packages": ("Packages linux-install.py installed: %s", "Pacotes que o linux-install.py instalou: %s",
                  "Paquetes que instaló linux-install.py: %s", "Paquets installés par linux-install.py : %s"),
@@ -280,6 +284,13 @@ def build_paths(state):
         out.append(p)
     return source, out
 
+def hd_paths():
+    """The texture pack the game builds while playing, and what goes with
+    it (freek_config::data_dir in the game)."""
+    base = DATA / "freekstyle"
+    paths = [base / "textures", base / "hd.log", base / "hd-building.lock", base / "playing.lock"]
+    return [p for p in paths if p.exists()]
+
 def data_paths(state):
     paths = [DATA / "freekstyle", CONFIG / "freekstyle"]
     source = Path(state.get("source") or HERE)
@@ -336,6 +347,9 @@ class Uninstaller:
         source, build = build_paths(self.state)
         if build:
             parts.append(Part("build", t("build", source), True, size(build)))
+        hd = hd_paths()
+        if hd:
+            parts.append(Part("hd", t("hd", (DATA / "freekstyle" / "textures").as_posix().replace(str(HOME), "~")), True, size(hd)))
         data = data_paths(self.state)
         if data:
             parts.append(Part("data", t("data", ", ".join(str(p).replace(str(HOME), "~") for p in data)), False, size(data)))
@@ -403,6 +417,9 @@ class Uninstaller:
         for folder in (source / "game" / "movies" / "hd", source / "game" / "movies"):
             if not self.args.dry_run and folder.is_dir() and not any(folder.iterdir()):
                 folder.rmdir()
+
+    def remove_hd(self):
+        self.delete(hd_paths())
 
     def remove_data(self):
         self.delete(data_paths(self.state))

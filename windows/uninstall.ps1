@@ -12,6 +12,8 @@ about each part:
   - build output in the source folder (target\, the generated game code,
     and the files windows-install recorded creating; never your disc dump)
                                                                  [default: yes]
+  - the HD textures made while playing (%APPDATA%\freekstyle\textures;
+    they are made again as you play)                             [default: yes]
   - your saves and settings (%APPDATA%\freekstyle)               [default: no]
   - tools windows-install installed with winget (only those it recorded)
                                                                  [default: no]
@@ -96,6 +98,8 @@ $Messages = @{
               'Arquivos de compilação em {0} (o jogo compilado, código gerado, arquivos extraídos e convertidos; sua imagem do disco fica)',
               'Archivos de compilación en {0} (el juego compilado, código generado, archivos extraídos y convertidos; tu imagen del disco se queda)',
               'Fichiers de compilation dans {0} (le jeu compilé, le code généré, les fichiers extraits et convertis ; votre image disque reste)')
+    hd = @('HD textures made while playing: {0} (made again as you play)', 'Texturas em HD feitas enquanto você jogava: {0} (feitas de novo enquanto joga)',
+           'Texturas en HD hechas mientras jugabas: {0} (se hacen de nuevo mientras juegas)', 'Textures HD faites pendant vos parties : {0} (refaites en jouant)')
     data = @('Your saves and settings: {0}', 'Seus saves e configurações: {0}', 'Tus partidas guardadas y ajustes: {0}', 'Vos sauvegardes et réglages : {0}')
     winget = @('Tools windows-install installed with winget: {0}', 'Ferramentas que o windows-install instalou com o winget: {0}',
                'Herramientas que instaló windows-install con winget: {0}', 'Outils installés par windows-install avec winget : {0}')
@@ -198,6 +202,13 @@ function Get-BuildPaths($State) {
     $paths += @($State.files | Where-Object { $_ } | ForEach-Object { Join-Path $source $_ })
     $out = @($paths | Where-Object { (Test-Path -LiteralPath $_) -and (Test-Inside $_ $source) } | Select-Object -Unique)
     return $source, $out
+}
+
+# The texture pack the game builds while playing, and what goes with it
+# (freek_config::data_dir in the game).
+function Get-HdPaths {
+    $paths = @('textures', 'hd.log', 'hd-building.lock', 'playing.lock') | ForEach-Object { Join-Path $Data $_ }
+    return @($paths | Where-Object { Test-Path -LiteralPath $_ })
 }
 
 function Get-DataPaths($State) {
@@ -354,6 +365,11 @@ function Main {
     if ($build.Count) {
         $parts += [pscustomobject]@{ Key = 'build'; Label = (T 'build' $source); Default = $true; Size = (Get-Size $build); Note = $null }
     }
+    $hd = @(Get-HdPaths)
+    if ($hd.Count) {
+        $parts += [pscustomobject]@{ Key = 'hd'; Label = (T 'hd' (Join-Path $Data 'textures').Replace($env:USERPROFILE, '~')); Default = $true
+                                     Size = (Get-Size $hd); Note = $null }
+    }
     $data = @(Get-DataPaths $state)
     if ($data.Count) {
         $parts += [pscustomobject]@{ Key = 'data'; Label = (T 'data' (($data -join ', ').Replace($env:USERPROFILE, '~'))); Default = $false
@@ -390,6 +406,7 @@ function Main {
         switch ($part.Key) {
             'system' { Remove-System }
             'build' { Remove-Build $state }
+            'hd' { Remove-Paths (Get-HdPaths) }
             'data' { Remove-Paths (Get-DataPaths $state) }
             'winget' { Remove-Winget $state }
             'rust' { Remove-Rust }
