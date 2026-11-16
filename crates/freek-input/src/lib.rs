@@ -600,9 +600,8 @@ impl ControllerManager {
             return;
         };
         let name = dev.name();
-        if let Some(seat) = self.players.iter_mut().find(|s| **s == Some(id)) {
-            let slot = if Some(id) == self.players[0] { 0 } else { 1 };
-            *seat = None;
+        if let Some(slot) = self.players.iter().position(|s| *s == Some(id)) {
+            self.players[slot] = None;
             self.rumble[slot] = (0, 0);
             eprintln!("[input] player {} controller disconnected: {name}", slot + 1);
         }
