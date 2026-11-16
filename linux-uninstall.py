@@ -288,7 +288,7 @@ def hd_paths():
     """The texture pack the game builds while playing, and what goes with
     it (freek_config::data_dir in the game)."""
     base = DATA / "freekstyle"
-    paths = [base / "textures", base / "hd.log", base / "hd-building.lock", base / "playing.lock"]
+    paths = [base / "textures", base / "hd.log", base / "hd-building.lock"]
     return [p for p in paths if p.exists()]
 
 def data_paths(state):

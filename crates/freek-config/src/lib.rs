@@ -87,11 +87,6 @@ pub fn user_texture_pack() -> PathBuf {
     data_dir().join("textures").join("hd")
 }
 
-/// Present while the game runs, so `freekstyle-hd` leaves the GPU to it.
-pub fn playing_lock() -> PathBuf {
-    data_dir().join("playing.lock")
-}
-
 /// Whether files can be created in `dir` (tried, not guessed from modes).
 fn writable(dir: &Path) -> bool {
     let probe = dir.join(format!(".freekstyle-probe-{}", std::process::id()));
@@ -119,8 +114,9 @@ pub struct Config {
     /// Draw HD replacements from `game/textures/hd` and the user's own pack
     /// ([`user_texture_pack`]) when there are any.
     pub hd_textures: bool,
-    /// Record the textures the game shows and, after it quits, upscale the
-    /// new ones into the user's pack with `freekstyle-hd` (needs a GPU).
+    /// Record the textures the game shows; the launcher upscales the new
+    /// ones into the user's pack with `freekstyle-hd` before the game starts
+    /// (needs a GPU).
     pub build_hd_textures: bool,
     pub mute: bool,
     /// Run the game's own sound driver on the emulated IOP and SPU2 instead

@@ -131,6 +131,9 @@ pub struct Tr {
     pub add_binding: &'static str,
 
     pub game_running: &'static str,
+    pub hd_button: &'static str,
+    pub hd_making: &'static str,
+    pub hd_skip: &'static str,
     pub game_closed: &'static str,
     pub game_exited: &'static str,
     pub build_hint: &'static str,
@@ -176,7 +179,7 @@ pub const EN: Tr = Tr {
     hd_textures: "HD textures",
     hd_textures_hint: "Use the HD texture packs",
     build_hd_textures: "Make HD textures",
-    build_hd_textures_hint: "Upscale what you see after you quit (needs a graphics card)",
+    build_hd_textures_hint: "Upscale what you saw when you next press Play (needs a graphics card)",
 
     game: "Game",
     sound: "Sound",
@@ -207,6 +210,9 @@ pub const EN: Tr = Tr {
     add_binding: "Add a binding",
 
     game_running: "Game running",
+    hd_button: "Building…",
+    hd_making: "Building HD textures: {} of {}",
+    hd_skip: "Skip",
     game_closed: "Game closed",
     game_exited: "Game exited: {}",
     build_hint: "build it with cargo build --release -p freekstyle",
@@ -268,7 +274,7 @@ pub const PT_BR: Tr = Tr {
     hd_textures: "Texturas HD",
     hd_textures_hint: "Usar os pacotes de texturas HD",
     build_hd_textures: "Criar texturas HD",
-    build_hd_textures_hint: "Melhorar o que você viu depois de sair (precisa de placa de vídeo)",
+    build_hd_textures_hint: "Melhorar o que você viu ao apertar Jogar de novo (precisa de placa de vídeo)",
 
     game: "Jogo",
     sound: "Som",
@@ -299,6 +305,9 @@ pub const PT_BR: Tr = Tr {
     add_binding: "Adicionar atribuição",
 
     game_running: "Jogo em execução",
+    hd_button: "Construindo…",
+    hd_making: "Construindo texturas HD: {} de {}",
+    hd_skip: "Pular",
     game_closed: "Jogo fechado",
     game_exited: "O jogo saiu: {}",
     build_hint: "compile com cargo build --release -p freekstyle",
@@ -360,7 +369,7 @@ pub const ES: Tr = Tr {
     hd_textures: "Texturas HD",
     hd_textures_hint: "Usar los paquetes de texturas HD",
     build_hd_textures: "Crear texturas HD",
-    build_hd_textures_hint: "Mejorar lo que viste al salir (necesita tarjeta gráfica)",
+    build_hd_textures_hint: "Mejorar lo que viste al pulsar Jugar otra vez (necesita tarjeta gráfica)",
 
     game: "Juego",
     sound: "Sonido",
@@ -391,6 +400,9 @@ pub const ES: Tr = Tr {
     add_binding: "Añadir asignación",
 
     game_running: "Juego en ejecución",
+    hd_button: "Construyendo…",
+    hd_making: "Construyendo texturas HD: {} de {}",
+    hd_skip: "Saltar",
     game_closed: "Juego cerrado",
     game_exited: "El juego terminó: {}",
     build_hint: "compílalo con cargo build --release -p freekstyle",
@@ -452,7 +464,7 @@ pub const FR: Tr = Tr {
     hd_textures: "Textures HD",
     hd_textures_hint: "Utiliser les packs de textures HD",
     build_hd_textures: "Créer des textures HD",
-    build_hd_textures_hint: "Améliorer ce que vous avez vu après avoir quitté (carte graphique requise)",
+    build_hd_textures_hint: "Améliorer ce que vous avez vu au prochain clic sur Jouer (carte graphique requise)",
 
     game: "Jeu",
     sound: "Son",
@@ -483,6 +495,9 @@ pub const FR: Tr = Tr {
     add_binding: "Ajouter une affectation",
 
     game_running: "Jeu en cours",
+    hd_button: "Construction…",
+    hd_making: "Construction des textures HD : {} sur {}",
+    hd_skip: "Passer",
     game_closed: "Jeu fermé",
     game_exited: "Le jeu s'est arrêté : {}",
     build_hint: "compilez-le avec cargo build --release -p freekstyle",

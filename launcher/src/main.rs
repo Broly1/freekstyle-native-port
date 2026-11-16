@@ -15,8 +15,10 @@
 
 mod i18n;
 
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText};
@@ -241,8 +243,73 @@ struct Launcher {
     capture: Option<Capture>,
     controllers: Option<ControllerManager>,
     game: Option<Child>,
+    /// `freekstyle-hd pack`, run when Play is pressed, before the game.
+    hd: Option<HdJob>,
     status: String,
     logo: Option<egui::TextureHandle>,
+}
+
+/// Upscaling the textures recorded last time, with its progress (done,
+/// total) read from its output.
+struct HdJob {
+    child: Child,
+    progress: Arc<Mutex<(usize, usize)>>,
+}
+
+impl HdJob {
+    /// Started when there is something to make it with: Real-ESRGAN beside
+    /// the game (the installers leave it out without a GPU).
+    fn start(config: &Config) -> Option<HdJob> {
+        if !(config.hd_textures && config.build_hd_textures) {
+            return None;
+        }
+        let tool = game_binary().with_file_name(format!("freekstyle-hd{}", std::env::consts::EXE_SUFFIX));
+        let esrgan = tool.with_file_name("realesrgan");
+        if !tool.is_file() || !esrgan.is_dir() {
+            return None;
+        }
+        // The game's own pack already has what it holds.
+        let game_pack = Path::new(&config.disc).parent().unwrap_or(Path::new("game")).join("textures").join("hd");
+        let log = freek_config::data_dir().join("hd.log");
+        let _ = std::fs::create_dir_all(freek_config::data_dir());
+        let mut cmd = Command::new(&tool);
+        cmd.arg("pack").arg("--skip").arg(game_pack).stdin(Stdio::null()).stdout(Stdio::piped());
+        cmd.stderr(std::fs::File::create(&log).map(Stdio::from).unwrap_or_else(|_| Stdio::null()));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn().ok()?;
+        let progress = Arc::new(Mutex::new((0, 0)));
+        let stdout = child.stdout.take()?;
+        let shared = progress.clone();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                let mut words = line.split_whitespace();
+                let n: Vec<usize> = match words.next() {
+                    Some("todo" | "progress") => words.filter_map(|w| w.parse().ok()).collect(),
+                    _ => continue,
+                };
+                let mut p = shared.lock().unwrap();
+                match n[..] {
+                    [total] => p.1 = total,
+                    [done, total] => *p = (done, total),
+                    _ => {}
+                }
+            }
+        });
+        Some(HdJob { child, progress })
+    }
+
+    /// End it now; what it finished is kept, the rest is made next time.
+    fn stop(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        // Its lock against a second build, which it had no chance to remove.
+        let _ = std::fs::remove_file(freek_config::data_dir().join("hd-building.lock"));
+    }
 }
 
 impl Launcher {
@@ -282,6 +349,7 @@ impl Launcher {
             capture: None,
             controllers: ControllerManager::new().ok(),
             game: None,
+            hd: None,
             status,
             logo,
         }
@@ -301,8 +369,18 @@ impl Launcher {
         }
     }
 
+    /// Play: first upscale what the game recorded last time, with the GPU
+    /// to itself (beside the desktop it makes everything stutter), then
+    /// start the game once that is over.
     fn play(&mut self) {
         self.save();
+        match HdJob::start(&self.config) {
+            Some(job) => self.hd = Some(job),
+            None => self.start_game(),
+        }
+    }
+
+    fn start_game(&mut self) {
         let bin = game_binary();
         match Command::new(&bin).spawn() {
             Ok(child) => {
@@ -354,8 +432,9 @@ impl Launcher {
                 ui.label(RichText::new(t.subtitle).color(MUTED));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let running = self.game.is_some();
-                let play = egui::Button::new(RichText::new(if running { t.running } else { t.play }).size(22.0).strong().color(INK))
+                let running = self.game.is_some() || self.hd.is_some();
+                let label = if self.hd.is_some() { t.hd_button } else if running { t.running } else { t.play };
+                let play = egui::Button::new(RichText::new(label).size(22.0).strong().color(INK))
                     .fill(if running { MAROON } else { ACCENT })
                     .min_size(egui::vec2(150.0, 48.0))
                     .corner_radius(10.0);
@@ -364,6 +443,25 @@ impl Launcher {
                 }
             });
         });
+    }
+
+    /// Beside the tabs while the HD textures are made: Skip, the bar, and
+    /// how far it is.
+    fn hd_progress(&mut self, ui: &mut egui::Ui) {
+        let t = self.tr();
+        let Some(job) = &self.hd else { return };
+        let (done, total) = *job.progress.lock().unwrap();
+        let fraction = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+        ui.add_space(24.0);
+        let skip = ui.button(t.hd_skip).clicked();
+        segmented_bar(ui, fraction).on_hover_text(fill(t.hd_making, &[&done.to_string(), &total.to_string()]));
+        ui.label(RichText::new(format!("{:>3.0}%", fraction * 100.0)).strong().monospace());
+        if skip {
+            if let Some(job) = self.hd.take() {
+                job.stop();
+            }
+            self.start_game();
+        }
     }
 
     fn play_tab(&mut self, ui: &mut egui::Ui) {
@@ -551,6 +649,14 @@ impl eframe::App for Launcher {
                 self.game = None;
             }
         }
+        if let Some(job) = &mut self.hd {
+            // Done (or failed: the game starts all the same, and the log
+            // says why) -> the game, with the new textures.
+            if !matches!(job.child.try_wait(), Ok(None)) {
+                self.hd = None;
+                self.start_game();
+            }
+        }
         let (pad_name, pad_pressed) = self.poll_gamepad();
         match (self.capture, pad_pressed) {
             (Some(slot), Some(name)) if !slot.1 => self.bind(slot, name),
@@ -563,6 +669,7 @@ impl eframe::App for Launcher {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Play, RichText::new(t.settings_tab).size(16.0));
                 ui.selectable_value(&mut self.tab, Tab::Controls, RichText::new(t.controls_tab).size(16.0));
+                self.hd_progress(ui);
                 // Top right, so it can be found without reading the current language.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let lang = &mut self.config.language;
@@ -595,6 +702,29 @@ impl eframe::App for Launcher {
         // Keep polling the controller and the game process.
         ctx.request_repaint_after(Duration::from_millis(if self.capture.is_some() { 16 } else { 100 }));
     }
+}
+
+/// A bar of separate blocks inside a frame, filled from the left.
+fn segmented_bar(ui: &mut egui::Ui, fraction: f32) -> egui::Response {
+    const BLOCKS: usize = 30;
+    const BLOCK: f32 = 8.0;
+    const GAP: f32 = 2.0;
+    const PAD: f32 = 3.0;
+    let size = egui::vec2(BLOCKS as f32 * (BLOCK + GAP) - GAP + 2.0 * PAD, 18.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, MUTED), egui::StrokeKind::Inside);
+    let filled = (fraction.clamp(0.0, 1.0) * BLOCKS as f32).round() as usize;
+    for i in 0..BLOCKS {
+        let x = rect.left() + PAD + i as f32 * (BLOCK + GAP);
+        let block = egui::Rect::from_min_size(egui::pos2(x, rect.top() + PAD), egui::vec2(BLOCK, rect.height() - 2.0 * PAD));
+        if i < filled {
+            painter.rect_filled(block, 1.0, ACCENT);
+        } else {
+            painter.rect_stroke(block, 1.0, egui::Stroke::new(1.0, MUTED.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+        }
+    }
+    response
 }
 
 fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {

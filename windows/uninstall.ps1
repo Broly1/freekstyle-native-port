@@ -207,7 +207,7 @@ function Get-BuildPaths($State) {
 # The texture pack the game builds while playing, and what goes with it
 # (freek_config::data_dir in the game).
 function Get-HdPaths {
-    $paths = @('textures', 'hd.log', 'hd-building.lock', 'playing.lock') | ForEach-Object { Join-Path $Data $_ }
+    $paths = @('textures', 'hd.log', 'hd-building.lock') | ForEach-Object { Join-Path $Data $_ }
     return @($paths | Where-Object { Test-Path -LiteralPath $_ })
 }
 

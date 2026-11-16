@@ -147,22 +147,24 @@ fn gear(path: &Path, exe: &Path, tmp: &Path) -> Result<RgbaImage, String> {
     Ok(rgba(&rgb, &solid))
 }
 
-/// Redraw the frames and the gear the dump holds and `out` lacks.
-pub fn build(exe: &Path, dump: &Path, out: &Path, skip: &[PathBuf], tmp: &Path) -> Result<usize, String> {
+/// The frames and the gear the dump holds and neither `out` nor `skip` has.
+pub fn todo(dump: &Path, out: &Path, skip: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut have = crate::pack::hashes(&[out.to_path_buf()]);
     have.extend(crate::pack::hashes(skip));
-    let mut added = 0;
     let mut files: Vec<PathBuf> = std::fs::read_dir(dump).map_err(|e| e.to_string())?.flatten().map(|e| e.path()).collect();
     files.sort();
-    for f in files {
-        let Some(hash) = crate::pack::hash_of(&f) else { continue };
-        if !is_redrawn(hash) || have.contains(hash) {
-            continue;
-        }
-        let art = if hash == GEAR { gear(&f, exe, tmp)? } else { frame(&f, exe, tmp)? };
-        art.save(out.join(f.file_name().unwrap())).map_err(|e| e.to_string())?;
-        have.insert(hash.to_string());
-        added += 1;
+    files.retain(|f| crate::pack::hash_of(f).is_some_and(|h| is_redrawn(h) && have.insert(h.to_string())));
+    Ok(files)
+}
+
+/// Redraw `todo` into `out`, calling `progress` after each one.
+pub fn build(exe: &Path, todo: &[PathBuf], out: &Path, tmp: &Path, progress: &mut dyn FnMut(usize)) -> Result<usize, String> {
+    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    for (n, f) in todo.iter().enumerate() {
+        let hash = crate::pack::hash_of(f).unwrap_or_default();
+        let art = if hash == GEAR { gear(f, exe, tmp)? } else { frame(f, exe, tmp)? };
+        crate::pack::save(&image::DynamicImage::ImageRgba8(art), &out.join(f.file_name().unwrap()))?;
+        progress(n + 1);
     }
-    Ok(added)
+    Ok(todo.len())
 }

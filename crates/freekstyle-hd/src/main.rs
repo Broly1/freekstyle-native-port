@@ -5,13 +5,17 @@
 //!     freekstyle-hd pack [--dump D] [--out O] [--skip PACK]...
 //!                                      upscale new recorded textures
 //!
+//! `pack` prints `todo N` first (0: nothing to do, and it ends at once,
+//! without starting the upscaler), then `progress DONE N` as it goes.
+//!
 //! `--esrgan <realesrgan-ncnn-vulkan>` picks the upscaler; by default it is
 //! the one the installers put in `realesrgan/` beside this program. The
-//! game runs `pack` by itself after it quits, on the textures it recorded
-//! (`freek_config::texture_dump`) into the user's pack
-//! (`freek_config::user_texture_pack`); it stops as soon as the game runs
-//! again and carries on next time. Without a GPU (only a software Vulkan
-//! driver) nothing is made: on one the model takes minutes per picture.
+//! launcher runs `pack` when Play is pressed, before it starts the game, on
+//! the textures the game recorded (`freek_config::texture_dump`) into the
+//! user's pack (`freek_config::user_texture_pack`): the model takes the
+//! whole GPU while it runs, and the desktop stutters if it runs beside
+//! anything else. Without a GPU (only a software Vulkan driver) nothing is
+//! made: on one the model takes minutes per picture.
 
 mod esrgan;
 mod pack;
@@ -19,22 +23,15 @@ mod pictures;
 mod plane;
 mod redraw;
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
-
-/// The game refreshes its lock this often (freekstyle/src/main.rs); an
-/// older one is left over from a game that crashed.
-const LOCK_FRESH: Duration = Duration::from_secs(30);
 
 fn fresh(lock: &Path, within: Duration) -> bool {
     std::fs::metadata(lock)
         .and_then(|m| m.modified())
         .is_ok_and(|t| SystemTime::now().duration_since(t).map_or(true, |age| age < within))
-}
-
-fn playing() -> bool {
-    fresh(&freek_config::playing_lock(), LOCK_FRESH)
 }
 
 /// A scratch folder, removed when dropped.
@@ -54,19 +51,26 @@ impl Drop for Scratch {
     }
 }
 
-/// Only one build at a time: the game may quit twice in a row.
+/// Only one build at a time: two launchers may be open. The build touches
+/// it as it goes; one left alone that long was left by a build that was
+/// killed.
+const LOCK_STALE: Duration = Duration::from_secs(600);
+
 struct BuildLock(PathBuf);
 
 impl BuildLock {
     fn take() -> Option<BuildLock> {
         let path = freek_config::data_dir().join("hd-building.lock");
         let _ = std::fs::create_dir_all(path.parent()?);
-        // One left by a build that was killed doesn't count for long.
-        if path.exists() && !fresh(&path, Duration::from_secs(6 * 3600)) {
+        if path.exists() && !fresh(&path, LOCK_STALE) {
             let _ = std::fs::remove_file(&path);
         }
         std::fs::OpenOptions::new().write(true).create_new(true).open(&path).ok()?;
         Some(BuildLock(path))
+    }
+
+    fn touch(&self) {
+        let _ = std::fs::File::options().write(true).open(&self.0).and_then(|f| f.set_modified(SystemTime::now()));
     }
 }
 
@@ -99,6 +103,22 @@ fn main() -> ExitCode {
     let skip: Vec<PathBuf> = take("--skip").into_iter().map(PathBuf::from).collect();
     let Some(cmd) = args.first().cloned() else { return usage() };
 
+    // Counting first, so that with nothing new the launcher waits for
+    // nothing (the upscaler takes a moment to start).
+    let mut pending = None;
+    if cmd == "pack" {
+        let found = (pack::todo(&dump, &out, &skip), redraw::todo(&dump, &out, &skip));
+        let (up, red) = match found {
+            (Ok(u), Ok(r)) => (u, r),
+            _ => (Vec::new(), Vec::new()), // no recording yet
+        };
+        println!("todo {}", up.len() + red.len());
+        if up.is_empty() && red.is_empty() {
+            return ExitCode::SUCCESS;
+        }
+        pending = Some((up, red));
+    }
+
     let Some(exe) = esrgan_arg.or_else(esrgan::find) else {
         eprintln!("freekstyle-hd: Real-ESRGAN not found (realesrgan/ beside this program); nothing to do");
         return ExitCode::from(3);
@@ -124,17 +144,21 @@ fn main() -> ExitCode {
             pictures::build(&exe, Path::new(images), &tmp.0).map(|(hd, wide)| println!("{hd} HD pictures, {wide} 16:9 pictures"))
         }
         "pack" => {
-            let Some(_lock) = BuildLock::take() else {
+            let Some(lock) = BuildLock::take() else {
                 println!("another build is running");
                 return ExitCode::SUCCESS;
             };
-            if !dump.is_dir() {
-                println!("no recorded textures yet");
-                return ExitCode::SUCCESS;
-            }
-            pack::build(&exe, &dump, &out, &skip, &tmp.0, &playing).and_then(|n| {
-                let r = if playing() { 0 } else { redraw::build(&exe, &dump, &out, &skip, &tmp.0)? };
-                println!("{n} textures upscaled, {r} redrawn{}", if playing() { " (stopped: the game is running)" } else { "" });
+            let (up, red) = pending.unwrap_or_default();
+            let total = up.len() + red.len();
+            let report = |done: usize| {
+                lock.touch();
+                println!("progress {done} {total}");
+                let _ = std::io::stdout().flush();
+            };
+            report(0);
+            pack::build(&exe, &up, &out, &tmp.0, &mut |n| report(n)).and_then(|n| {
+                let r = redraw::build(&exe, &red, &out, &tmp.0, &mut |k| report(up.len() + k))?;
+                println!("{n} textures upscaled, {r} redrawn");
                 Ok(())
             })
         }

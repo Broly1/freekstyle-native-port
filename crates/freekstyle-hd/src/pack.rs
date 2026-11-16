@@ -25,9 +25,8 @@ const MIN_SIDE: u32 = 16;
 /// keep matching at their edges.
 const PAD: u32 = 16;
 const SCALE: u32 = 4;
-/// Textures per model run: between runs the build checks whether the game
-/// has started again, and stops to leave it the GPU.
-const BATCH: usize = 24;
+/// Textures per model run: the progress moves on after each one.
+const BATCH: usize = 12;
 
 /// The 16 hex digits a pack file's name starts with.
 pub fn hash_of(path: &Path) -> Option<&str> {
@@ -140,14 +139,20 @@ fn assemble(original: &Path, dst: &Path, out: &Path) -> Result<(), String> {
         let a = alpha.as_ref().map_or(255, |a| a.get_pixel(x + pad, y + pad)[0]);
         image::Rgba([c[0], c[1], c[2], a])
     });
-    im.save(out).map_err(|e| e.to_string())
+    save(&image::DynamicImage::ImageRgba8(im), out)
 }
 
-/// Build what the pack in `out` lacks from the textures in `dump`. Hashes
-/// in `skip` (other packs) are left out too. Stops early, with the rest
-/// left for next time, when `stop` says so. Returns how many were added.
-pub fn build(exe: &Path, dump: &Path, out: &Path, skip: &[PathBuf], tmp: &Path, stop: &dyn Fn() -> bool) -> Result<usize, String> {
-    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+/// Write a pack file whole or not at all: the launcher's Skip may end the
+/// build at any moment, and a cut-off PNG would count as done.
+pub fn save(im: &image::DynamicImage, path: &Path) -> Result<(), String> {
+    let part = path.with_extension("part");
+    im.save_with_format(&part, image::ImageFormat::Png).map_err(|e| format!("{}: {e}", part.display()))?;
+    std::fs::rename(&part, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The recorded textures in `dump` that neither the pack in `out` nor the
+/// packs in `skip` have, and that are upscaled (not redrawn).
+pub fn todo(dump: &Path, out: &Path, skip: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut have = hashes(&[out.to_path_buf()]);
     have.extend(hashes(skip));
     let mut todo: Vec<PathBuf> = std::fs::read_dir(dump)
@@ -158,11 +163,16 @@ pub fn build(exe: &Path, dump: &Path, out: &Path, skip: &[PathBuf], tmp: &Path, 
         .filter(|p| wants(p))
         .collect();
     todo.sort();
+    Ok(todo)
+}
+
+/// Upscale `todo` into `out`, calling `progress` with how many are done
+/// after each model run. Returns how many were added.
+pub fn build(exe: &Path, todo: &[PathBuf], out: &Path, tmp: &Path, progress: &mut dyn FnMut(usize)) -> Result<usize, String> {
+    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let mut added = 0;
+    let mut done = 0;
     for batch in todo.chunks(BATCH) {
-        if stop() {
-            break;
-        }
         let (src, dst) = (tmp.join("in"), tmp.join("out"));
         for d in [&src, &dst] {
             let _ = std::fs::remove_dir_all(d);
@@ -196,6 +206,8 @@ pub fn build(exe: &Path, dump: &Path, out: &Path, skip: &[PathBuf], tmp: &Path, 
                 eprintln!("no upscale came out for {}", name.to_string_lossy());
             }
         }
+        done += batch.len();
+        progress(done);
     }
     Ok(added)
 }

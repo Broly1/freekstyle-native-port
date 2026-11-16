@@ -247,14 +247,16 @@ download Real-ESRGAN, an AI upscaler (about 45 MB, into
 - **HD textures, as you play**: the game records each texture the first
   time it shows it (into `textures/dump` in your data folder:
   `~/.local/share/freekstyle` on Linux, `%APPDATA%\freekstyle` on
-  Windows). When you quit, it starts `freekstyle-hd pack` in the
-  background, which upscales the new ones into `textures/hd` there, loaded
-  the next time the game starts. Menus, fonts and the HUD use the line-art
-  model, 3D surfaces the photo model; the chrome menu frames and the boost
-  gear are redrawn as clean steel instead, keeping their shapes. Recording
-  costs the game nothing noticeable, and the upscaling never runs while
-  you play: it stops as soon as the game starts again and carries on the
-  next time you quit. Its log is `hd.log` in the data folder.
+  Windows). The next time you press *Play*, the launcher first upscales
+  the new ones into `textures/hd` there, with a progress bar, and starts
+  the game when that is done (*Skip* starts it at once; the rest is made
+  next time). About half a minute per hundred textures, and nothing at all
+  when nothing is new. It runs then, and only then, because the model
+  takes the whole GPU: beside the game or the desktop it makes everything
+  stutter. Menus, fonts and the HUD use the line-art model, 3D surfaces
+  the photo model; the chrome menu frames and the boost gear are redrawn
+  as clean steel instead, keeping their shapes. Its log is `hd.log` in the
+  data folder.
 
 A machine without a graphics card (only a software Vulkan driver) gets
 neither: the model would take minutes per picture. The game then looks as
@@ -268,7 +270,7 @@ over the one made while playing.
 ```sh
 ./target/release/freekstyle-hd check                 # can this machine upscale?
 ./target/release/freekstyle-hd pictures game/images  # HD and 16:9 pictures
-./target/release/freekstyle-hd pack                  # upscale what was recorded
+./target/release/freekstyle-hd pack                  # upscale what was recorded (as Play does)
 ./target/release/freekstyle-hd pack --dump DIR --out DIR   # any recording, any pack
 ```
 

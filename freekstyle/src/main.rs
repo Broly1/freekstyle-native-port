@@ -250,21 +250,15 @@ fn main() {
         keys: Vec::new(),
         last_buttons: 0,
         traces: 0,
-        building: None,
+        recording: false,
         key_map,
         pad_map,
     };
     // A replay draws a recording, not the game: nothing new to record.
-    if app.opts.build_hd_textures && env::var_os("FREEK_GS_REPLAY").is_none() && hdbuild::available() {
-        app.building = Some(hdbuild::PlayingLock::take());
-    }
+    app.recording = app.opts.build_hd_textures && env::var_os("FREEK_GS_REPLAY").is_none() && hdbuild::available();
     profile::start_if_requested("FREEK_PROFILE_GS", "profile_gs.txt");
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("event loop: {e}");
-    }
-    if app.building.take().is_some() {
-        let game_dir = std::path::Path::new(&app.opts.disc).parent().unwrap_or(std::path::Path::new("."));
-        hdbuild::start_build(&game_dir.join("textures/hd"));
     }
     process::exit(0);
 }
@@ -284,8 +278,8 @@ struct App {
     keys: Vec<KeyCode>,
     last_buttons: u16,
     traces: u32,
-    /// Held while the game records textures for the pack (`hdbuild`).
-    building: Option<hdbuild::PlayingLock>,
+    /// Recording textures for the launcher to upscale (`hdbuild`).
+    recording: bool,
     /// Bound keys (winit KeyCode names) and gamepad buttons, with the PS2
     /// buttons each one presses.
     key_map: HashMap<String, u16>,
@@ -411,7 +405,7 @@ impl ApplicationHandler for App {
         let game_dir = std::path::Path::new(&self.opts.disc).parent().unwrap_or(std::path::Path::new("."));
         let pictures = game_dir.join("images");
         let texture_packs = if self.opts.hd_textures { vec![freek_config::user_texture_pack(), game_dir.join("textures/hd")] } else { Vec::new() };
-        let texture_dump = self.building.is_some().then(freek_config::texture_dump);
+        let texture_dump = self.recording.then(freek_config::texture_dump);
         // Widescreen stretches the frame by 4/3: render that much wider.
         let scale_x = if self.opts.widescreen { (self.opts.scale * 4).div_ceil(3) } else { self.opts.scale };
         let cfg = gs_vulkan::Config {
@@ -495,9 +489,6 @@ impl ApplicationHandler for App {
                     return;
                 }
             }
-        }
-        if let Some(lock) = &mut self.building {
-            lock.refresh();
         }
         if self.last_title.elapsed() >= Duration::from_secs(1) {
             let frames = r.frame() - self.last_frame;
