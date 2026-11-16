@@ -125,11 +125,11 @@ $Messages = @{
                   'Vulkan não encontrado. O jogo precisa dele para abrir: instale ou atualize o driver da placa de vídeo (AMD, Intel ou NVIDIA).',
                   'no se encontró Vulkan. El juego lo necesita para arrancar: instala o actualiza el controlador de tu tarjeta gráfica (AMD, Intel o NVIDIA).',
                   'Vulkan introuvable. Le jeu en a besoin pour démarrer : installez ou mettez à jour le pilote de votre carte graphique (AMD, Intel ou NVIDIA).')
-    req_ffmpeg = @('ffmpeg (movies, optional)', 'ffmpeg (vídeos, opcional)', 'ffmpeg (vídeos, opcional)', 'ffmpeg (vidéos, facultatif)')
-    get_ffmpeg = @('Download ffmpeg for the movies (a build from github.com/BtbN/FFmpeg-Builds, about 200 MB)? It goes next to the game in target\release and leaves with the build.',
-                   'Baixar o ffmpeg para os vídeos (uma versão de github.com/BtbN/FFmpeg-Builds, uns 200 MB)? Ele fica ao lado do jogo em target\release e sai junto com a compilação.',
-                   '¿Descargar ffmpeg para los vídeos (una versión de github.com/BtbN/FFmpeg-Builds, unos 200 MB)? Va junto al juego en target\release y se va con la compilación.',
-                   "Télécharger ffmpeg pour les vidéos (une version de github.com/BtbN/FFmpeg-Builds, environ 200 Mo) ? Il va à côté du jeu dans target\release et part avec la compilation.")
+    req_ffmpeg = @('ffmpeg (movies)', 'ffmpeg (vídeos)', 'ffmpeg (vídeos)', 'ffmpeg (vidéos)')
+    get_ffmpeg = @('Downloading ffmpeg for the movies (about 200 MB, from github.com/BtbN/FFmpeg-Builds)...',
+                   'Baixando o ffmpeg para os vídeos (uns 200 MB, de github.com/BtbN/FFmpeg-Builds)...',
+                   'Descargando ffmpeg para los vídeos (unos 200 MB, de github.com/BtbN/FFmpeg-Builds)...',
+                   'Téléchargement de ffmpeg pour les vidéos (environ 200 Mo, depuis github.com/BtbN/FFmpeg-Builds)...')
     ffmpeg_failed = @('could not download ffmpeg ({0}); the game skips its movies.', 'não foi possível baixar o ffmpeg ({0}); o jogo pula os vídeos.',
                       'no se pudo descargar ffmpeg ({0}); el juego omite sus vídeos.', "impossible de télécharger ffmpeg ({0}) ; le jeu saute ses vidéos.")
     no_winget = @('missing: {0}. winget (App Installer, from the Microsoft Store) is needed to install them; or install them yourself and run this again.',
@@ -179,10 +179,10 @@ $Messages = @{
                     'se bajó el volumen de {0} banda(s) sonora(s) de vídeo que superaban el máximo (crujían)',
                     '{0} bande(s) son de vidéo qui dépassaient le volume maximal (grésillaient) ont été baissées')
     crt = @('with the CRT look', 'com o visual CRT', 'con aspecto CRT', 'avec le rendu CRT')
-    no_crt = @('CRT look unavailable (needs ffmpeg with libplacebo and a GPU); converting the movies without it',
-               'visual CRT indisponível (precisa de ffmpeg com libplacebo e uma GPU); convertendo os vídeos sem ele',
-               'aspecto CRT no disponible (necesita ffmpeg con libplacebo y una GPU); convirtiendo los vídeos sin él',
-               'rendu CRT indisponible (il faut ffmpeg avec libplacebo et un GPU) ; conversion des vidéos sans lui')
+    no_crt = @('movies converted without the CRT look (it needs a graphics card)',
+               'vídeos convertidos sem o visual CRT (ele precisa de uma placa de vídeo)',
+               'vídeos convertidos sin el aspecto CRT (necesita una tarjeta gráfica)',
+               'vidéos converties sans le rendu CRT (il faut une carte graphique)')
     movies_failed = @('some movies could not be converted (see install.log); the game skips those.',
                       'alguns vídeos não puderam ser convertidos (veja install.log); o jogo os pula.',
                       'algunos vídeos no se pudieron convertir (ver install.log); el juego los omite.',
@@ -286,8 +286,10 @@ function Format-Command([object[]]$Cmd) {
 }
 
 # Run a program, showing and logging its output (Quiet: only logged).
-# Returns the exit code.
-function Invoke-Logged([object[]]$Cmd, [switch]$Quiet, [string]$Cwd = $Root) {
+# Cargo: show cargo's progress lines and any error, but leave the compiler's
+# warnings (unused code and the like, which say nothing about whether the
+# build works) to the log. Returns the exit code.
+function Invoke-Logged([object[]]$Cmd, [switch]$Quiet, [switch]$Cargo, [string]$Cwd = $Root) {
     $shown = Format-Command $Cmd
     if (-not $Quiet) { Write-Host "  > $shown" -ForegroundColor DarkGray }
     Write-Log "> $shown"
@@ -301,12 +303,20 @@ function Invoke-Logged([object[]]$Cmd, [switch]$Quiet, [string]$Cwd = $Root) {
     $ErrorActionPreference = 'Continue'
     try {
         $global:LASTEXITCODE = 0
+        $inError = $false
         & $exe @rest 2>&1 | ForEach-Object {
             # A blank stderr line shows as the exception's type name.
             $line = if ($_ -is [Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" }
             if ($line -eq 'System.Management.Automation.RemoteException') { $line = '' }
             Write-Log $line
-            if (-not $Quiet) { Write-Host "    $line" }
+            if ($Quiet) { return }
+            if ($Cargo) {
+                # An error's text runs on until the next warning or progress line.
+                if ($line -match '^error') { $inError = $true }
+                elseif ($line -match '^(warning|\s+(Compiling|Finished|Running|Building))') { $inError = $false }
+                if (-not ($inError -or $line -match '^\s+(Compiling|Finished)')) { return }
+            }
+            Write-Host "    $line"
         }
         $code = $LASTEXITCODE
     } catch {
@@ -324,7 +334,7 @@ function Invoke-Logged([object[]]$Cmd, [switch]$Quiet, [string]$Cwd = $Root) {
 
 # Run a program; a failure stops the install with a message.
 function Run([object[]]$Cmd, [switch]$Quiet, [string]$Cwd = $Root) {
-    $code = Invoke-Logged $Cmd -Quiet:$Quiet -Cwd $Cwd
+    $code = Invoke-Logged $Cmd -Quiet:$Quiet -Cargo:($Cmd[0] -eq 'cargo') -Cwd $Cwd
     if ($code -ne 0) { throw [Failure]::new((T 'failed_cmd' $code (Format-Command $Cmd)), $true) }
 }
 
@@ -469,8 +479,7 @@ function Step-Dump {
 function Get-Requirements {
     return @(
         [pscustomobject]@{ Key = 'compiler'; Label = (T 'req_compiler'); Present = (Test-Msvc); Needed = $true },
-        [pscustomobject]@{ Key = 'cmake'; Label = (T 'req_cmake'); Present = (Have 'cmake'); Needed = $true },
-        [pscustomobject]@{ Key = 'ffmpeg'; Label = (T 'req_ffmpeg'); Present = (Have 'ffmpeg'); Needed = $false }
+        [pscustomobject]@{ Key = 'cmake'; Label = (T 'req_cmake'); Present = (Have 'cmake'); Needed = $true }
     )
 }
 
@@ -509,7 +518,9 @@ function Step-Tools {
             }
         }
     }
-    if (-not (Have 'ffmpeg') -and (Ask (T 'get_ffmpeg'))) { Get-Ffmpeg }
+    # ffmpeg is a dependency like the others, but needs no question: it goes
+    # next to the game and leaves with it.
+    if (Have 'ffmpeg') { Good (T 'req_ffmpeg') } else { Get-Ffmpeg }
     Step-Rust
 }
 
@@ -519,6 +530,7 @@ function Get-Ffmpeg {
     $unpacked = Join-Path $Root 'target\ffmpeg'
     try {
         New-Item -ItemType Directory -Force $Release | Out-Null
+        Say (T 'get_ffmpeg')
         Write-Host "  > $FfmpegUrl" -ForegroundColor DarkGray
         Write-Log "> download $FfmpegUrl"
         Invoke-WebRequest $FfmpegUrl -OutFile $zip -UseBasicParsing
@@ -670,9 +682,8 @@ function Convert-Movies([string]$Movies, [string]$Flm) {
         Good (T 'crt')
         return
     }
-    Warn (T 'no_crt')
     Remove-Item $hd -Recurse -Force -ErrorAction SilentlyContinue
-    if (-not (TryRun @($flm2mkv, $Flm, $Movies))) { Warn (T 'movies_failed') }
+    if (TryRun @($flm2mkv, $Flm, $Movies) -Quiet) { Good (T 'no_crt') } else { Warn (T 'movies_failed') }
 }
 
 # A Windows icon made of the PNG pictures (icons hold PNGs since Vista).
