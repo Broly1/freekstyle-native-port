@@ -1,7 +1,7 @@
 # Freekstyle native port
 
-A native Linux port of *Freekstyle* (PS2, SLUS-20367), written in Rust with a
-Vulkan renderer. The goal is 60 fps at high resolution.
+A native Linux and Windows port of *Freekstyle* (PS2, SLUS-20367), written
+in Rust with a Vulkan renderer. The goal is 60 fps at high resolution.
 
 The game's EE (Emotion Engine) code is **statically recompiled**: a tool
 translates every MIPS R5900 function into Rust ahead of time. A Rust runtime
@@ -39,7 +39,8 @@ go in `game/`, which git ignores.
 ## Setting up from your own disc
 
 The port needs the North American release (SLUS-20367); nothing from the
-game is in this repository. You need Python 3 (preinstalled on most
+game is in this repository. For Windows, see [Windows](#windows) below. On
+Linux you need Python 3 (preinstalled on most
 distributions), Rust 1.95 or newer (distributions often ship an older one;
 `linux-install.py` then installs current Rust with rustup), a Vulkan driver and,
 for the optional movies, ffmpeg with MPEG-2 (and libplacebo for their CRT
@@ -71,7 +72,65 @@ nothing else installed needs it (`--dry-run` shows what it would do). Or keep it
 running it again after a `git pull` only redoes what changed. For an
 unattended run: `./linux-install.py --yes --system` (or `--here`).
 
-The same by hand:
+### Windows
+
+Windows 10 or 11, 64-bit, with a graphics driver that has Vulkan (any
+current AMD, Intel or NVIDIA driver does). About 15 GB of free space for
+the build.
+
+1. Download this repository: *Code* > *Download ZIP* on GitHub (pick the
+   branch first), and unzip it; or `git clone` it.
+2. Dump your disc (step 1 below) and put the `.bin` or `.iso` in the
+   `game` folder.
+3. Double-click **`windows-install`**. Run it as yourself, not as
+   administrator: it asks for administrator rights only at the end, to copy
+   the game into Program Files.
+
+It works like `linux-install.py`: it shows what is present and what is
+missing, asks before installing anything, logs everything to `install.log`
+and speaks English, Portuguese, Spanish or French following the Windows
+language. What it installs:
+
+- **Visual Studio 2022 C++ Build Tools** (the compiler, a few GB) and
+  **CMake** (to build SDL3 for controllers), through **winget**;
+- **Rust**, with rustup from rust-lang.org;
+- **ffmpeg** for the movies, downloaded next to the game (not into the
+  system);
+- **Real-ESRGAN** for the HD pictures and textures, if the PC has a real
+  graphics card (see [HD pictures and textures](#hd-pictures-and-textures)).
+
+**winget** (Microsoft's *App Installer*) comes with Windows 10 and 11
+through the Microsoft Store, and is used only for the Build Tools and
+CMake. It is missing on some versions: Windows 10 LTSC and IoT, Windows
+Server, "lite" or debloated Windows builds, PCs where the Store is blocked,
+Windows 10 not updated since 2021, and a freshly installed Windows until
+the Store has updated itself. Without it, the installer stops and says so
+if the Build Tools or CMake are missing. Then either install
+[App Installer](https://apps.microsoft.com/detail/9NBLGGH4NNS1) from the
+Microsoft Store, or install the two by hand and run `windows-install`
+again:
+
+- [Build Tools for Visual Studio 2022](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022),
+  with the *Desktop development with C++* workload;
+- [CMake](https://cmake.org/download/) (the Windows x64 installer; let it
+  add CMake to the PATH).
+
+At the end it offers to install the game for all users:
+`C:\Program Files\Freekstyle`, with Freekstyle in the Start menu and in
+*Settings > Apps > Installed apps*. The source folder is then no longer
+needed to play. Settings and saves go to `%APPDATA%\freekstyle`, the HD
+textures made while playing to `%APPDATA%\freekstyle\textures`.
+*Installed apps > Freekstyle > Uninstall* (or `windows-uninstall` in the
+source folder) removes the game and what the installer added: like the
+Linux one, it lists each part and asks, keeping your saves, the tools and
+Rust unless you say otherwise. For an unattended run, from PowerShell:
+`.\windows-install.cmd -Yes -System` (or `-Here` to keep it in the folder).
+
+### By hand
+
+What the installers do, step by step (shown for Linux; on Windows the
+same `cargo` commands work in PowerShell, with `\` in paths and
+`.exe` programs):
 
 1. **Dump your disc** to `game/Freekstyle.bin`. Either format works:
    a raw image (`.bin`, 2352-byte sectors, as made by ImgBurn or
@@ -85,7 +144,7 @@ The same by hand:
 3. **Generate the Rust code** from it and build:
    ```sh
    cargo run --release -p ee-recomp -- game/SLUS_203.67 freekstyle/src/gen freekstyle/hle.txt freekstyle/seeds.txt freekstyle/vu_dumps
-   cargo build --release -p freekstyle -p freekstyle-launcher
+   cargo build --release -p freekstyle -p freekstyle-launcher -p flm -p freekstyle-hd
    ```
 4. **Convert the title and menu pictures** (optional, see *Pictures*):
    ```sh
@@ -207,7 +266,7 @@ On a wide window the 4:3 picture is centred with black bars;
 
 The intro and logo movies are EA `.FLM` files (MPEG-2 video at 512x448,
 29.97 fps, with PS2 ADPCM stereo audio). `flm2mkv` converts them to
-Linux-friendly Matroska (VP9 video, Opus audio) with ffmpeg. Copy them off
+Matroska (VP9 video, Opus audio) with ffmpeg. Copy them off
 the disc first, then convert:
 
 ```sh
@@ -225,6 +284,16 @@ another size), and looks best fullscreen on a 1080p or 4K screen:
 ```sh
 cargo run --release -p flm --bin flm2mkv -- --crt game/movies/flm game/movies/hd
 ```
+
+**Sound**: `flm2mkv` repairs the soundtracks on the way. `prod1` (the
+movie after you type a player name) is mastered so hot on the disc that it
+clips and pops; its clipped peaks and clicks are rebuilt from the audio
+around them (`crates/flm/src/declick.rs`). Every soundtrack is also turned
+down about 3 dB, since the game decodes movies to 16-bit and anything over
+full scale would crackle. Movies converted by an older version get the
+current sound with `flm2mkv --audio game/movies/flm game/movies/hd` (and
+`game/movies`), which keeps their video; both installers run it by
+themselves.
 
 The shader is `crates/flm/src/crt.glsl`; it also works live in mpv
 (`mpv --glsl-shaders=crates/flm/src/crt.glsl game/movies/intro.mkv`).
@@ -343,7 +412,7 @@ The game reaches its main menu natively and is controllable: profile name
 entry, main menu (Circuit, Single Race, Freestyle, Freeride, Record Book,
 Options), at up to 5x resolution with Xbox prompts. The rider select
 screen renders the 3D rider models (VU1) and the animated flames, and
-races run at 60 fps. (They used to run at 30: the game has no cap, but a
+races run at 60 fps, on Linux and on Windows. (They used to run at 30: the game has no cap, but a
 frame that misses one vblank waits for the next, and emulating VU1 and the
 VIF used to cost about 20 ms a frame. `--headless` prints the frame rate.)
 
