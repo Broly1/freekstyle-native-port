@@ -98,6 +98,8 @@ pub struct Tr {
     pub sharp_textures_hint: &'static str,
     pub hd_textures: &'static str,
     pub hd_textures_hint: &'static str,
+    pub build_hd_textures: &'static str,
+    pub build_hd_textures_hint: &'static str,
 
     pub game: &'static str,
     pub sound: &'static str,
@@ -172,7 +174,9 @@ pub const EN: Tr = Tr {
     sharp_textures: "Sharp textures",
     sharp_textures_hint: "Upscale menu text and artwork (xBRZ)",
     hd_textures: "HD textures",
-    hd_textures_hint: "Use the texture pack in game/textures/hd",
+    hd_textures_hint: "Use the HD texture packs",
+    build_hd_textures: "Make HD textures",
+    build_hd_textures_hint: "Upscale what you see after you quit (needs a graphics card)",
 
     game: "Game",
     sound: "Sound",
@@ -262,7 +266,9 @@ pub const PT_BR: Tr = Tr {
     sharp_textures: "Texturas nítidas",
     sharp_textures_hint: "Ampliar textos e artes dos menus (xBRZ)",
     hd_textures: "Texturas HD",
-    hd_textures_hint: "Usar o pacote de texturas em game/textures/hd",
+    hd_textures_hint: "Usar os pacotes de texturas HD",
+    build_hd_textures: "Criar texturas HD",
+    build_hd_textures_hint: "Melhorar o que você viu depois de sair (precisa de placa de vídeo)",
 
     game: "Jogo",
     sound: "Som",
@@ -352,7 +358,9 @@ pub const ES: Tr = Tr {
     sharp_textures: "Texturas nítidas",
     sharp_textures_hint: "Escalar textos e ilustraciones de los menús (xBRZ)",
     hd_textures: "Texturas HD",
-    hd_textures_hint: "Usar el paquete de texturas de game/textures/hd",
+    hd_textures_hint: "Usar los paquetes de texturas HD",
+    build_hd_textures: "Crear texturas HD",
+    build_hd_textures_hint: "Mejorar lo que viste al salir (necesita tarjeta gráfica)",
 
     game: "Juego",
     sound: "Sonido",
@@ -442,7 +450,9 @@ pub const FR: Tr = Tr {
     sharp_textures: "Textures nettes",
     sharp_textures_hint: "Agrandir les textes et illustrations des menus (xBRZ)",
     hd_textures: "Textures HD",
-    hd_textures_hint: "Utiliser le pack de textures de game/textures/hd",
+    hd_textures_hint: "Utiliser les packs de textures HD",
+    build_hd_textures: "Créer des textures HD",
+    build_hd_textures_hint: "Améliorer ce que vous avez vu après avoir quitté (carte graphique requise)",
 
     game: "Jeu",
     sound: "Son",

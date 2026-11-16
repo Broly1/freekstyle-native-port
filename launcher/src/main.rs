@@ -405,6 +405,9 @@ impl Launcher {
                 ui.label(t.hd_textures);
                 ui.checkbox(&mut c.hd_textures, t.hd_textures_hint);
                 ui.end_row();
+                ui.label(t.build_hd_textures);
+                ui.checkbox(&mut c.build_hd_textures, t.build_hd_textures_hint);
+                ui.end_row();
             });
         });
         section(ui, t.game, |ui| {

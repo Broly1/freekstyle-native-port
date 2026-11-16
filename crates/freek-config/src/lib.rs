@@ -64,6 +64,34 @@ pub fn path() -> &'static Path {
     })
 }
 
+/// The user's own data: `$XDG_DATA_HOME/freekstyle` (`~/.local/share/...`)
+/// on Linux, `%APPDATA%\freekstyle` on Windows. Saves live here, and the
+/// texture pack built while playing, as an install may be read-only.
+pub fn data_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("freekstyle")
+}
+
+/// Textures recorded while playing, for `freekstyle-hd` to upscale.
+pub fn texture_dump() -> PathBuf {
+    data_dir().join("textures").join("dump")
+}
+
+/// The texture pack `freekstyle-hd` builds from [`texture_dump`].
+pub fn user_texture_pack() -> PathBuf {
+    data_dir().join("textures").join("hd")
+}
+
+/// Present while the game runs, so `freekstyle-hd` leaves the GPU to it.
+pub fn playing_lock() -> PathBuf {
+    data_dir().join("playing.lock")
+}
+
 /// Whether files can be created in `dir` (tried, not guessed from modes).
 fn writable(dir: &Path) -> bool {
     let probe = dir.join(format!(".freekstyle-probe-{}", std::process::id()));
@@ -88,8 +116,12 @@ pub struct Config {
     pub ps2_icons: bool,
     /// Upscale game textures (menu text and artwork) with xBRZ.
     pub sharp_textures: bool,
-    /// Draw HD replacements from `game/textures/hd` when there are any.
+    /// Draw HD replacements from `game/textures/hd` and the user's own pack
+    /// ([`user_texture_pack`]) when there are any.
     pub hd_textures: bool,
+    /// Record the textures the game shows and, after it quits, upscale the
+    /// new ones into the user's pack with `freekstyle-hd` (needs a GPU).
+    pub build_hd_textures: bool,
     pub mute: bool,
     /// Run the game's own sound driver on the emulated IOP and SPU2 instead
     /// of the enhanced native sound engine.
@@ -182,6 +214,7 @@ impl Default for Config {
             ps2_icons: false,
             sharp_textures: true,
             hd_textures: true,
+            build_hd_textures: true,
             mute: false,
             emulated_audio: false,
             language: String::new(),

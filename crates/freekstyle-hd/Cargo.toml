@@ -1,0 +1,11 @@
+[package]
+name = "freekstyle-hd"
+description = "Makes the HD extras: high-resolution pictures and the texture pack built while playing"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+freek-config = { path = "../freek-config" }
+image = { version = "0.25.10", default-features = false, features = ["png"] }

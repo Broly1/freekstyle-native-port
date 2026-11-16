@@ -13,7 +13,7 @@
 //! In widescreen the frame is stretched to 16:9 for display, so a 16:9
 //! version, `game/images/hd/wide/<NAME>.png`, is preferred: squeezed into
 //! the frame like everything else, it shows at its own shape. Wide
-//! versions are made from the 4:3 ones by `tools/widen-pictures.py`, which
+//! versions are made from the 4:3 ones by `freekstyle-hd`, which
 //! stretches the edges more than the centre ([`WIDE_CENTRE`]); the game's
 //! overlays on a picture (loading bar, "PRESS START") are moved by the
 //! same curve ([`wide_position`]) so they stay on their spot in it.
@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 /// Slope of the wide pictures' stretch curve at the centre: a point at
 /// `v` (-1..1 across the 4:3 picture) is shown at `u` across the 16:9 one,
-/// where `v = a*u + (1 - a)*u^3`. Must match `tools/widen-pictures.py`.
+/// where `v = a*u + (1 - a)*u^3`. Must match crates/freekstyle-hd/src/pictures.rs.
 pub const WIDE_CENTRE: f32 = 1.2;
 
 /// Where a point at `v` across a 4:3 picture is shown across its wide

@@ -5,9 +5,11 @@
 //! found by a hash of the decoded pixels instead, which also tells palette
 //! variants apart.
 //!
-//! `FREEK_DUMP_TEXTURES=<dir>` writes every texture the game uses as
-//! `<hash>_<format>_<w>x<h>_<sprite|surface>.png`. A pack is a folder
-//! (`game/textures/hd`) of PNGs whose names start with that hash; anything
+//! The game records every texture it uses (`Config::texture_dump`, or
+//! `FREEK_DUMP_TEXTURES=<dir>`) as
+//! `<hash>_<format>_<w>x<h>_<sprite|surface>.png`, for `freekstyle-hd` to
+//! upscale. A pack is a folder (`game/textures/hd`, or the user's own one
+//! that freekstyle-hd builds) of PNGs whose names start with that hash; anything
 //! after the hash is ignored. A replacement keeps the original's aspect
 //! ratio. PNG alpha 255 is the texture's strongest alpha: 0x80, fully opaque,
 //! or more for textures such as fonts that brighten what they draw.
@@ -53,23 +55,21 @@ pub struct Pack {
 }
 
 impl Pack {
-    /// Index the pack in `dir`. None without a usable pack, so a game with
-    /// no pack does no hashing.
-    pub fn open(dir: &Path) -> Option<Pack> {
-        let files: HashMap<u64, PathBuf> = std::fs::read_dir(dir)
-            .ok()?
-            .flatten()
-            .filter_map(|e| {
-                let path = e.path();
-                let name = path.file_stem()?.to_str()?;
-                let hash = u64::from_str_radix(name.get(..16)?, 16).ok()?;
-                (path.extension()? == "png").then_some((hash, path))
-            })
-            .collect();
+    /// Index the packs in `dirs`; where two hold the same texture the later
+    /// wins. None without a usable pack, so a game with no pack does no
+    /// hashing.
+    pub fn open(dirs: &[PathBuf]) -> Option<Pack> {
+        let mut files: HashMap<u64, PathBuf> = HashMap::new();
+        for dir in dirs {
+            let found = pack_files(dir);
+            if !found.is_empty() {
+                eprintln!("[textures] {} HD textures in {}", found.len(), dir.display());
+            }
+            files.extend(found);
+        }
         if files.is_empty() {
             return None;
         }
-        eprintln!("[textures] {} HD textures in {}", files.len(), dir.display());
         let (jobs, rx) = channel::<(u64, PathBuf, u32, u32, u32)>();
         let (tx, done) = channel();
         std::thread::Builder::new()
@@ -158,7 +158,22 @@ fn shrink(l: &Level) -> Option<Level> {
     Some(Level { w: nw, h: nh, px })
 }
 
-/// Writes textures as the game first uses them, on its own thread.
+/// The textures in a pack folder, by hash.
+fn pack_files(dir: &Path) -> HashMap<u64, PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return HashMap::new() };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_stem()?.to_str()?;
+            let hash = u64::from_str_radix(name.get(..16)?, 16).ok()?;
+            (path.extension()? == "png").then_some((hash, path))
+        })
+        .collect()
+}
+
+/// Writes textures as the game first uses them, on its own thread. Ones
+/// already in the folder, from earlier sessions, aren't written again.
 pub struct Dumper {
     seen: HashSet<u64>,
     jobs: Sender<(String, u32, u32, Vec<u8>)>,
@@ -167,6 +182,7 @@ pub struct Dumper {
 impl Dumper {
     pub fn new(dir: PathBuf) -> Dumper {
         let _ = std::fs::create_dir_all(&dir);
+        let seen = pack_files(&dir).into_keys().collect();
         let (jobs, rx) = channel::<(String, u32, u32, Vec<u8>)>();
         std::thread::Builder::new()
             .name("texture-dump".into())
@@ -178,7 +194,7 @@ impl Dumper {
                 }
             })
             .expect("spawn texture dump thread");
-        Dumper { seen: HashSet::new(), jobs }
+        Dumper { seen, jobs }
     }
 
     pub fn dump(&mut self, hash: u64, psm: gs::mem::Psm, sprite: bool, w: u32, h: u32, px: &[u32]) {

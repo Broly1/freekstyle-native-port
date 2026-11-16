@@ -1395,6 +1395,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "freekstyle-hd"
+version = "0.1.0"
+dependencies = [
+ "freek-config",
+ "image",
+]
+
+[[package]]
 name = "freekstyle-launcher"
 version = "0.1.0"
 dependencies = [

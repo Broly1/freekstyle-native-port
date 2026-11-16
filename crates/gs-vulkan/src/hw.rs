@@ -268,8 +268,11 @@ pub struct Config {
     pub sharp_textures: bool,
     /// Converted pictures (`game/images`); replacements in its `hd`.
     pub pictures: Option<std::path::PathBuf>,
-    /// Texture pack folder (see `retexture`).
-    pub texture_pack: Option<std::path::PathBuf>,
+    /// Texture pack folders (see `retexture`); a later one wins.
+    pub texture_packs: Vec<std::path::PathBuf>,
+    /// Where to record the textures the game shows, for `freekstyle-hd`
+    /// to upscale (FREEK_DUMP_TEXTURES overrides it).
+    pub texture_dump: Option<std::path::PathBuf>,
 }
 
 pub struct Hw {
@@ -453,11 +456,11 @@ impl Hw {
                 targets: FastMap::default(),
                 textures: FastMap::default(),
                 sharpen: cfg.sharp_textures.then(Sharpener::spawn),
-                pack: cfg.texture_pack.as_deref().and_then(crate::retexture::Pack::open),
+                pack: crate::retexture::Pack::open(&cfg.texture_packs),
                 hd_images: FastMap::default(),
                 hd_bytes: 0,
                 hd_waiting: Default::default(),
-                dumper: std::env::var_os("FREEK_DUMP_TEXTURES").map(|d| crate::retexture::Dumper::new(d.into())),
+                dumper: std::env::var_os("FREEK_DUMP_TEXTURES").map(Into::into).or_else(|| cfg.texture_dump.clone()).map(crate::retexture::Dumper::new),
                 clut_hash: (u64::MAX, 0, 0, 0),
                 palettes: HashMap::new(),
                 palette: 0,

@@ -22,7 +22,9 @@
 //!   --headless           no window; print GS statistics
 //!   --ps2-icons          keep the original PlayStation button icons
 //!   --no-sharp-textures  original texture resolution (no xBRZ upscaling)
-//!   --no-hd-textures     ignore the texture pack in game/textures/hd
+//!   --no-hd-textures     ignore the texture packs (game/textures/hd and
+//!                        the one built while playing)
+//!   --no-build-hd-textures  don't record textures to build the pack from
 //!   --mute               no sound (the sound driver still runs)
 //!
 //! Controls: any gamepad (Xbox layout: A/B/X/Y = Cross/Circle/Square/
@@ -39,6 +41,7 @@
 
 mod audio;
 mod gsrec;
+mod hdbuild;
 mod profile;
 #[allow(clippy::all)]
 mod gen;
@@ -72,6 +75,7 @@ struct Options {
     ps2_icons: bool,
     sharp_textures: bool,
     hd_textures: bool,
+    build_hd_textures: bool,
     mute: bool,
     emulated_audio: bool,
     keyboard_player: u32,
@@ -102,6 +106,7 @@ fn options() -> Options {
         ps2_icons: c.ps2_icons,
         sharp_textures: c.sharp_textures,
         hd_textures: c.hd_textures,
+        build_hd_textures: c.build_hd_textures,
         mute: c.mute,
         emulated_audio: c.emulated_audio,
         keyboard_player: c.keyboard_player,
@@ -132,6 +137,7 @@ fn options() -> Options {
             "--ps2-icons" => o.ps2_icons = true,
             "--no-sharp-textures" => o.sharp_textures = false,
             "--no-hd-textures" => o.hd_textures = false,
+            "--no-build-hd-textures" => o.build_hd_textures = false,
             "--mute" => o.mute = true,
             "--emulated-audio" => o.emulated_audio = true,
             _ if a.starts_with("--") => {
@@ -244,12 +250,21 @@ fn main() {
         keys: Vec::new(),
         last_buttons: 0,
         traces: 0,
+        building: None,
         key_map,
         pad_map,
     };
+    // A replay draws a recording, not the game: nothing new to record.
+    if app.opts.build_hd_textures && env::var_os("FREEK_GS_REPLAY").is_none() && hdbuild::available() {
+        app.building = Some(hdbuild::PlayingLock::take());
+    }
     profile::start_if_requested("FREEK_PROFILE_GS", "profile_gs.txt");
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("event loop: {e}");
+    }
+    if app.building.take().is_some() {
+        let game_dir = std::path::Path::new(&app.opts.disc).parent().unwrap_or(std::path::Path::new("."));
+        hdbuild::start_build(&game_dir.join("textures/hd"));
     }
     process::exit(0);
 }
@@ -269,6 +284,8 @@ struct App {
     keys: Vec<KeyCode>,
     last_buttons: u16,
     traces: u32,
+    /// Held while the game records textures for the pack (`hdbuild`).
+    building: Option<hdbuild::PlayingLock>,
     /// Bound keys (winit KeyCode names) and gamepad buttons, with the PS2
     /// buttons each one presses.
     key_map: HashMap<String, u16>,
@@ -393,7 +410,8 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
         let game_dir = std::path::Path::new(&self.opts.disc).parent().unwrap_or(std::path::Path::new("."));
         let pictures = game_dir.join("images");
-        let texture_pack = self.opts.hd_textures.then(|| game_dir.join("textures/hd"));
+        let texture_packs = if self.opts.hd_textures { vec![freek_config::user_texture_pack(), game_dir.join("textures/hd")] } else { Vec::new() };
+        let texture_dump = self.building.is_some().then(freek_config::texture_dump);
         // Widescreen stretches the frame by 4/3: render that much wider.
         let scale_x = if self.opts.widescreen { (self.opts.scale * 4).div_ceil(3) } else { self.opts.scale };
         let cfg = gs_vulkan::Config {
@@ -403,7 +421,8 @@ impl ApplicationHandler for App {
             stretch: self.opts.stretch, blur_bars: self.opts.blur_bars, xbox_icons: !self.opts.ps2_icons,
             sharp_textures: self.opts.sharp_textures,
             pictures: Some(pictures),
-            texture_pack,
+            texture_packs,
+            texture_dump,
         };
         let renderer = gs_vulkan::Renderer::new(&window, (size.width, size.height), cfg).unwrap_or_else(|e| {
             eprintln!("Vulkan: {e}");
@@ -476,6 +495,9 @@ impl ApplicationHandler for App {
                     return;
                 }
             }
+        }
+        if let Some(lock) = &mut self.building {
+            lock.refresh();
         }
         if self.last_title.elapsed() >= Duration::from_secs(1) {
             let frames = r.frame() - self.last_frame;

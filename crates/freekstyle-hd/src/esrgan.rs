@@ -1,0 +1,83 @@
+//! Real-ESRGAN (realesrgan-ncnn-vulkan), the AI upscaler: where it is,
+//! whether it has a real GPU to run on, and running it on a folder.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+/// Line art: menus, fonts, the HUD and the pictures.
+pub const ANIME: &str = "realesrgan-x4plus-anime";
+/// Photographs: the 3D surfaces.
+pub const PHOTO: &str = "realesrgan-x4plus";
+
+const EXE: &str = if cfg!(windows) { "realesrgan-ncnn-vulkan.exe" } else { "realesrgan-ncnn-vulkan" };
+
+/// The upscaler beside this program, where the installers put it
+/// (`realesrgan/` next to `freekstyle-hd`).
+pub fn find() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.join("realesrgan");
+    let exe = dir.join(EXE);
+    exe.is_file().then_some(exe)
+}
+
+/// The command for `exe`, without a console window on Windows.
+fn command(exe: &Path) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut c = Command::new(exe);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
+/// Software Vulkan drivers: Real-ESRGAN runs on them, but takes minutes per
+/// picture, so they count as no GPU.
+const SOFTWARE: [&str; 4] = ["llvmpipe", "lavapipe", "swiftshader", "microsoft basic render"];
+
+/// Upscale one tiny picture to see that a real GPU runs the model. The
+/// error says why not.
+pub fn check(exe: &Path, tmp: &Path) -> Result<(), String> {
+    let src = tmp.join("check.png");
+    let dst = tmp.join("check-out.png");
+    image::RgbImage::from_pixel(16, 16, image::Rgb([128, 128, 128])).save(&src).map_err(|e| e.to_string())?;
+    let out = command(exe)
+        .args(["-i".as_ref(), src.as_os_str(), "-o".as_ref(), dst.as_os_str(), "-n".as_ref(), ANIME.as_ref(), "-s".as_ref(), "4".as_ref()])
+        .arg("-m")
+        .arg(models(exe))
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("{}: {e}", exe.display()))?;
+    let log = String::from_utf8_lossy(&out.stderr).to_lowercase();
+    if let Some(sw) = SOFTWARE.iter().find(|s| log.contains(*s)) {
+        return Err(format!("only the {sw} software renderer"));
+    }
+    if !out.status.success() || !dst.is_file() {
+        let last = log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no output").trim().to_string();
+        return Err(format!("the upscaler failed: {last}"));
+    }
+    Ok(())
+}
+
+fn models(exe: &Path) -> PathBuf {
+    exe.parent().unwrap_or(Path::new(".")).join("models")
+}
+
+/// Upscale every PNG in `src` 4x into `dst` (same names) with `model`.
+pub fn run(exe: &Path, model: &str, src: &Path, dst: &Path) -> Result<(), String> {
+    let out = command(exe)
+        .args(["-i".as_ref(), src.as_os_str(), "-o".as_ref(), dst.as_os_str(), "-n".as_ref(), model.as_ref(), "-s".as_ref(), "4".as_ref(), "-f".as_ref(), "png".as_ref()])
+        .arg("-m")
+        .arg(models(exe))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .map_err(|e| format!("{}: {e}", exe.display()))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let log = String::from_utf8_lossy(&out.stderr);
+        Err(format!("{model} failed: {}", log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim()))
+    }
+}

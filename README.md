@@ -33,6 +33,7 @@ go in `game/`, which git ignores.
 | `gs-vulkan`  | working | Vulkan renderer: render targets at N x resolution (3x 1080p, 5x 4K), GS blend modes, texture cache, display output, screenshots |
 | VU0/VU1      | working | VIF unpack/MPG/DIRECT, VU micro-mode interpreter with pipeline timing (Q/P latency, flag delay, hazard stalls); recorded programs are compiled to native SSE code from `freekstyle/vu_dumps` (see below) |
 | `flm`        | working | EA `.FLM` movie demuxer and PS2 ADPCM decoder; `flm2mkv` converts movies to VP9 + Opus `.mkv` |
+| `freekstyle-hd` | working | HD extras with Real-ESRGAN: 4K and 16:9 pictures, and the texture pack the game builds while it is played (redrawn steel menu frames included) |
 | pictures     | working | No IPU emulation: `lsc2png` converts the 21 MPEG-2 still pictures (.LSC: title, menu, loading screens) to PNG once, and the game's picture decoder is replaced by a native function that loads them. The converter's decoder matches FFmpeg to 45-60 dB |
 
 ## Setting up from your own disc
@@ -134,20 +135,12 @@ Esc quits.
   upscaled with xBRZ to the internal resolution on a worker thread
   (`--no-sharp-textures` turns it off). 3D surfaces keep their originals.
   xBRZ comes from `xbrz-rs`, which is GPL-3.0.
-- **HD textures**: PNGs in `game/textures/hd` replace the game's textures,
+- **HD textures**: PNGs in a texture pack replace the game's textures,
   matched by a hash of their pixels, so a palette variant is its own
   texture (`--no-hd-textures` turns them off). They load on a worker thread
-  and get mipmaps and anisotropic filtering. To make a pack, record what the
-  game uses while you play, then scale it; each run adds to the dump, and
-  the tool only processes what the pack lacks:
-
-      FREEK_DUMP_TEXTURES=game/textures/dump ./target/release/freekstyle
-      tools/hd_pack.py game/textures/dump --esrgan /path/to/realesrgan-ncnn-vulkan
-
-  Sprites (fonts, HUD, menu frames) use the line-art model, 3D surfaces the
-  photo model.
-  `tools/redraw_art.py` then redraws the chrome menu frames and the boost
-  gear as clean steel, keeping their shapes.
+  and get mipmaps and anisotropic filtering. The game makes its own pack as
+  you play (see [HD pictures and textures](#hd-pictures-and-textures)); a
+  hand-made one goes in `game/textures/hd`.
   Leave out `--esrgan` for plain Lanczos scaling. Packs are game data and
   are not committed.
 - **Xbox button prompts**: the game's PlayStation button icons are
@@ -204,11 +197,11 @@ On a wide window the 4:3 picture is centred with black bars;
 - **HUD and menu text**: drawn 3/4 as wide around the screen centre, so
   they keep their shape inside the middle 4:3 area. The renderer
   recognises them as draws at the far depth limit with the depth test on.
-- **Pictures**: `game/images/hd/wide/<NAME>.png` (16:9, e.g. 3840x2160)
-  is used if present, else the 4:3 one is stretched. Make them with
-  `tools/widen-pictures.py` (ffmpeg + numpy): it stretches the edges more
-  than the centre, and the game's overlays on a picture (loading bar,
-  "PRESS START") are moved by the same curve so they stay in place.
+- **Pictures**: `game/images/hd/wide/<NAME>.png` (16:9, 3840x2160) is
+  used if present, else the 4:3 one is stretched. `freekstyle-hd` makes
+  them (see below): it stretches the edges more than the centre, and the
+  game's overlays on a picture (loading bar, "PRESS START") are moved by
+  the same curve so they stay in place.
 
 ## Movies
 
@@ -241,98 +234,45 @@ preferring `game/movies/hd/` and falling back to `game/movies/`; a movie
 with no conversion is skipped. ffmpeg decodes them while they play, so it
 must be installed to see them. Start or Cross skips a movie.
 
-## HD extras (optional)
+## HD pictures and textures
 
-None of this is needed to play. It makes the game look sharper: an HD
-texture pack with redrawn steel menu frames, and AI-upscaled pictures with
-16:9 versions for widescreen. Run every command from the repository root,
-after `linux-install.py` has finished.
+With a graphics card, the game gets sharper by itself. The installers
+download Real-ESRGAN, an AI upscaler (about 45 MB, into
+`target/release/realesrgan` and the installed game), and run
+`freekstyle-hd`, which makes:
 
-### What you need
+- **HD pictures**: the title, menu and loading pictures upscaled to 4K
+  (`game/images/hd`, 2880x2160), with 16:9 versions for widescreen
+  (`game/images/hd/wide`). About a minute, during the install.
+- **HD textures, as you play**: the game records each texture the first
+  time it shows it (into `textures/dump` in your data folder:
+  `~/.local/share/freekstyle` on Linux, `%APPDATA%\freekstyle` on
+  Windows). When you quit, it starts `freekstyle-hd pack` in the
+  background, which upscales the new ones into `textures/hd` there, loaded
+  the next time the game starts. Menus, fonts and the HUD use the line-art
+  model, 3D surfaces the photo model; the chrome menu frames and the boost
+  gear are redrawn as clean steel instead, keeping their shapes. Recording
+  costs the game nothing noticeable, and the upscaling never runs while
+  you play: it stops as soon as the game starts again and carries on the
+  next time you quit. Its log is `hd.log` in the data folder.
 
-Python's Pillow and numpy, ffmpeg and unzip:
+A machine without a graphics card (only a software Vulkan driver) gets
+neither: the model would take minutes per picture. The game then looks as
+on the PS2, sharpened with xBRZ. *Make HD textures* in the launcher (or
+`--no-build-hd-textures`) turns the recording off; *HD textures* chooses
+whether packs are used at all. A hand-made pack in `game/textures/hd` wins
+over the one made while playing.
 
-```sh
-sudo pacman -S --needed python-pillow python-numpy ffmpeg unzip   # Arch, Manjaro
-sudo apt install python3-pil python3-numpy ffmpeg unzip           # Debian, Ubuntu, Mint
-sudo dnf install python3-pillow python3-numpy ffmpeg unzip        # Fedora (ffmpeg-free is enough)
-sudo zypper install python3-Pillow python3-numpy ffmpeg unzip     # openSUSE
-```
-
-Real-ESRGAN, the AI upscaler (needs a GPU with Vulkan):
-
-```sh
-mkdir -p ~/.local/share/realesrgan && cd ~/.local/share/realesrgan
-curl -LO https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip
-unzip -o realesrgan-ncnn-vulkan-20220424-ubuntu.zip && chmod +x realesrgan-ncnn-vulkan
-cd -
-```
-
-Set these two shortcuts in the terminal you use for the steps below (again
-in every new terminal):
-
-```sh
-ESRGAN=~/.local/share/realesrgan/realesrgan-ncnn-vulkan
-E="$ESRGAN -m $HOME/.local/share/realesrgan/models"
-```
-
-### 1. HD pictures
-
-About a minute:
+`freekstyle-hd` can also be run by hand, from the repository root:
 
 ```sh
-P=$(mktemp -d); mkdir -p $P/in $P/out game/images/hd
-cp game/images/*.png $P/in/
-$E -i $P/in -o $P/out -n realesrgan-x4plus-anime -f png
-for f in $P/out/*.png; do
-  ffmpeg -loglevel error -y -i "$f" -vf scale=2880:2160:flags=lanczos,format=rgb24 game/images/hd/$(basename "$f")
-done
-rm -r $P
+./target/release/freekstyle-hd check                 # can this machine upscale?
+./target/release/freekstyle-hd pictures game/images  # HD and 16:9 pictures
+./target/release/freekstyle-hd pack                  # upscale what was recorded
+./target/release/freekstyle-hd pack --dump DIR --out DIR   # any recording, any pack
 ```
 
-### 2. 16:9 pictures
-
-Needs step 1. For the launcher's *Widescreen* option:
-
-```sh
-tools/widen-pictures.py
-```
-
-### 3. HD texture pack and steel menu frames
-
-1. Record the textures while you play:
-
-   ```sh
-   FREEK_DUMP_TEXTURES=game/textures/dump ./target/release/freekstyle
-   ```
-
-   Visit everything you want sharp: every menu, every rider and bike on
-   the rider select screen, a race on each track, Freestyle, Freeride, a
-   split-screen race, the pause menu and the results screen. You can quit
-   and record more later; each run adds to the same folder.
-
-2. Upscale the recording, then redraw the menu frames and boost gear as
-   steel:
-
-   ```sh
-   tools/hd_pack.py game/textures/dump --esrgan $ESRGAN
-   tools/redraw_art.py --esrgan $ESRGAN
-   ```
-
-After recording more, run both lines again: only new textures are added.
-Tick *HD textures* in the launcher (on by default).
-
-### If you installed the game to the system
-
-The game in `/opt/freekstyle` has its own copy of `game/`. Copy the extras
-into it:
-
-```sh
-sudo cp -r game/images /opt/freekstyle/game/
-sudo mkdir -p /opt/freekstyle/game/textures && sudo cp -r game/textures/hd /opt/freekstyle/game/textures/
-```
-
-All of this stays under `game/`, which is never committed.
+`FREEK_DUMP_TEXTURES=<dir>` records into another folder.
 
 ## VU microprograms
 
