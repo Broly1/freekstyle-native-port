@@ -116,7 +116,8 @@ fn convert(src: &Path, out_dir: &Path, height: Option<u32>, crt: bool) -> Result
     let m2v = tmp.join("video.m2v");
     fs::write(&m2v, &movie.video).map_err(|e| e.to_string())?;
     let (wav, fix) = soundtrack(&movie, &tmp)?;
-    let out = out_dir.join(format!("{stem}.mkv"));
+    // Absolute: ffmpeg runs in `tmp` (see the CRT shader below).
+    let out = std::path::absolute(out_dir.join(format!("{stem}.mkv"))).map_err(|e| e.to_string())?;
     let (num, den) = flm::VIDEO_FPS;
     let rate = format!("{num}/{den}");
     let fields = field_order(&m2v, &rate)?;
@@ -134,12 +135,13 @@ fn convert(src: &Path, out_dir: &Path, height: Option<u32>, crt: bool) -> Result
             let glsl = CRT_GLSL.replace("//!WIDTH 1440", &format!("//!WIDTH {w}")).replace("//!HEIGHT 1080", &format!("//!HEIGHT {h}"));
             fs::write(&shader, glsl).map_err(|e| e.to_string())?;
             // Passing -init_hw_device makes libplacebo fail to start; it
-            // finds the Vulkan GPU by itself.
+            // finds the Vulkan GPU by itself. The shader is named relative
+            // to ffmpeg's folder, `tmp`: in a filter, the colon of a
+            // Windows drive (C:\...) splits the option even inside quotes.
             filters.push(format!(
                 "setparams=colorspace=smpte170m:color_primaries=smpte170m:color_trc=smpte170m,\
-                 libplacebo=w={w}:h={h}:upscaler=nearest:custom_shader_path='{}':colorspace=bt709:color_primaries=bt709:color_trc=bt709,\
+                 libplacebo=w={w}:h={h}:upscaler=nearest:custom_shader_path=crt.glsl:colorspace=bt709:color_primaries=bt709:color_trc=bt709,\
                  setsar=1,format=yuv420p",
-                shader.display()
             ));
         } else {
             filters.push(format!("scale={w}:{h}:flags=lanczos+accurate_rnd+full_chroma_int:in_color_matrix=bt601:out_color_matrix=bt709,setsar=1"));
@@ -147,6 +149,7 @@ fn convert(src: &Path, out_dir: &Path, height: Option<u32>, crt: bool) -> Result
         color = vec!["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"];
     }
     let mut cmd = Command::new("ffmpeg");
+    cmd.current_dir(&tmp);
     cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-r", &rate, "-i"]).arg(&m2v).arg("-i").arg(&wav);
     if !filters.is_empty() {
         cmd.args(["-vf", &filters.join(",")]);
