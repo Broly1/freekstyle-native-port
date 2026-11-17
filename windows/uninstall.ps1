@@ -380,10 +380,12 @@ function Main {
         $parts += [pscustomobject]@{ Key = 'hd'; Label = (T 'hd' (Join-Path $Data 'textures').Replace($env:USERPROFILE, '~')); Default = $true
                                      Size = (Get-Size $hd); Note = $null }
     }
-    $data = @(Get-DataPaths $state)
-    if ($data.Count) {
-        $parts += [pscustomobject]@{ Key = 'data'; Label = (T 'data' (($data -join ', ').Replace($env:USERPROFILE, '~'))); Default = $false
-                                     Size = (Get-Size $data); Note = $null }
+    # Not $data: PowerShell names ignore case, and the functions called
+    # from here would see it in place of the script's $Data folder.
+    $saves = @(Get-DataPaths $state)
+    if ($saves.Count) {
+        $parts += [pscustomobject]@{ Key = 'data'; Label = (T 'data' (($saves -join ', ').Replace($env:USERPROFILE, '~'))); Default = $false
+                                     Size = (Get-Size $saves); Note = $null }
     }
     $tools = @(@($state.winget) | Where-Object { $_ -and (Test-WingetInstalled $_) })
     if ($tools.Count) {
