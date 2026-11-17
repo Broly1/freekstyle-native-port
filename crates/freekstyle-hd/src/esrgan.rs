@@ -54,14 +54,36 @@ pub fn check(exe: &Path, tmp: &Path) -> Result<(), String> {
         .output()
         .map_err(|e| format!("{}: {e}", exe.display()))?;
     let log = String::from_utf8_lossy(&out.stderr).to_lowercase();
-    if let Some(sw) = SOFTWARE.iter().find(|s| log.contains(*s)) {
-        return Err(format!("only the {sw} software renderer"));
+    // It lists every Vulkan device ("[0 name]  queueC=..."), not just the
+    // one it uses, and ncnn picks a real GPU over a software one. Distros
+    // install llvmpipe beside the real driver (Ubuntu, Debian and Fedora's
+    // mesa-vulkan-drivers), so a software one in the list says nothing:
+    // only a list with nothing else in it means no GPU.
+    let devices = vulkan_devices(&log);
+    let software = |d: &String| SOFTWARE.iter().find(|s| d.contains(*s));
+    if !devices.is_empty() && devices.iter().all(|d| software(d).is_some()) {
+        return Err(format!("only the {} software renderer", software(&devices[0]).unwrap()));
     }
     if !out.status.success() || !dst.is_file() {
         let last = log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no output").trim().to_string();
         return Err(format!("the upscaler failed: {last}"));
     }
     Ok(())
+}
+
+/// The Vulkan device names in the upscaler's log, one per device, from
+/// its "[N name]  ..." lines.
+fn vulkan_devices(log: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in log.lines() {
+        let Some(rest) = line.strip_prefix('[') else { continue };
+        let Some((id, rest)) = rest.split_once(' ') else { continue };
+        let Some((name, _)) = rest.split_once(']') else { continue };
+        if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    names
 }
 
 fn models(exe: &Path) -> PathBuf {
@@ -135,5 +157,20 @@ pub fn run(exe: &Path, model: &str, src: &Path, dst: &Path) -> Result<(), String
     } else {
         let log = String::from_utf8_lossy(&log);
         Err(format!("{model} failed: {}", log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::vulkan_devices;
+
+    #[test]
+    fn devices_from_log() {
+        let log = "[0 intel(r) arc(tm) b580 graphics (bmg g21)]  queuec=1[1]  queueg=0[1]\n\
+                   [0 intel(r) arc(tm) b580 graphics (bmg g21)]  fp16-p/s/a=1/1/1\n\
+                   [1 llvmpipe (llvm 21.1.8, 256 bits)]  queuec=0[1]\n\
+                   25.00%\n";
+        assert_eq!(vulkan_devices(log), ["intel(r) arc(tm) b580 graphics (bmg g21)", "llvmpipe (llvm 21.1.8, 256 bits)"]);
+        assert!(vulkan_devices("[ x ]\n0.00%\n").is_empty());
     }
 }
