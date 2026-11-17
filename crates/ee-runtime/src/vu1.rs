@@ -184,7 +184,22 @@ impl VifIo for WorkerIo {
     }
 }
 
+/// Ends the game if the worker panics. Without it the transfer it was
+/// running is never counted off `pending`, and the EE thread spins in
+/// `wait` at full CPU forever, with no sign of what went wrong.
+struct EndOnPanic;
+
+impl Drop for EndOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("[vu1] the VU1 thread crashed (see above); ending the game");
+            std::process::abort();
+        }
+    }
+}
+
 fn worker(shared: Arc<Shared>, rx: Receiver<Vec<u32>>, gs: Option<Sender<gs::Msg>>) {
+    let _end_on_panic = EndOnPanic;
     let mut io = WorkerIo { gs, shared: shared.clone(), warned: Default::default() };
     let mut idle = 0u32;
     loop {
