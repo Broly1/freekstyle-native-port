@@ -131,16 +131,19 @@ def paint(code, text):
 def have(name):
     return shutil.which(name) is not None
 
-def quiet(cmd):
+def quiet(cmd, env=None):
     """Run a command silently; True if it succeeded."""
     try:
-        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL).returncode == 0
+        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                              env=env).returncode == 0
     except OSError:
         return False
 
-def output(cmd):
+def output(cmd, env=None, stderr=False):
+    """A command's output (with stderr: both streams), or "" if it can't run."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL).stdout
+        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL, env=env)
+        return r.stdout + r.stderr if stderr else r.stdout
     except OSError:
         return ""
 
@@ -200,7 +203,18 @@ def removable(family, pkgs):
     if family == "arch":
         return quiet(["pacman", "-Rs", "--print", "--noconfirm"] + pkgs)
     if family == "debian":
-        return quiet(["dpkg", "--remove", "--dry-run"] + pkgs)
+        # dpkg refuses to run, even a dry run, without ldconfig and
+        # start-stop-daemon in PATH, and Debian leaves the sbin folders
+        # out of an ordinary user's PATH.
+        path = os.environ.get("PATH", "") + ":/usr/local/sbin:/usr/sbin:/sbin"
+        return quiet(["dpkg", "--remove", "--dry-run"] + pkgs, env=dict(os.environ, PATH=path))
+    if family == "fedora":
+        # dnf's own dry run, not rpm -e --test: dnf also takes the
+        # dependencies that came with these packages and need them back
+        # (cmake-data needs cmake), which rpm counts as users of them. Safe
+        # when nothing outside that would go ("dependent packages").
+        out = output(["dnf", "remove", "--assumeno"] + pkgs, env=dict(os.environ, LC_ALL="C"), stderr=True)
+        return "Transaction Summary" in out and "Removing dependent packages" not in out
     return quiet(["rpm", "-e", "--test"] + pkgs)
 
 def safe_set(family, pkgs):
@@ -354,7 +368,10 @@ class Uninstaller:
         if data:
             parts.append(Part("data", t("data", ", ".join(str(p).replace(str(HOME), "~") for p in data)), False, size(data)))
         pkgs = [p for p in self.state.get("packages", []) if self.family and not is_driver(p) and pkg_installed(self.family, p)]
-        if pkgs:
+        # Offered only if some can go now: the rest are needed by other
+        # software (e.g. the Vulkan loader by the kept Vulkan driver), and
+        # nothing frees them unless something is removed first.
+        if pkgs and safe_set(self.family, pkgs):
             parts.append(Part("packages", t("packages", " ".join(pkgs)), False, note=t("packages_note")))
         if self.state.get("rustup") and (HOME / ".cargo" / "bin" / "rustup").exists():
             tools = cargo_tools()
@@ -465,6 +482,17 @@ class Uninstaller:
 
     def remove_rust(self):
         self.run([HOME / ".cargo" / "bin" / "rustup", "self", "uninstall", "-y"])
+        # Startup files rustup created, now empty again: its uninstall
+        # takes its line out but leaves the file. Kept if anything else
+        # was written to them since.
+        for name in self.state.get("rustup_created", []):
+            f = HOME / name
+            try:
+                if not self.args.dry_run and f.is_file() and not f.is_symlink() and not f.read_text().strip():
+                    print(paint("2", "  rm " + "~/" + name))
+                    f.unlink()
+            except OSError:
+                pass
 
     def remove_rpmfusion(self):
         if quiet(["rpm", "-q", "ffmpeg"]) and not quiet(["rpm", "-q", "ffmpeg-free"]):
@@ -486,6 +514,7 @@ class Uninstaller:
             self.state["packages"] = [p for p in self.state.get("packages", []) if pkg_installed(self.family, p)]
         if "rust" in keys:
             self.state["rustup"] = False
+            self.state.pop("rustup_created", None)
         if "rpmfusion" in keys and not quiet(["rpm", "-q", "rpmfusion-free-release"]):
             self.state["rpmfusion"] = False
         if "build" in keys:

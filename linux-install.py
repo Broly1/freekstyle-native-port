@@ -43,6 +43,9 @@ ESRGAN_KEEP = ("realesrgan-ncnn-vulkan", "models/realesrgan-x4plus.bin", "models
                "models/realesrgan-x4plus-anime.bin", "models/realesrgan-x4plus-anime.param")
 MOVIES = ["OPENING/BIGLOGO", "OPENING/EAGAMES", "OPENING/EAS_BIG", "OPENING/INTRO", "ABOUTEA/PROD1"]
 PREFIX = Path("/opt/freekstyle")
+# Shell startup files rustup may write its PATH line to (from home).
+RUSTUP_SHELL_FILES = (".profile", ".bashrc", ".bash_profile", ".zshenv", ".config/fish/conf.d/rustup.fish",
+                      ".config/nushell/autoload/rustup.nu")
 MENU = [Path("/usr/share/applications/freekstyle.desktop"), Path("/usr/share/applications/freekstyle-launcher.desktop")]
 # Free space wanted for the build (it ends up around 7 GB) and the copies.
 SPACE_GB = 10
@@ -102,6 +105,7 @@ MESSAGES = {
     "req_pkgconfig": ("pkg-config", "pkg-config", "pkg-config", "pkg-config"),
     "req_alsa": ("ALSA headers (sound)", "cabeçalhos ALSA (som)", "cabeceras ALSA (sonido)", "en-têtes ALSA (son)"),
     "req_udev": ("libudev headers (controllers)", "cabeçalhos libudev (controles)", "cabeceras libudev (mandos)", "en-têtes libudev (manettes)"),
+    "req_cmake": ("CMake (builds SDL3, for controllers)", "CMake (compila o SDL3, para os controles)", "CMake (compila SDL3, para los mandos)", "CMake (compile SDL3, pour les manettes)"),
     "req_vulkan": ("Vulkan loader and driver (graphics)", "Vulkan: carregador e driver (gráficos)", "Vulkan: cargador y controlador (gráficos)", "Vulkan : chargeur et pilote (graphismes)"),
     "req_ffmpeg": ("ffmpeg (movies, optional)", "ffmpeg (vídeos, opcional)", "ffmpeg (vídeos, opcional)", "ffmpeg (vidéos, facultatif)"),
     "req_curl": ("curl (to fetch Rust)", "curl (para baixar a Rust)", "curl (para descargar Rust)", "curl (pour télécharger Rust)"),
@@ -420,17 +424,17 @@ def packages(family):
     """Packages for each requirement, per distribution."""
     if family == "arch":
         return {"compiler": ["base-devel"], "pkgconfig": ["pkgconf"], "alsa": ["alsa-lib"],
-                "udev": ["systemd-libs"], "ffmpeg": ["ffmpeg"], "curl": ["curl"],
+                "udev": ["systemd-libs"], "ffmpeg": ["ffmpeg"], "curl": ["curl"], "cmake": ["cmake"],
                 "vulkan": ["vulkan-icd-loader"] + vulkan_drivers("vulkan-radeon", "vulkan-intel", "vulkan-nouveau", "nvidia-utils", "vulkan-swrast")}
     if family == "debian":
         return {"compiler": ["build-essential"], "pkgconfig": ["pkg-config"], "alsa": ["libasound2-dev"],
-                "udev": ["libudev-dev"], "ffmpeg": ["ffmpeg"], "curl": ["curl"], "vulkan": ["libvulkan1", "mesa-vulkan-drivers"]}
+                "udev": ["libudev-dev"], "ffmpeg": ["ffmpeg"], "curl": ["curl"], "cmake": ["cmake"], "vulkan": ["libvulkan1", "mesa-vulkan-drivers"]}
     if family == "fedora":
         return {"compiler": ["gcc"], "pkgconfig": ["pkgconf-pkg-config"], "alsa": ["alsa-lib-devel"],
-                "udev": ["systemd-devel"], "ffmpeg": ["ffmpeg-free"], "curl": ["curl"], "vulkan": ["vulkan-loader", "mesa-vulkan-drivers"]}
+                "udev": ["systemd-devel"], "ffmpeg": ["ffmpeg-free"], "curl": ["curl"], "cmake": ["cmake"], "vulkan": ["vulkan-loader", "mesa-vulkan-drivers"]}
     if family == "suse":
         return {"compiler": ["gcc"], "pkgconfig": ["pkgconf-pkg-config"], "alsa": ["alsa-devel"],
-                "udev": ["systemd-devel"], "ffmpeg": ["ffmpeg"], "curl": ["curl"],
+                "udev": ["systemd-devel"], "ffmpeg": ["ffmpeg"], "curl": ["curl"], "cmake": ["cmake"],
                 "vulkan": ["libvulkan1"] + vulkan_drivers("libvulkan_radeon", "libvulkan_intel", "libvulkan_lvp", "libvulkan_lvp", "libvulkan_lvp")}
     return {}
 
@@ -515,6 +519,8 @@ class Installer:
             ("pkgconfig", t("req_pkgconfig"), have("pkg-config"), True),
             ("alsa", t("req_alsa"), pkg_config("alsa"), True),
             ("udev", t("req_udev"), pkg_config("libudev"), True),
+            # SDL3 (controllers) is built from source with CMake.
+            ("cmake", t("req_cmake"), have("cmake"), True),
             ("vulkan", t("req_vulkan"), vulkan_ok(), True),
             ("ffmpeg", t("req_ffmpeg"), have("ffmpeg"), False),
         ]
@@ -581,8 +587,14 @@ class Installer:
                 rustup_init = ROOT / "target" / "rustup-init.sh"
                 rustup_init.parent.mkdir(exist_ok=True)
                 rustup_init.write_text(script)
+                # rustup adds its PATH line to the shell's startup files,
+                # creating some (an empty ~/.profile is what its uninstall
+                # leaves): note those it creates, for linux-uninstall.py.
+                home = Path.home()
+                absent = [f for f in RUSTUP_SHELL_FILES if not (home / f).exists()]
                 self.ui.run(["sh", rustup_init, "-y", "--profile", "minimal"])
                 self.record("rustup", True)
+                self.record("rustup_created", [f for f in absent if (home / f).exists()])
                 os.environ["PATH"] = "%s%s%s" % (Path.home() / ".cargo" / "bin", os.pathsep, os.environ["PATH"])
             else:
                 raise Failure(t("rust_needed", min_rust()))

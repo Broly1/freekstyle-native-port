@@ -8,3 +8,9 @@ rustflags = ["-C", "target-cpu=x86-64-v2"]
 
 [target.x86_64-pc-windows-gnu]
 rustflags = ["-C", "target-cpu=x86-64-v2"]
+
+# SDL3 (controllers) is built from source by the cmake crate, which reads
+# this per-target variable; see crates/freek-input/sdl-console.cmake.
+[env]
+CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu = { value = "crates/freek-input/sdl-console.cmake", relative = true }
+CMAKE_TOOLCHAIN_FILE_aarch64_unknown_linux_gnu = { value = "crates/freek-input/sdl-console.cmake", relative = true }
