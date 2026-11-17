@@ -8,6 +8,9 @@
 //! `pack` prints `todo N` first (0: nothing to do, and it ends at once,
 //! without starting the upscaler), then `progress DONE N` as it goes.
 //!
+//! `--stop-on-eof` ends the build, upscaler and all, when stdin closes: the
+//! launcher's Skip.
+//!
 //! `--esrgan <realesrgan-ncnn-vulkan>` picks the upscaler; by default it is
 //! the one the installers put in `realesrgan/` beside this program. The
 //! launcher runs `pack` when Play is pressed, before it starts the game, on
@@ -81,7 +84,7 @@ impl Drop for BuildLock {
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage: freekstyle-hd [--esrgan PATH] check | pictures <images dir> | pack [--dump DIR] [--out DIR] [--skip DIR]...");
+    eprintln!("usage: freekstyle-hd [--esrgan PATH] [--stop-on-eof] check | pictures <images dir> | pack [--dump DIR] [--out DIR] [--skip DIR]...");
     ExitCode::from(2)
 }
 
@@ -101,6 +104,16 @@ fn main() -> ExitCode {
     let dump = take("--dump").pop().map(PathBuf::from).unwrap_or_else(freek_config::texture_dump);
     let out = take("--out").pop().map(PathBuf::from).unwrap_or_else(freek_config::user_texture_pack);
     let skip: Vec<PathBuf> = take("--skip").into_iter().map(PathBuf::from).collect();
+    if let Some(i) = args.iter().position(|a| a == "--stop-on-eof") {
+        args.remove(i);
+        // Killing this program alone would leave the upscaler running (and
+        // this program's scratch folder behind): closing stdin stops it
+        // instead. Nothing is ever sent; any end of the input counts.
+        std::thread::spawn(|| {
+            let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+            esrgan::stop();
+        });
+    }
     let Some(cmd) = args.first().cloned() else { return usage() };
 
     // Counting first, so that with nothing new the launcher waits for

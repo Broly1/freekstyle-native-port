@@ -67,8 +67,12 @@ $WingetPackages = @{
 # ffmpeg isn't installed with winget: a per-user winget package can't be
 # removed by an uninstaller running as administrator, which is how
 # Installed apps runs it. A build goes next to the game instead, where the
-# game finds it, and leaves with the build output.
-$FfmpegUrl = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip'
+# game finds it, and leaves with the build output. A dated build, not
+# 'latest': BtbN keeps its month-end builds, so the URL lasts, and the
+# checksum proves the download is the build tested here (it has libplacebo
+# and Vulkan for the CRT movies).
+$FfmpegUrl = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-N-128227-g4811625b5f-win64-gpl.zip'
+$FfmpegSha256 = '3a5cdb3b83dd1b62b29d946d3655a14d787e5e81d947ad68202a1a400095d2f8'
 $Release = Join-Path $Root 'target\release'
 # Real-ESRGAN, the AI upscaler freekstyle-hd uses for the HD pictures and
 # the texture pack built while playing. Only the program and the two models
@@ -549,6 +553,7 @@ function Get-Ffmpeg {
         Write-Host "  > $FfmpegUrl" -ForegroundColor DarkGray
         Write-Log "> download $FfmpegUrl"
         Invoke-WebRequest $FfmpegUrl -OutFile $zip -UseBasicParsing
+        if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() -ne $FfmpegSha256) { throw 'checksum mismatch' }
         Expand-Archive $zip $unpacked -Force
         foreach ($exe in 'ffmpeg.exe', 'ffprobe.exe') {
             $found = Get-ChildItem $unpacked -Recurse -Filter $exe | Select-Object -First 1

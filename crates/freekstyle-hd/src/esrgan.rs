@@ -1,8 +1,12 @@
 //! Real-ESRGAN (realesrgan-ncnn-vulkan), the AI upscaler: where it is,
 //! whether it has a real GPU to run on, and running it on a folder.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::Duration;
 
 /// Line art: menus, fonts, the HUD and the pictures.
 pub const ANIME: &str = "realesrgan-x4plus-anime";
@@ -64,20 +68,72 @@ fn models(exe: &Path) -> PathBuf {
     exe.parent().unwrap_or(Path::new(".")).join("models")
 }
 
+/// Set by `stop`: no upscaler starts after it.
+static STOPPED: AtomicBool = AtomicBool::new(false);
+/// The upscaler running now, for `stop` to end.
+static RUNNING: Mutex<Option<Child>> = Mutex::new(None);
+
+/// End the build: the upscaler running now is killed and `run` fails from
+/// then on, so the build unwinds and cleans up after itself. Called from
+/// another thread.
+pub fn stop() {
+    STOPPED.store(true, Ordering::SeqCst);
+    if let Some(child) = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        let _ = child.kill();
+    }
+}
+
 /// Upscale every PNG in `src` 4x into `dst` (same names) with `model`.
 pub fn run(exe: &Path, model: &str, src: &Path, dst: &Path) -> Result<(), String> {
-    let out = command(exe)
+    const STOP_MSG: &str = "stopped";
+    if STOPPED.load(Ordering::SeqCst) {
+        return Err(STOP_MSG.into());
+    }
+    let mut child = command(exe)
         .args(["-i".as_ref(), src.as_os_str(), "-o".as_ref(), dst.as_os_str(), "-n".as_ref(), model.as_ref(), "-s".as_ref(), "4".as_ref(), "-f".as_ref(), "png".as_ref()])
         .arg("-m")
         .arg(models(exe))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .output()
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("{}: {e}", exe.display()))?;
-    if out.status.success() {
+    // Read beside it, or a full pipe would stall it.
+    let stderr = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut log = Vec::new();
+        if let Some(mut e) = stderr {
+            let _ = e.read_to_end(&mut log);
+        }
+        log
+    });
+    let running = || RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    *running() = Some(child);
+    // A stop between the check above and here found nothing to kill.
+    if STOPPED.load(Ordering::SeqCst) {
+        stop();
+    }
+    // Polled, not waited on, so `stop` can take the lock and kill it.
+    let status = loop {
+        let state = running().as_mut().map(|c| c.try_wait());
+        match state {
+            Some(Ok(Some(status))) => break Ok(status),
+            Some(Ok(None)) => std::thread::sleep(Duration::from_millis(50)),
+            Some(Err(e)) => break Err(format!("{}: {e}", exe.display())),
+            None => unreachable!("only run takes the child out"),
+        }
+    };
+    if let Some(mut c) = running().take() {
+        let _ = c.wait();
+    }
+    let log = reader.join().unwrap_or_default();
+    let status = status?;
+    if STOPPED.load(Ordering::SeqCst) {
+        Err(STOP_MSG.into())
+    } else if status.success() {
         Ok(())
     } else {
-        let log = String::from_utf8_lossy(&out.stderr);
+        let log = String::from_utf8_lossy(&log);
         Err(format!("{model} failed: {}", log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim()))
     }
 }

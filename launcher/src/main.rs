@@ -17,7 +17,7 @@ mod i18n;
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -253,6 +253,8 @@ struct Launcher {
 /// total) read from its output.
 struct HdJob {
     child: Child,
+    /// Closed to stop it (`--stop-on-eof`).
+    stdin: Option<ChildStdin>,
     progress: Arc<Mutex<(usize, usize)>>,
 }
 
@@ -273,7 +275,7 @@ impl HdJob {
         let log = freek_config::data_dir().join("hd.log");
         let _ = std::fs::create_dir_all(freek_config::data_dir());
         let mut cmd = Command::new(&tool);
-        cmd.arg("pack").arg("--skip").arg(game_pack).stdin(Stdio::null()).stdout(Stdio::piped());
+        cmd.arg("pack").arg("--stop-on-eof").arg("--skip").arg(game_pack).stdin(Stdio::piped()).stdout(Stdio::piped());
         cmd.stderr(std::fs::File::create(&log).map(Stdio::from).unwrap_or_else(|_| Stdio::null()));
         #[cfg(windows)]
         {
@@ -282,6 +284,7 @@ impl HdJob {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         let mut child = cmd.spawn().ok()?;
+        let stdin = child.stdin.take();
         let progress = Arc::new(Mutex::new((0, 0)));
         let stdout = child.stdout.take()?;
         let shared = progress.clone();
@@ -300,15 +303,25 @@ impl HdJob {
                 }
             }
         });
-        Some(HdJob { child, progress })
+        Some(HdJob { child, stdin, progress })
     }
 
     /// End it now; what it finished is kept, the rest is made next time.
     fn stop(mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        // Its lock against a second build, which it had no chance to remove.
-        let _ = std::fs::remove_file(freek_config::data_dir().join("hd-building.lock"));
+        // Closing its input asks it to end: it kills the upscaler (killing
+        // freekstyle-hd alone would leave that running, on the GPU, beside
+        // the game) and removes its scratch folder and lock.
+        drop(self.stdin.take());
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while matches!(self.child.try_wait(), Ok(None)) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            // Its lock against a second build, which it had no chance to remove.
+            let _ = std::fs::remove_file(freek_config::data_dir().join("hd-building.lock"));
+        }
     }
 }
 

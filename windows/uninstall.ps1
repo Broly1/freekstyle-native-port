@@ -284,7 +284,13 @@ function Remove-System {
         Remove-SystemInstall
         return
     }
-    $argv = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-ElevatedRemove')
+    # The administrator half runs the installed copy, which only
+    # administrators can change, never the temporary copy this may be
+    # running from: another program could swap that one before UAC is
+    # answered and have it run as administrator.
+    $script = Join-Path $Prefix 'uninstall.ps1'
+    if (-not (Test-Path -LiteralPath $script)) { $script = $PSCommandPath }
+    $argv = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$script`"", '-ElevatedRemove')
     try {
         $p = Start-Process powershell.exe -Verb RunAs -ArgumentList $argv -Wait -PassThru -WindowStyle Hidden
         $ok = $p.ExitCode -eq 0
@@ -429,14 +435,29 @@ function Main {
 # top level, not inside Main, so the copy's output reaches the window
 # instead of being taken as Main's result.
 if (-not $ElevatedRemove -and -not $StartedFrom -and (Test-Inside $PSCommandPath $Prefix)) {
-    $tmp = Join-Path $env:TEMP 'freekstyle-uninstall.ps1'
-    Copy-Item $PSCommandPath $tmp -Force
+    # A new folder with a random name, so nothing can be waiting there. Run
+    # as administrator (as Installed apps does), only administrators may
+    # write in it, so no other program can change the copy before it runs.
+    $dir = Join-Path $env:TEMP ('freekstyle-uninstall-' + [IO.Path]::GetRandomFileName())
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    if (Test-Admin) {
+        & icacls.exe $dir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "could not protect $dir" }
+    }
+    $tmp = Join-Path $dir 'uninstall.ps1'
+    Copy-Item -LiteralPath $PSCommandPath $tmp
+    # Out of the folder too: a process's working directory keeps it in
+    # use, and this one waits on the copy. The copy starts in the same.
+    Set-Location -LiteralPath $env:TEMP
+    [IO.Directory]::SetCurrentDirectory($env:TEMP)
     $argv = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $tmp, '-StartedFrom', $PSScriptRoot)
     if ($Yes) { $argv += '-Yes' }
     if ($All) { $argv += '-All' }
     if ($DryRun) { $argv += '-DryRun' }
     & powershell.exe @argv
-    exit $LASTEXITCODE
+    $code = $LASTEXITCODE
+    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    exit $code
 }
 
 $code = Main
