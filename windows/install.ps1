@@ -54,6 +54,10 @@ $Prefix = Join-Path $env:ProgramFiles 'Freekstyle'
 $UninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Freekstyle'
 # Free space wanted for the build (it ends up around 7 GB) and the copies.
 $SpaceGB = 10
+# Below this the build can't work at all (it fails in odd places, such as
+# CMake calling the C compiler "broken"), so the script stops instead of
+# asking.
+$MinSpaceGB = 3
 # What this script added, for uninstall.ps1: kept outside the source folder
 # so it survives that folder being deleted.
 $StateFile = Join-Path $env:LOCALAPPDATA 'freekstyle\install.json'
@@ -123,8 +127,12 @@ $Messages = @{
                    'varias imágenes de disco en game\ ({0}); renombra la tuya a Freekstyle.bin.',
                    'plusieurs images disque dans game\ ({0}) ; renommez la vôtre en Freekstyle.bin.')
     found_dump = @('found game\Freekstyle.bin', 'encontrado game\Freekstyle.bin', 'encontrado game\Freekstyle.bin', 'trouvé game\Freekstyle.bin')
-    space = @('only {0} GB free here; the build needs about {1} GB.', 'só {0} GB livres aqui; a compilação precisa de uns {1} GB.',
-              'solo {0} GB libres aquí; la compilación necesita unos {1} GB.', 'seulement {0} Go libres ici ; la compilation demande environ {1} Go.')
+    space = @('only {0:N1} GB free here; the build needs about {1} GB.', 'só {0:N1} GB livres aqui; a compilação precisa de uns {1} GB.',
+              'solo {0:N1} GB libres aquí; la compilación necesita unos {1} GB.', 'seulement {0:N1} Go libres ici ; la compilation demande environ {1} Go.')
+    no_space = @('only {0:N1} GB free on this drive, and the build needs about {1} GB: it cannot work. Free at least {2:N1} GB (empty the Recycle Bin, or run Disk Cleanup with "Clean up system files") and run this again.',
+                 'só {0:N1} GB livres neste disco, e a compilação precisa de uns {1} GB: assim não dá. Libere pelo menos {2:N1} GB (esvazie a Lixeira ou rode a Limpeza de Disco com "Limpar arquivos do sistema") e rode de novo.',
+                 'solo {0:N1} GB libres en esta unidad, y la compilación necesita unos {1} GB: así no puede funcionar. Libera al menos {2:N1} GB (vacía la Papelera o ejecuta el Liberador de espacio con "Limpiar archivos del sistema") y vuelve a ejecutarlo.',
+                 'seulement {0:N1} Go libres sur ce disque, et la compilation demande environ {1} Go : impossible ainsi. Libérez au moins {2:N1} Go (videz la Corbeille, ou lancez le Nettoyage de disque avec « Nettoyer les fichiers système ») et relancez.')
     continue = @('Continue anyway?', 'Continuar mesmo assim?', '¿Continuar de todos modos?', 'Continuer quand même ?')
     check_tools = @('Tools', 'Ferramentas', 'Herramientas', 'Outils')
     req_compiler = @('Visual Studio C++ Build Tools (compiler, linker, Windows SDK)', 'Visual Studio C++ Build Tools (compilador, linker, SDK do Windows)',
@@ -488,7 +496,8 @@ function Step-Dump {
         Record 'files' @('game\Freekstyle.bin')
         Good (T 'using_dump' ('game\' + $dumps[0].Name))
     }
-    $free = [math]::Floor((Get-PSDrive (Split-Path -Qualifier $Root).TrimEnd(':')).Free / 1e9)
+    $free = [math]::Floor((Get-PSDrive (Split-Path -Qualifier $Root).TrimEnd(':')).Free / 1e8) / 10
+    if ($free -lt $MinSpaceGB) { throw [Failure]::new((T 'no_space' $free $SpaceGB ($SpaceGB - $free)), $false) }
     if ($free -lt $SpaceGB) {
         Warn (T 'space' $free $SpaceGB)
         if (-not (Ask (T 'continue') $false)) { exit 1 }

@@ -46,6 +46,9 @@ PREFIX = Path("/opt/freekstyle")
 MENU = [Path("/usr/share/applications/freekstyle.desktop"), Path("/usr/share/applications/freekstyle-launcher.desktop")]
 # Free space wanted for the build (it ends up around 7 GB) and the copies.
 SPACE_GB = 10
+# Below this the build can't work at all (it fails in odd places), so the
+# script stops instead of asking.
+MIN_SPACE_GB = 3
 # What this script added (packages, Rust, RPM Fusion, files, the system
 # install), for linux-uninstall.py: kept outside the source folder so it
 # survives that folder being deleted.
@@ -89,6 +92,10 @@ MESSAGES = {
     "found_dump": ("found game/Freekstyle.bin", "encontrado game/Freekstyle.bin", "encontrado game/Freekstyle.bin", "trouvé game/Freekstyle.bin"),
     "space": ("only %s GB free here; the build needs about %s GB.", "só %s GB livres aqui; a compilação precisa de uns %s GB.",
               "solo %s GB libres aquí; la compilación necesita unos %s GB.", "seulement %s Go libres ici ; la compilation demande environ %s Go."),
+    "no_space": ("only %s GB free on this drive, and the build needs about %s GB: it cannot work. Free at least %s GB and run this again.",
+                 "só %s GB livres neste disco, e a compilação precisa de uns %s GB: assim não dá. Libere pelo menos %s GB e rode de novo.",
+                 "solo %s GB libres en esta unidad, y la compilación necesita unos %s GB: así no puede funcionar. Libera al menos %s GB y vuelve a ejecutarlo.",
+                 "seulement %s Go libres sur ce disque, et la compilation demande environ %s Go : impossible ainsi. Libérez au moins %s Go et relancez."),
     "continue": ("Continue anyway?", "Continuar mesmo assim?", "¿Continuar de todos modos?", "Continuer quand même ?"),
     "check_tools": ("Tools and libraries", "Ferramentas e bibliotecas", "Herramientas y bibliotecas", "Outils et bibliothèques"),
     "req_compiler": ("C compiler and linker", "compilador C e linker", "compilador C y enlazador", "compilateur C et éditeur de liens"),
@@ -196,6 +203,11 @@ MESSAGES = {
 def t(key, *args):
     text = MESSAGES[key][LANG]
     return text % args if args else text
+
+def gb(n):
+    """GB with one decimal, with the language's decimal comma."""
+    s = "%.1f" % n
+    return s if LANG == 0 else s.replace(".", ",")
 
 # ---- Output ----
 
@@ -488,9 +500,11 @@ class Installer:
             disc.symlink_to(dumps[0].name)
             self.record("files", ["game/Freekstyle.bin"])
             self.ui.good(t("using_dump", "game/" + dumps[0].name))
-        free = shutil.disk_usage(ROOT).free // 10**9
+        free = shutil.disk_usage(ROOT).free // 10**8 / 10
+        if free < MIN_SPACE_GB:
+            raise Failure(t("no_space", gb(free), SPACE_GB, gb(SPACE_GB - free)))
         if free < SPACE_GB:
-            self.ui.warn(t("space", free, SPACE_GB))
+            self.ui.warn(t("space", gb(free), SPACE_GB))
             if not self.ui.ask(t("continue"), default=False):
                 sys.exit(1)
 
