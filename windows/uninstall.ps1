@@ -201,6 +201,10 @@ function Get-BuildPaths($State) {
     $paths = @((Join-Path $source 'target'), (Join-Path $source 'freekstyle\src\gen'), (Join-Path $source 'install.log'))
     $paths += @($State.files | Where-Object { $_ } | ForEach-Object { Join-Path $source $_ })
     $out = @($paths | Where-Object { (Test-Path -LiteralPath $_) -and (Test-Inside $_ $source) } | Select-Object -Unique)
+    # Cargo's intermediate files, kept outside the source folder by
+    # install.ps1 (CARGO_BUILD_BUILD_DIR).
+    $buildDir = Join-Path $env:LOCALAPPDATA 'freekstyle\build'
+    if (Test-Path -LiteralPath $buildDir) { $out += $buildDir }
     return $source, $out
 }
 

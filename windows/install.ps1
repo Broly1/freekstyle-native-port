@@ -61,6 +61,14 @@ $MinSpaceGB = 3
 # What this script added, for uninstall.ps1: kept outside the source folder
 # so it survives that folder being deleted.
 $StateFile = Join-Path $env:LOCALAPPDATA 'freekstyle\install.json'
+# Cargo's intermediate files (build scripts, CMake's SDL build, object
+# files) go in a short folder of their own; the programs still land in
+# target\release. Under the source folder, a deep one such as a zip
+# unpacked in Downloads (...\freekstyle-native-port-master\
+# freekstyle-native-port-master) pushes CMake's test build past MSBuild's
+# 260-character path limit, and CMake then calls the C compiler "broken".
+$BuildDir = Join-Path $env:LOCALAPPDATA 'freekstyle\build'
+$env:CARGO_BUILD_BUILD_DIR = $BuildDir
 
 # Tools winget can install: requirement key -> winget id and extra arguments.
 $WingetPackages = @{
@@ -496,7 +504,11 @@ function Step-Dump {
         Record 'files' @('game\Freekstyle.bin')
         Good (T 'using_dump' ('game\' + $dumps[0].Name))
     }
-    $free = [math]::Floor((Get-PSDrive (Split-Path -Qualifier $Root).TrimEnd(':')).Free / 1e8) / 10
+    # The drive with less room, of this folder's and the build folder's
+    # (most of the build goes in $BuildDir, on the Windows drive).
+    $free = ($Root, $BuildDir | ForEach-Object {
+        [math]::Floor((Get-PSDrive (Split-Path -Qualifier $_).TrimEnd(':')).Free / 1e8) / 10
+    } | Measure-Object -Minimum).Minimum
     if ($free -lt $MinSpaceGB) { throw [Failure]::new((T 'no_space' $free $SpaceGB ($SpaceGB - $free)), $false) }
     if ($free -lt $SpaceGB) {
         Warn (T 'space' $free $SpaceGB)
