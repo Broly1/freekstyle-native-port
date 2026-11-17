@@ -86,7 +86,12 @@ impl Disc {
     pub fn walk(&mut self) -> Vec<(String, Entry)> {
         let mut out = Vec::new();
         let mut dirs = vec![(String::new(), self.root)];
+        // A damaged disc can have a directory that contains itself.
+        let mut seen = std::collections::HashSet::new();
         while let Some((path, dir)) = dirs.pop() {
+            if !seen.insert(dir.0) {
+                continue;
+            }
             for (name, e) in self.list(dir) {
                 if name == "." || name == ".." {
                     continue;
@@ -105,7 +110,12 @@ impl Disc {
 
     /// A whole file's contents.
     pub fn read_file(&mut self, e: &Entry) -> Result<Vec<u8>, String> {
-        let mut data = vec![0u8; e.size.div_ceil(SECTOR as u32) as usize * SECTOR];
+        // Checked before allocating: a damaged entry can claim up to 4 GB.
+        let count = e.size.div_ceil(SECTOR as u32);
+        if e.lsn as u64 + count as u64 > self.sectors as u64 {
+            return Err(format!("file at sector {} ({} bytes) runs past the end of the disc", e.lsn, e.size));
+        }
+        let mut data = vec![0u8; count as usize * SECTOR];
         for (n, chunk) in data.chunks_mut(SECTOR).enumerate() {
             self.read_into(e.lsn + n as u32, chunk)?;
         }
@@ -117,7 +127,8 @@ impl Disc {
     fn list(&mut self, (lsn, size): (u32, u32)) -> Vec<(String, Entry)> {
         let mut out = Vec::new();
         for s in 0..size.div_ceil(SECTOR as u32) {
-            let Ok(sector) = self.read_sector(lsn + s) else { break };
+            let Some(at) = lsn.checked_add(s) else { break };
+            let Ok(sector) = self.read_sector(at) else { break };
             let mut off = 0;
             // Records never cross sectors; a zero length pads to the next one.
             while off < SECTOR && sector[off] != 0 {
@@ -138,6 +149,9 @@ fn parse_record(r: &[u8]) -> Option<(String, Entry)> {
     }
     let u32le = |o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap());
     let name_len = r[32] as usize;
+    if 33 + name_len > len {
+        return None;
+    }
     let name = &r[33..33 + name_len];
     let name = match name {
         [0] => ".".to_string(),
@@ -147,4 +161,20 @@ fn parse_record(r: &[u8]) -> Option<(String, Entry)> {
     let mut date = [0u8; 7];
     date.copy_from_slice(&r[18..25]);
     Some((name, Entry { lsn: u32le(2), size: u32le(10), dir: r[25] & 2 != 0, date }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_longer_than_its_record_is_skipped() {
+        let mut r = [0u8; 40];
+        r[0] = 34; // record length
+        r[32] = 200; // name length, far past the record
+        assert!(parse_record(&r).is_none());
+        r[32] = 1;
+        r[33] = b'A';
+        assert_eq!(parse_record(&r).unwrap().0, "A");
+    }
 }

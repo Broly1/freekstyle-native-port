@@ -422,6 +422,11 @@ pub fn lsc_decode(c: &mut Cpu) {
         c.r32(V0)
     };
     let bytes: Vec<u8> = (0..size).map(|i| c.mem.r8(data + i)).collect();
+    // Too short for its header: nothing to decode.
+    if bytes.len() < 12 {
+        c.ws(V0, 0);
+        return;
+    }
     let (w, h) = (u16::from_le_bytes([bytes[8], bytes[9]]) as u32, u16::from_le_bytes([bytes[10], bytes[11]]) as u32);
     let px = picture_pixels(c, &bytes, w, h);
 

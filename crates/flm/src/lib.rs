@@ -46,7 +46,8 @@ pub fn demux(data: &[u8]) -> Result<Movie, String> {
                 off += AUDIO_BLOCK;
             }
             b"2GPM" => {
-                let n = u32_at(off + 0x14);
+                let n = data.get(off + 0x14..off + 0x18).ok_or("truncated video chunk")?;
+                let n = u32::from_le_bytes(n.try_into().unwrap()) as usize;
                 let payload = data.get(off + VIDEO_HEADER..off + VIDEO_HEADER + n).ok_or("truncated video chunk")?;
                 video.extend_from_slice(payload);
                 off += size;
@@ -186,6 +187,21 @@ mod tests {
         let mut f = [0u8; 16];
         f[0] = 0x1c;
         assert_eq!(v.decode(&f)[0], 600);
+    }
+
+    #[test]
+    fn damaged_movies_are_errors_not_panics() {
+        // A video chunk whose header is cut before its length word.
+        let mut data = b"2GPM".to_vec();
+        data.extend_from_slice(&0x100u32.to_le_bytes());
+        data.extend_from_slice(&[0; 8]);
+        assert!(demux(&data).is_err());
+        // One whose length runs past the end.
+        let mut data = b"2GPM".to_vec();
+        data.extend_from_slice(&0x100u32.to_le_bytes());
+        data.resize(0x40, 0);
+        data[0x14..0x18].copy_from_slice(&0x1000u32.to_le_bytes());
+        assert!(demux(&data).is_err());
     }
 
     #[test]

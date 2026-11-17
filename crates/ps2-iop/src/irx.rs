@@ -47,6 +47,14 @@ fn u32_at(d: &[u8], o: usize) -> u32 {
     u32::from_le_bytes(d[o..o + 4].try_into().unwrap())
 }
 
+/// `u32_at` for the file, where a damaged module could point anywhere.
+fn get32(d: &[u8], o: usize) -> Result<u32, String> {
+    d.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).ok_or_else(|| format!("IRX cut short at {o:#x}"))
+}
+
+/// IOP RAM: no module is bigger.
+const IOP_RAM: usize = 2 << 20;
+
 fn put32(d: &mut [u8], o: usize, v: u32) {
     d[o..o + 4].copy_from_slice(&v.to_le_bytes());
 }
@@ -62,33 +70,36 @@ pub fn load(file: &[u8], base: u32) -> Result<Module, String> {
     let mut iopmod = None;
     for i in 0..phnum {
         let ph = phoff + i * 32;
-        let (ty, off, filesz, memsz) = (u32_at(file, ph), u32_at(file, ph + 4) as usize, u32_at(file, ph + 16) as usize, u32_at(file, ph + 20) as usize);
+        let (ty, off, filesz, memsz) = (get32(file, ph)?, get32(file, ph + 4)? as usize, get32(file, ph + 16)? as usize, get32(file, ph + 20)? as usize);
         match ty {
             PT_LOAD => {
+                if memsz > IOP_RAM || filesz > memsz {
+                    return Err(format!("bad segment: {filesz:#x} bytes in {memsz:#x}"));
+                }
                 image = vec![0u8; memsz];
-                image[..filesz].copy_from_slice(&file[off..off + filesz]);
+                image[..filesz].copy_from_slice(file.get(off..off + filesz).ok_or("segment past end of file")?);
             }
             PT_IOPMOD => iopmod = Some(off),
             _ => {}
         }
     }
     let m = iopmod.ok_or("no .iopmod header")?;
-    let entry = u32_at(file, m + 4);
-    let gp = u32_at(file, m + 8);
-    let name: String = file[m + 26..].iter().take_while(|&&b| b != 0).map(|&b| b as char).collect();
+    let entry = get32(file, m + 4)?;
+    let gp = get32(file, m + 8)?;
+    let name: String = file.get(m + 26..).ok_or("IRX cut short in .iopmod")?.iter().take_while(|&&b| b != 0).map(|&b| b as char).collect();
 
     // Relocations. HI16 entries are held until their LO16 partner, which
     // carries the low half of the addend.
     for i in 0..shnum {
         let sh = shoff + i * 40;
-        if u32_at(file, sh + 4) != SHT_REL {
+        if get32(file, sh + 4)? != SHT_REL {
             continue;
         }
-        let (off, size) = (u32_at(file, sh + 16) as usize, u32_at(file, sh + 20) as usize);
+        let (off, size) = (get32(file, sh + 16)? as usize, get32(file, sh + 20)? as usize);
         let mut pending_hi: Vec<usize> = Vec::new();
         for e in (off..off + size).step_by(8) {
-            let at = u32_at(file, e) as usize;
-            let ty = u32_at(file, e + 4) & 0xff;
+            let at = get32(file, e)? as usize;
+            let ty = get32(file, e + 4)? & 0xff;
             if at + 4 > image.len() {
                 return Err(format!("relocation at {at:#x} outside the image"));
             }
@@ -163,3 +174,41 @@ pub fn jump(target: u32) -> u32 {
 }
 
 pub const NOP: u32 = 0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An IRX header with one program header at `phoff`.
+    fn header(phoff: u32) -> Vec<u8> {
+        let mut f = vec![0u8; 52];
+        f[..4].copy_from_slice(b"\x7fELF");
+        f[16..18].copy_from_slice(&ET_IRX.to_le_bytes());
+        f[28..32].copy_from_slice(&phoff.to_le_bytes());
+        f[44..46].copy_from_slice(&1u16.to_le_bytes());
+        f
+    }
+
+    #[test]
+    fn damaged_modules_are_errors_not_panics() {
+        // Program header past the end of the file.
+        assert!(load(&header(0x1000), 0).is_err());
+        // A segment bigger than IOP RAM, and one with more file than memory.
+        for (filesz, memsz) in [(0u32, 0x1000_0000u32), (0x20, 0x10)] {
+            let mut f = header(52);
+            f.resize(52 + 32, 0);
+            f[52..56].copy_from_slice(&PT_LOAD.to_le_bytes());
+            f[52 + 16..52 + 20].copy_from_slice(&filesz.to_le_bytes());
+            f[52 + 20..52 + 24].copy_from_slice(&memsz.to_le_bytes());
+            assert!(load(&f, 0).is_err());
+        }
+        // Every truncation of a header that loads as far as its .iopmod.
+        let mut f = header(52);
+        f.resize(52 + 32 + 40, 0);
+        f[52..56].copy_from_slice(&PT_IOPMOD.to_le_bytes());
+        f[56..60].copy_from_slice(&84u32.to_le_bytes());
+        for len in 52..f.len() {
+            let _ = load(&f[..len], 0);
+        }
+    }
+}

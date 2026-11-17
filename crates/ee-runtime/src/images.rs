@@ -36,9 +36,11 @@ pub fn load_png(path: &Path) -> Result<(u32, u32, Vec<u32>), String> {
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
     let (w, h) = (info.width, info.height);
+    // The png crate caps an image at 64 MB, so this size fits.
+    let buf = &buf[..info.buffer_size()];
     let px: Vec<u32> = match info.color_type {
-        png::ColorType::Rgba => buf[..(w * h * 4) as usize].chunks_exact(4).map(|p| rgba(p[0], p[1], p[2], p[3])).collect(),
-        png::ColorType::GrayscaleAlpha => buf[..(w * h * 2) as usize].chunks_exact(2).map(|p| rgba(p[0], p[0], p[0], p[1])).collect(),
+        png::ColorType::Rgba => buf.chunks_exact(4).map(|p| rgba(p[0], p[1], p[2], p[3])).collect(),
+        png::ColorType::GrayscaleAlpha => buf.chunks_exact(2).map(|p| rgba(p[0], p[0], p[0], p[1])).collect(),
         c => return Err(format!("unsupported PNG colour type {c:?}")),
     };
     Ok((w, h, px))

@@ -114,9 +114,11 @@ fn decode_png(data: impl std::io::BufRead + std::io::Seek) -> Result<(u32, u32, 
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
     let (w, h) = (info.width, info.height);
+    // The png crate caps an image at 64 MB, so this size fits.
+    buf.truncate(info.buffer_size());
     let rgba = match info.color_type {
-        png::ColorType::Rgba => buf[..(w * h * 4) as usize].to_vec(),
-        png::ColorType::GrayscaleAlpha => buf[..(w * h * 2) as usize].chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::Rgba => buf,
+        png::ColorType::GrayscaleAlpha => buf.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
         c => return Err(format!("unsupported PNG colour type {c:?}")),
     };
     Ok((w, h, rgba))
