@@ -164,6 +164,7 @@ fn options() -> Options {
 const STACK_SIZE: usize = 512 << 20;
 
 fn main() {
+    freek_config::crash::install("Freekstyle");
     let opts = options();
     ee_runtime::hle::WIDESCREEN.store(opts.widescreen, std::sync::atomic::Ordering::Relaxed);
     let path = opts.elf.clone();

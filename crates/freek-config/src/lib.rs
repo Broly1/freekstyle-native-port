@@ -4,6 +4,8 @@
 //! "DPadUp", "LeftTrigger2") or raw joystick input ("JoyButton0",
 //! "JoyHat0Up", "JoyAxis0+"), so neither side needs the other's input library.
 
+pub mod crash;
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 

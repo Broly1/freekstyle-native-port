@@ -67,6 +67,7 @@ const MUTED: Color32 = Color32::from_rgb(0xb0, 0x9a, 0x9b);
 const RESERVED_KEYS: [&str; 3] = ["Escape", "F11", "F12"];
 
 fn main() -> eframe::Result {
+    freek_config::crash::install("Freekstyle launcher");
     let root = find_root();
     if let Err(e) = std::env::set_current_dir(&root) {
         eprintln!("{}: {e}", root.display());
