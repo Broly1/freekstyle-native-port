@@ -164,9 +164,9 @@ function Format-Size([long]$N) {
 
 function Read-State {
     $state = @{}
-    if (Test-Path $StateFile) {
+    if (Test-Path -LiteralPath $StateFile) {
         try {
-            (Get-Content $StateFile -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $state[$_.Name] = $_.Value }
+            (Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $state[$_.Name] = $_.Value }
         } catch { }
     }
     return $state
@@ -174,8 +174,8 @@ function Read-State {
 
 # A Freekstyle source folder (where windows-install builds).
 function Test-Source([string]$Folder) {
-    return $Folder -and (Test-Path (Join-Path $Folder 'Cargo.toml')) -and (Test-Path (Join-Path $Folder 'freekstyle')) -and
-           (Test-Path (Join-Path $Folder 'windows\install.ps1'))
+    return $Folder -and (Test-Path -LiteralPath (Join-Path $Folder 'Cargo.toml')) -and (Test-Path -LiteralPath (Join-Path $Folder 'freekstyle')) -and
+           (Test-Path -LiteralPath (Join-Path $Folder 'windows\install.ps1'))
 }
 
 function Test-Inside([string]$Path, [string]$Folder) {
@@ -186,8 +186,8 @@ function Test-Inside([string]$Path, [string]$Folder) {
 
 function Get-SystemPaths {
     $paths = @()
-    if (Test-Path (Join-Path $Prefix 'freekstyle-launcher.exe')) { $paths += $Prefix }
-    if (Test-Path $Shortcut) { $paths += $Shortcut }
+    if (Test-Path -LiteralPath (Join-Path $Prefix 'freekstyle-launcher.exe')) { $paths += $Prefix }
+    if (Test-Path -LiteralPath $Shortcut) { $paths += $Shortcut }
     return $paths
 }
 
@@ -233,8 +233,8 @@ function Get-CargoTools {
     $own = 'cargo', 'cargo-clippy', 'cargo-fmt', 'cargo-miri', 'clippy-driver', 'rls', 'rust-analyzer',
            'rust-gdb', 'rust-gdbgui', 'rust-lldb', 'rustc', 'rustdoc', 'rustfmt', 'rustup'
     $bin = Join-Path $Cargo 'bin'
-    if (-not (Test-Path $bin)) { return @() }
-    return @(Get-ChildItem $bin -File | ForEach-Object BaseName | Where-Object { $own -notcontains $_ } | Sort-Object)
+    if (-not (Test-Path -LiteralPath $bin)) { return @() }
+    return @(Get-ChildItem -LiteralPath $bin -File | ForEach-Object BaseName | Where-Object { $own -notcontains $_ } | Sort-Object)
 }
 
 function Show-Run([object[]]$Cmd) {
@@ -276,7 +276,7 @@ function Remove-Paths([object[]]$Paths) {
 # Installed apps entry.
 function Remove-SystemInstall {
     Remove-Paths (Get-SystemPaths)
-    if (-not $DryRun -and (Test-Path $UninstallKey)) { Remove-Item $UninstallKey -Recurse -Force }
+    if (-not $DryRun -and (Test-Path -LiteralPath $UninstallKey)) { Remove-Item -LiteralPath $UninstallKey -Recurse -Force }
 }
 
 function Remove-System {
@@ -310,7 +310,7 @@ function Remove-Build($State) {
     Remove-Paths $paths
     # Folders the converted files were in, if nothing else is left there.
     foreach ($folder in (Join-Path $source 'game\movies\hd'), (Join-Path $source 'game\movies')) {
-        if (-not $DryRun -and (Test-Path $folder) -and -not (Get-ChildItem $folder -Force)) { Remove-Item $folder }
+        if (-not $DryRun -and (Test-Path -LiteralPath $folder) -and -not (Get-ChildItem -LiteralPath $folder -Force)) { Remove-Item -LiteralPath $folder }
     }
 }
 
@@ -334,10 +334,10 @@ function Save-State($State, [string[]]$Chosen) {
     if ($Chosen -contains 'build') { $State['files'] = @() }
     if ($Chosen -contains 'system') { $State.Remove('system') }
     if (-not (@($State.winget | Where-Object { $_ }).Count -or $State.rustup -or $State.system -or @($State.files | Where-Object { $_ }).Count)) {
-        Remove-Item $StateFile -ErrorAction SilentlyContinue
-        Remove-Item (Split-Path $StateFile) -ErrorAction SilentlyContinue   # only if empty
+        Remove-Item -LiteralPath $StateFile -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Split-Path $StateFile) -ErrorAction SilentlyContinue   # only if empty
     } else {
-        $State | ConvertTo-Json -Depth 4 | Set-Content $StateFile -Encoding UTF8
+        $State | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $StateFile -Encoding UTF8
     }
 }
 
@@ -364,7 +364,7 @@ function Main {
 
     $parts = @()
     $system = @(Get-SystemPaths)
-    if ($system.Count -or (Test-Path $UninstallKey)) {
+    if ($system.Count -or (Test-Path -LiteralPath $UninstallKey)) {
         $parts += [pscustomobject]@{ Key = 'system'; Label = (T 'system' $Prefix); Default = $true; Size = (Get-Size $system); Note = $null }
     }
     $source, $build = Get-BuildPaths $state
@@ -385,7 +385,7 @@ function Main {
     if ($tools.Count) {
         $parts += [pscustomobject]@{ Key = 'winget'; Label = (T 'winget' ($tools -join ' ')); Default = $false; Size = 0; Note = (T 'winget_note') }
     }
-    if ($state.rustup -and (Test-Path (Join-Path $Cargo 'bin\rustup.exe'))) {
+    if ($state.rustup -and (Test-Path -LiteralPath (Join-Path $Cargo 'bin\rustup.exe'))) {
         $extra = Get-CargoTools
         $note = if ($extra.Count) { T 'rust_tools' ($extra -join ', ') } else { $null }
         $parts += [pscustomobject]@{ Key = 'rust'; Label = (T 'rust'); Default = $false; Size = (Get-Size @($Cargo, $Rustup)); Note = $note }

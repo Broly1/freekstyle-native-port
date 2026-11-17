@@ -325,7 +325,7 @@ function Invoke-Logged([object[]]$Cmd, [switch]$Quiet, [switch]$Cargo, [string]$
     $exe = "$($Cmd[0])"
     $rest = @()
     if ($Cmd.Count -gt 1) { $rest = @($Cmd[1..($Cmd.Count - 1)] | ForEach-Object { "$_" }) }
-    Push-Location $Cwd
+    Push-Location -LiteralPath $Cwd
     # Native programs' stderr comes through as error records; they're just
     # output here (cargo reports progress on stderr).
     $saved = $ErrorActionPreference
@@ -389,11 +389,11 @@ function Update-Path {
     $paths = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User'))
     $env:Path = ($paths | Where-Object { $_ }) -join ';'
     $cargo = Join-Path $env:USERPROFILE '.cargo\bin'
-    if (Test-Path $cargo) { $env:Path = "$cargo;$env:Path" }
+    if (Test-Path -LiteralPath $cargo) { $env:Path = "$cargo;$env:Path" }
     $cmake = Join-Path $env:ProgramFiles 'CMake\bin'
-    if ((Test-Path $cmake) -and -not (Have 'cmake')) { $env:Path = "$env:Path;$cmake" }
+    if ((Test-Path -LiteralPath $cmake) -and -not (Have 'cmake')) { $env:Path = "$env:Path;$cmake" }
     # The ffmpeg this script downloads, next to the game.
-    if (Test-Path (Join-Path $Release 'ffmpeg.exe')) { $env:Path = "$Release;$env:Path" }
+    if (Test-Path -LiteralPath (Join-Path $Release 'ffmpeg.exe')) { $env:Path = "$Release;$env:Path" }
 }
 
 function Test-Admin {
@@ -404,14 +404,14 @@ function Test-Admin {
 # MSVC (the compiler and linker Rust uses on Windows) and a Windows SDK.
 function Test-Msvc {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (-not (Test-Path $vswhere)) { return $false }
+    if (-not (Test-Path -LiteralPath $vswhere)) { return $false }
     $vs = Output $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     $sdk = Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Microsoft SDKs\Windows\v10.0' -Name InstallationFolder -ErrorAction SilentlyContinue
     return [bool]($vs.Trim()) -and [bool]$sdk
 }
 
 # The game draws with Vulkan; graphics drivers install its loader.
-function Test-Vulkan { return Test-Path (Join-Path $env:SystemRoot 'System32\vulkan-1.dll') }
+function Test-Vulkan { return Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\vulkan-1.dll') }
 
 # The movies are MPEG-2, which some ffmpeg builds leave out.
 function Test-FfmpegMpeg2 { return (Output ffmpeg -hide_banner -decoders) -match '(?m)^ V.{5} mpeg2video ' }
@@ -426,7 +426,7 @@ function Get-Version([string]$Text) {
     return $null
 }
 function Get-MinRust {
-    $m = Select-String -Path (Join-Path $Root 'Cargo.toml') -Pattern '^rust-version\s*=\s*"([^"]+)"' | Select-Object -First 1
+    $m = Select-String -LiteralPath (Join-Path $Root 'Cargo.toml') -Pattern '^rust-version\s*=\s*"([^"]+)"' | Select-Object -First 1
     return $m.Matches[0].Groups[1].Value
 }
 function Get-RustVersion {
@@ -442,9 +442,9 @@ function Test-Rust {
 
 function Read-State {
     $state = @{}
-    if (Test-Path $StateFile) {
+    if (Test-Path -LiteralPath $StateFile) {
         try {
-            (Get-Content $StateFile -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $state[$_.Name] = $_.Value }
+            (Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $state[$_.Name] = $_.Value }
         } catch { }
     }
     return $state
@@ -462,7 +462,7 @@ function Record([string]$Key, $Value) {
         $script:State[$Key] = $Value
     }
     New-Item -ItemType Directory -Force (Split-Path $StateFile) | Out-Null
-    $script:State | ConvertTo-Json -Depth 4 | Set-Content $StateFile -Encoding UTF8
+    $script:State | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $StateFile -Encoding UTF8
 }
 
 # ---- Steps ----
@@ -471,18 +471,19 @@ function Step-Dump {
     Step (T 'look_dump')
     New-Item -ItemType Directory -Force $Game | Out-Null
     $disc = Join-Path $Game 'Freekstyle.bin'
-    if (Test-Path $disc) {
+    if (Test-Path -LiteralPath $disc) {
         Good (T 'found_dump')
     } else {
-        $dumps = @(Get-ChildItem $Game -File | Where-Object { $_.Extension -in '.bin', '.iso' } | Sort-Object Name)
+        $dumps = @(Get-ChildItem -LiteralPath $Game -File | Where-Object { $_.Extension -in '.bin', '.iso' } | Sort-Object Name)
         if ($dumps.Count -eq 0) { throw [Failure]::new((T 'no_dump'), $false) }
         if ($dumps.Count -gt 1) { throw [Failure]::new((T 'many_dumps' (($dumps | ForEach-Object Name) -join ', ')), $false) }
         # A hard link: no copy, no administrator (unlike a symbolic link),
         # and deleting it later leaves the dump.
+        # -Target is read as a wildcard path: escaped for [ ] in a folder name.
         try {
-            New-Item -ItemType HardLink -Path $disc -Target $dumps[0].FullName | Out-Null
+            New-Item -ItemType HardLink -Path $disc -Target ([WildcardPattern]::Escape($dumps[0].FullName)) | Out-Null
         } catch {
-            Copy-Item $dumps[0].FullName $disc
+            Copy-Item -LiteralPath $dumps[0].FullName $disc
         }
         Record 'files' @('game\Freekstyle.bin')
         Good (T 'using_dump' ('game\' + $dumps[0].Name))
@@ -543,6 +544,19 @@ function Step-Tools {
     Step-Rust
 }
 
+# Download $Url to $To. PowerShell 5.1 reads -OutFile as a wildcard path
+# (there is no literal form), so a folder with [ ] in its name fails: the
+# download goes to a temporary name and is moved into place.
+function Save-Download([string]$Url, [string]$To) {
+    $tmp = Join-Path $env:TEMP ('freekstyle-' + [IO.Path]::GetRandomFileName())
+    try {
+        Invoke-WebRequest $Url -OutFile $tmp -UseBasicParsing
+        Move-Item -LiteralPath $tmp -Destination $To -Force
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # ffmpeg.exe and ffprobe.exe into target\release, next to the game.
 function Get-Ffmpeg {
     $zip = Join-Path $Root 'target\ffmpeg.zip'
@@ -552,13 +566,13 @@ function Get-Ffmpeg {
         Say (T 'get_ffmpeg')
         Write-Host "  > $FfmpegUrl" -ForegroundColor DarkGray
         Write-Log "> download $FfmpegUrl"
-        Invoke-WebRequest $FfmpegUrl -OutFile $zip -UseBasicParsing
-        if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() -ne $FfmpegSha256) { throw 'checksum mismatch' }
-        Expand-Archive $zip $unpacked -Force
+        Save-Download $FfmpegUrl $zip
+        if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower() -ne $FfmpegSha256) { throw 'checksum mismatch' }
+        Expand-Archive -LiteralPath $zip -DestinationPath $unpacked -Force
         foreach ($exe in 'ffmpeg.exe', 'ffprobe.exe') {
-            $found = Get-ChildItem $unpacked -Recurse -Filter $exe | Select-Object -First 1
+            $found = Get-ChildItem -LiteralPath $unpacked -Recurse -Filter $exe | Select-Object -First 1
             if (-not $found) { throw "$exe not in the download" }
-            Copy-Item $found.FullName $Release -Force
+            Copy-Item -LiteralPath $found.FullName $Release -Force
         }
         Update-Path
         Good ('ffmpeg: ' + ((Output ffmpeg -version) -split "`n")[0])
@@ -566,7 +580,7 @@ function Get-Ffmpeg {
         Write-Log "error: $_"
         Warn (T 'ffmpeg_failed' $_)
     } finally {
-        Remove-Item $zip, $unpacked -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $zip, $unpacked -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -582,7 +596,7 @@ function Step-Rust {
         } elseif (Ask (T 'rustup_install')) {
             $init = Join-Path $Root 'target\rustup-init.exe'
             New-Item -ItemType Directory -Force (Split-Path $init) | Out-Null
-            Invoke-WebRequest 'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe' -OutFile $init -UseBasicParsing
+            Save-Download 'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe' $init
             Run @($init, '-y', '--profile', 'minimal')
             Record 'rustup' $true
             Update-Path
@@ -601,11 +615,11 @@ function Step-Rust {
 function Step-Program {
     Step (T 'copy_prog')
     $slus = Join-Path $Game 'SLUS_203.67'
-    if (-not (Test-Path $slus)) {
+    if (-not (Test-Path -LiteralPath $slus)) {
         Run @('cargo', 'run', '--release', '-q', '-p', 'ee-runtime', '--bin', 'disc-extract')
         Record 'files' @('game\SLUS_203.67')
     }
-    if ((Get-FileHash $slus -Algorithm SHA256).Hash.ToLower() -ne $SlusSha256) { throw [Failure]::new((T 'bad_slus'), $false) }
+    if ((Get-FileHash -LiteralPath $slus -Algorithm SHA256).Hash.ToLower() -ne $SlusSha256) { throw [Failure]::new((T 'bad_slus'), $false) }
     Good 'game\SLUS_203.67 (SLUS-20367)'
 }
 
@@ -618,7 +632,7 @@ function Step-Build {
 
 function Step-Pictures {
     Step (T 'pictures')
-    if (Get-ChildItem (Join-Path $Game 'images\*.png') -ErrorAction SilentlyContinue) {
+    if (Get-ChildItem -LiteralPath (Join-Path $Game 'images') -Filter '*.png' -ErrorAction SilentlyContinue) {
         Good (T 'already')
     } else {
         Run @('cargo', 'run', '--release', '-q', '-p', 'ee-runtime', '--bin', 'lsc2png')
@@ -632,27 +646,27 @@ function Step-Pictures {
 function Step-Hd {
     Step (T 'hd')
     $esrgan = Join-Path $Release 'realesrgan'
-    if (-not (Test-Path (Join-Path $esrgan 'realesrgan-ncnn-vulkan.exe'))) {
+    if (-not (Test-Path -LiteralPath (Join-Path $esrgan 'realesrgan-ncnn-vulkan.exe'))) {
         Say (T 'hd_get')
         $zip = Join-Path $Root 'target\realesrgan.zip'
         $unpacked = Join-Path $Root 'target\realesrgan-zip'
         try {
             Write-Log "> download $EsrganUrl"
-            Invoke-WebRequest $EsrganUrl -OutFile $zip -UseBasicParsing
-            if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() -ne $EsrganSha256) { throw 'checksum mismatch' }
-            Expand-Archive $zip $unpacked -Force
+            Save-Download $EsrganUrl $zip
+            if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower() -ne $EsrganSha256) { throw 'checksum mismatch' }
+            Expand-Archive -LiteralPath $zip -DestinationPath $unpacked -Force
             foreach ($f in $EsrganKeep) {
                 $to = Join-Path $esrgan $f
                 New-Item -ItemType Directory -Force (Split-Path $to) | Out-Null
-                Copy-Item (Join-Path $unpacked $f) $to -Force
+                Copy-Item -LiteralPath (Join-Path $unpacked $f) $to -Force
             }
         } catch {
             Write-Log "error: $_"
-            Remove-Item $esrgan -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $esrgan -Recurse -Force -ErrorAction SilentlyContinue
             Warn (T 'hd_failed' $_)
             return
         } finally {
-            Remove-Item $zip, $unpacked -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $zip, $unpacked -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
     $tool = Join-Path $Release 'freekstyle-hd.exe'
@@ -661,12 +675,12 @@ function Step-Hd {
     if ($check.Trim() -ne 'ok') {
         $reason = ((($check -split "`n") | Where-Object { $_.Trim() }) | Select-Object -Last 1)
         $reason = "$reason".Replace('freekstyle-hd: ', '').Replace('; nothing to do', '').Trim()
-        Remove-Item $esrgan -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $esrgan -Recurse -Force -ErrorAction SilentlyContinue
         Good (T 'hd_no_gpu' $reason)
         return
     }
     $hd = Join-Path $Game 'images\hd'
-    $before = Test-Path $hd
+    $before = Test-Path -LiteralPath $hd
     if (TryRun @($tool, 'pictures', (Join-Path $Game 'images')) -Quiet) {
         Good (T 'hd_pictures')
         if (-not $before) { Record 'files' @('game\images\hd') }
@@ -681,7 +695,7 @@ function Step-Movies {
         Warn (T 'no_ffmpeg')
         return
     }
-    if ((Test-Path (Join-Path $movies 'hd\intro.mkv')) -or (Test-Path (Join-Path $movies 'intro.mkv'))) {
+    if ((Test-Path -LiteralPath (Join-Path $movies 'hd\intro.mkv')) -or (Test-Path -LiteralPath (Join-Path $movies 'intro.mkv'))) {
         Good (T 'already')
         Update-MovieAudio $movies
         return
@@ -694,15 +708,15 @@ function Step-Movies {
     $hd = Join-Path $movies 'hd'
     # Only what this step creates is recorded: game\movies may also hold
     # movies made by hand.
-    $before = @(@($flm, $hd) | Where-Object { Test-Path $_ })
-    $before += @(Get-ChildItem (Join-Path $movies '*.mkv'), (Join-Path $hd '*.mkv') -ErrorAction SilentlyContinue | ForEach-Object FullName)
+    $before = @(@($flm, $hd) | Where-Object { Test-Path -LiteralPath $_ })
+    $before += @(Get-ChildItem -LiteralPath $movies, $hd -Filter '*.mkv' -ErrorAction SilentlyContinue | ForEach-Object FullName)
     try {
         Convert-Movies $movies $flm
     } finally {
-        $made = @(@($flm, $hd) + @(Get-ChildItem (Join-Path $movies '*.mkv') -ErrorAction SilentlyContinue | ForEach-Object FullName) |
-                  Where-Object { (Test-Path $_) -and ($before -notcontains $_) })
+        $made = @(@($flm, $hd) + @(Get-ChildItem -LiteralPath $movies -Filter '*.mkv' -ErrorAction SilentlyContinue | ForEach-Object FullName) |
+                  Where-Object { (Test-Path -LiteralPath $_) -and ($before -notcontains $_) })
         if ($before -contains $hd) {
-            $made += @(Get-ChildItem (Join-Path $hd '*.mkv') -ErrorAction SilentlyContinue | ForEach-Object FullName | Where-Object { $before -notcontains $_ })
+            $made += @(Get-ChildItem -LiteralPath $hd -Filter '*.mkv' -ErrorAction SilentlyContinue | ForEach-Object FullName | Where-Object { $before -notcontains $_ })
         }
         if ($made.Count) { Record 'files' @($made | ForEach-Object { $_.Substring($Root.Length).TrimStart('\') }) }
     }
@@ -712,7 +726,7 @@ function Step-Movies {
 function Get-Flm([string]$Flm) {
     foreach ($m in $MovieList) {
         $folder, $name = $m.Split('/')
-        if (-not (Test-Path (Join-Path $Flm "$name.FLM"))) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Flm "$name.FLM"))) {
             Run @('cargo', 'run', '--release', '-q', '-p', 'ee-runtime', '--bin', 'disc-extract', '--',
                  'game/Freekstyle.bin', "\SXDATA\$folder\$name.FLM", $Flm) -Quiet
         }
@@ -725,12 +739,12 @@ function Get-Flm([string]$Flm) {
 # picture. flm2mkv skips the ones already done.
 function Update-MovieAudio([string]$Movies) {
     $flm = Join-Path $Movies 'flm'
-    $madeFlm = -not (Test-Path $flm)
+    $madeFlm = -not (Test-Path -LiteralPath $flm)
     $flm2mkv = Join-Path $Root 'target\release\flm2mkv.exe'
     $fixed = 0
     try {
         foreach ($folder in @($Movies, (Join-Path $Movies 'hd'))) {
-            if (-not (Get-ChildItem (Join-Path $folder '*.mkv') -ErrorAction SilentlyContinue)) { continue }
+            if (-not (Get-ChildItem -LiteralPath $folder -Filter '*.mkv' -ErrorAction SilentlyContinue)) { continue }
             Get-Flm $flm
             Write-Log "> $flm2mkv --audio $flm $folder"
             $out = Output $flm2mkv --audio $flm $folder
@@ -738,7 +752,7 @@ function Update-MovieAudio([string]$Movies) {
             if ($out -match '(?m)^updated (\d+)') { $fixed += [int]$Matches[1] }
         }
     } finally {
-        if ($madeFlm -and (Test-Path $flm)) { Record 'files' @($flm.Substring($Root.Length).TrimStart('\')) }
+        if ($madeFlm -and (Test-Path -LiteralPath $flm)) { Record 'files' @($flm.Substring($Root.Length).TrimStart('\')) }
     }
     if ($fixed) { Good (T 'movie_audio' $fixed) }
 }
@@ -755,7 +769,7 @@ function Convert-Movies([string]$Movies, [string]$Flm) {
         Good (T 'crt')
         return
     }
-    Remove-Item $hd -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $hd -Recurse -Force -ErrorAction SilentlyContinue
     if (TryRun @($flm2mkv, $Flm, $Movies) -Quiet) { Good (T 'no_crt') } else { Warn (T 'movies_failed') }
 }
 
@@ -764,7 +778,7 @@ function New-Icon([string]$Folder, [string]$Out) {
     $sizes = 16, 24, 32, 48, 64, 128, 256
     $images = foreach ($s in $sizes) {
         $png = Join-Path $Folder "$s.png"
-        if (Test-Path $png) { [pscustomobject]@{ Size = $s; Data = [IO.File]::ReadAllBytes($png) } }
+        if (Test-Path -LiteralPath $png) { [pscustomobject]@{ Size = $s; Data = [IO.File]::ReadAllBytes($png) } }
     }
     $images = @($images)
     $stream = New-Object IO.MemoryStream
@@ -787,11 +801,11 @@ function New-Icon([string]$Folder, [string]$Out) {
 function Resolve-Program([string]$Name) {
     $cmd = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $cmd) { return $null }
-    $item = Get-Item $cmd.Source
+    $item = Get-Item -LiteralPath $cmd.Source
     if ($item.LinkType -and $item.Target) {
         $target = @($item.Target)[0]
         if (-not [IO.Path]::IsPathRooted($target)) { $target = Join-Path $item.DirectoryName $target }
-        return (Resolve-Path $target).Path
+        return (Resolve-Path -LiteralPath $target).Path
     }
     return $item.FullName
 }
@@ -811,7 +825,7 @@ function Step-Install {
     New-Icon (Join-Path $Root 'freekstyle\assets\launcher') $icon
     $plan = @{ source = $Root; icon = $icon; ffmpeg = (Resolve-Program 'ffmpeg'); ffprobe = (Resolve-Program 'ffprobe') }
     $planFile = Join-Path $Root 'target\install-plan.json'
-    $plan | ConvertTo-Json | Set-Content $planFile -Encoding UTF8
+    $plan | ConvertTo-Json | Set-Content -LiteralPath $planFile -Encoding UTF8
     Say (T 'copying_disc')
     if (Test-Admin) {
         $ok = (Install-System $planFile) -eq 0
@@ -832,9 +846,9 @@ function Step-Install {
     # game keeps them in %APPDATA%\freekstyle).
     $config = Join-Path $env:APPDATA 'freekstyle'
     $toml = Join-Path $Root 'freekstyle.toml'
-    if ((Test-Path $toml) -and -not (Test-Path (Join-Path $config 'freekstyle.toml'))) {
+    if ((Test-Path -LiteralPath $toml) -and -not (Test-Path -LiteralPath (Join-Path $config 'freekstyle.toml'))) {
         New-Item -ItemType Directory -Force $config | Out-Null
-        Copy-Item $toml $config
+        Copy-Item -LiteralPath $toml $config
     }
     Record 'system' $Prefix
     return $true
@@ -845,32 +859,32 @@ function Step-Install {
 # code; problems go to install.log.
 function Install-System([string]$PlanFile) {
     try {
-        $plan = Get-Content $PlanFile -Raw | ConvertFrom-Json
+        $plan = Get-Content -LiteralPath $PlanFile -Raw | ConvertFrom-Json
         $src = $plan.source
         $game = Join-Path $src 'game'
         $release = Join-Path $src 'target\release'
         Write-Log "`r`n== install to $Prefix (administrator)"
-        if (Test-Path (Join-Path $Prefix 'game')) { Remove-Item (Join-Path $Prefix 'game') -Recurse -Force }
+        if (Test-Path -LiteralPath (Join-Path $Prefix 'game')) { Remove-Item -LiteralPath (Join-Path $Prefix 'game') -Recurse -Force }
         New-Item -ItemType Directory -Force (Join-Path $Prefix 'game\movies') | Out-Null
-        Copy-Item (Join-Path $release 'freekstyle.exe'), (Join-Path $release 'freekstyle-launcher.exe'), (Join-Path $release 'freekstyle-hd.exe') $Prefix -Force
-        if (Test-Path (Join-Path $Prefix 'realesrgan')) { Remove-Item (Join-Path $Prefix 'realesrgan') -Recurse -Force }
-        if (Test-Path (Join-Path $release 'realesrgan')) { Copy-Item (Join-Path $release 'realesrgan') $Prefix -Recurse }
-        Copy-Item (Join-Path $game 'SLUS_203.67'), (Join-Path $game 'Freekstyle.bin') (Join-Path $Prefix 'game')
-        if (Test-Path (Join-Path $game 'images')) { Copy-Item (Join-Path $game 'images') (Join-Path $Prefix 'game') -Recurse }
-        if (Test-Path (Join-Path $game 'movies\hd')) { Copy-Item (Join-Path $game 'movies\hd') (Join-Path $Prefix 'game\movies') -Recurse }
-        if (Test-Path (Join-Path $game 'textures\hd')) {
+        Copy-Item -LiteralPath (Join-Path $release 'freekstyle.exe'), (Join-Path $release 'freekstyle-launcher.exe'), (Join-Path $release 'freekstyle-hd.exe') $Prefix -Force
+        if (Test-Path -LiteralPath (Join-Path $Prefix 'realesrgan')) { Remove-Item -LiteralPath (Join-Path $Prefix 'realesrgan') -Recurse -Force }
+        if (Test-Path -LiteralPath (Join-Path $release 'realesrgan')) { Copy-Item -LiteralPath (Join-Path $release 'realesrgan') $Prefix -Recurse }
+        Copy-Item -LiteralPath (Join-Path $game 'SLUS_203.67'), (Join-Path $game 'Freekstyle.bin') (Join-Path $Prefix 'game')
+        if (Test-Path -LiteralPath (Join-Path $game 'images')) { Copy-Item -LiteralPath (Join-Path $game 'images') (Join-Path $Prefix 'game') -Recurse }
+        if (Test-Path -LiteralPath (Join-Path $game 'movies\hd')) { Copy-Item -LiteralPath (Join-Path $game 'movies\hd') (Join-Path $Prefix 'game\movies') -Recurse }
+        if (Test-Path -LiteralPath (Join-Path $game 'textures\hd')) {
             New-Item -ItemType Directory -Force (Join-Path $Prefix 'game\textures') | Out-Null
-            Copy-Item (Join-Path $game 'textures\hd') (Join-Path $Prefix 'game\textures') -Recurse
+            Copy-Item -LiteralPath (Join-Path $game 'textures\hd') (Join-Path $Prefix 'game\textures') -Recurse
         }
-        Get-ChildItem (Join-Path $game 'movies\*.mkv') -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $Prefix 'game\movies')
+        Get-ChildItem -LiteralPath (Join-Path $game 'movies') -Filter '*.mkv' -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $Prefix 'game\movies')
         # The game plays its movies through ffmpeg; Windows finds a program
         # next to the game first, so a copy here works without PATH.
         foreach ($tool in @($plan.ffmpeg, $plan.ffprobe)) {
-            if ($tool -and (Test-Path $tool)) { Copy-Item $tool $Prefix -Force }
+            if ($tool -and (Test-Path -LiteralPath $tool)) { Copy-Item -LiteralPath $tool $Prefix -Force }
         }
-        Copy-Item $plan.icon (Join-Path $Prefix 'freekstyle.ico') -Force
+        Copy-Item -LiteralPath $plan.icon (Join-Path $Prefix 'freekstyle.ico') -Force
         # The uninstaller goes along, for when the source folder is gone.
-        Copy-Item (Join-Path $src 'windows\uninstall.ps1') $Prefix -Force
+        Copy-Item -LiteralPath (Join-Path $src 'windows\uninstall.ps1') $Prefix -Force
 
         $launcher = Join-Path $Prefix 'freekstyle-launcher.exe'
         $shell = New-Object -ComObject WScript.Shell
@@ -881,8 +895,8 @@ function Install-System([string]$PlanFile) {
         $lnk.Description = T 'shortcut'
         $lnk.Save()
 
-        $version = (Select-String -Path (Join-Path $src 'Cargo.toml') -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-        $kb = [int]((Get-ChildItem $Prefix -Recurse -File | Measure-Object Length -Sum).Sum / 1KB)
+        $version = (Select-String -LiteralPath (Join-Path $src 'Cargo.toml') -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+        $kb = [int]((Get-ChildItem -LiteralPath $Prefix -Recurse -File | Measure-Object Length -Sum).Sum / 1KB)
         $uninstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $Prefix 'uninstall.ps1')
         New-Item -Path $UninstallKey -Force | Out-Null
         $values = [ordered]@{
