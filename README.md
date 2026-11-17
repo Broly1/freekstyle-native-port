@@ -78,8 +78,8 @@ Windows 10 or 11, 64-bit, with a graphics driver that has Vulkan (any
 current AMD, Intel or NVIDIA driver does). About 15 GB of free space for
 the build.
 
-1. Download this repository: *Code* > *Download ZIP* on GitHub (pick the
-   branch first), and unzip it; or `git clone` it.
+1. Download this repository: *Code* > *Download ZIP* on GitHub, and unzip
+   it anywhere (Downloads, Documents, any folder); or `git clone` it.
 2. Dump your disc (step 1 below) and put the `.bin` or `.iso` in the
    `game` folder.
 3. Double-click **`windows-install`**. Run it as yourself, not as
