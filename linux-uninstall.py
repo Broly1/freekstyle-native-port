@@ -447,7 +447,9 @@ class Uninstaller:
                 print(paint("2", "  rm -r " + str(p).replace(str(HOME), "~")))
             elif n == 4:
                 print(paint("2", "  ... (+%d)" % (len(paths) - 4)))
-            if self.args.dry_run:
+            # A path inside one deleted before it is already gone
+            # (game/images/hd is recorded after game/images).
+            if self.args.dry_run or not (p.exists() or p.is_symlink()):
                 continue
             if p.is_dir() and not p.is_symlink():
                 shutil.rmtree(p)
