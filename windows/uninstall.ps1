@@ -252,6 +252,9 @@ function Remove-Paths([object[]]$Paths) {
         }
         $n++
         if ($DryRun) { continue }
+        # A path inside one deleted before it is already gone (game\movies\hd
+        # and the movies in it can both be recorded).
+        if (-not (Test-Path -LiteralPath $p)) { continue }
         Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Continue
     }
 }
