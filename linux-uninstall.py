@@ -69,7 +69,7 @@ MESSAGES = {
     "no_state": ("(no record from linux-install.py was found, so only the game's own files are offered)",
                  "(nenhum registro do linux-install.py foi encontrado, então só os arquivos do próprio jogo são oferecidos)",
                  "(no se encontró registro de linux-install.py, así que solo se ofrecen los archivos del propio juego)",
-                 "(aucun relevé d'linux-install.py trouvé, seuls les fichiers du jeu lui-même sont proposés)"),
+                 "(aucun relevé de linux-install.py trouvé, seuls les fichiers du jeu lui-même sont proposés)"),
     "system": ("The installed game: %s, the app menu entry and the freekstyle-launcher command (needs sudo)",
                "O jogo instalado: %s, o item do menu e o comando freekstyle-launcher (precisa de sudo)",
                "El juego instalado: %s, la entrada del menú y el comando freekstyle-launcher (necesita sudo)",
@@ -179,29 +179,43 @@ def pkg_installed(family, pkg):
         return "install ok installed" in output(["dpkg-query", "-W", "-f=${Status}", pkg])
     return quiet(["rpm", "-q", pkg])
 
-def is_driver(pkg):
-    """A Vulkan/GPU driver: games and desktops use it, so it is never
-    suggested for removal."""
-    return pkg.startswith(("vulkan-", "libvulkan_", "mesa-vulkan", "nvidia")) and pkg != "vulkan-icd-loader"
+def is_graphics(pkg):
+    """A Vulkan/GPU driver or the Vulkan loader: games and desktops use
+    them, so they are never suggested for removal."""
+    return pkg.startswith(("vulkan-", "libvulkan", "mesa-vulkan", "nvidia"))
 
 def remove_hint(family, pkgs):
-    return {"arch": "sudo pacman -Rs %s",
-            "debian": "sudo apt remove %s && sudo apt autoremove",
-            "fedora": "sudo dnf remove %s"}.get(family, "sudo zypper remove --clean-deps %s") % " ".join(pkgs)
+    """Marks them as no longer wanted, then removes those nothing else
+    needs: a plain remove would also take whatever depends on them."""
+    names = " ".join(pkgs)
+    if family == "arch":
+        return "sudo pacman -D --asdeps %s && pacman -Qdtq | sudo pacman -Rns -" % names
+    if family == "debian":
+        return "sudo apt-mark auto %s && sudo apt autoremove" % names
+    if family == "fedora":
+        return "sudo dnf mark dependency %s && sudo dnf autoremove" % names
+    return "sudo zypper remove --clean-deps %s" % names
 
 def leftovers(state):
     """(what, command) for each thing linux-install.py added that is still
     installed."""
     family = state.get("family")
     out = []
-    pkgs = [p for p in state.get("packages", []) if family and not is_driver(p) and pkg_installed(family, p)]
+    pkgs = [p for p in state.get("packages", []) if family and not is_graphics(p) and pkg_installed(family, p)]
     if pkgs:
         out.append((t("left_pkgs") + ": " + " ".join(pkgs), remove_hint(family, pkgs)))
     if state.get("rustup") and (HOME / ".cargo" / "bin" / "rustup").exists():
         out.append(("Rust (rustup, ~/.cargo ~/.rustup)", "rustup self uninstall"))
+    # RPM Fusion only while nothing else from it is installed (removing it
+    # would stop their updates); the full ffmpeg goes back to Fedora's
+    # ffmpeg-free first, if it is still the one installed.
     if state.get("rpmfusion") and quiet(["rpm", "-q", "rpmfusion-free-release"]):
-        out.append((t("left_rpmfusion"),
-                    "sudo dnf swap ffmpeg ffmpeg-free --allowerasing && sudo dnf remove rpmfusion-free-release"))
+        others = [line.split()[0] for line in output(["rpm", "-qa", "--qf", "%{NAME} %{VENDOR}\\n"]).splitlines()
+                  if "RPM Fusion" in line and not line.startswith(("rpmfusion-", "ffmpeg"))]
+        if not others:
+            swap = quiet(["rpm", "-q", "ffmpeg"]) and not quiet(["rpm", "-q", "ffmpeg-free"])
+            out.append((t("left_rpmfusion"), ("sudo dnf swap ffmpeg ffmpeg-free --allowerasing && " if swap else "")
+                        + "sudo dnf remove rpmfusion-free-release"))
     return out
 
 # ---- The parts ----
@@ -410,7 +424,8 @@ class Uninstaller:
         keys = {p.key for p in chosen}
         if "build" in keys:
             self.state["files"] = []
-        if "system" in keys:
+        # Only once it is really gone (a wrong sudo password leaves it).
+        if "system" in keys and not system_paths():
             self.state.pop("system", None)
         if not (self.state.get("system") or self.state.get("files")):
             STATE.unlink(missing_ok=True)
@@ -422,7 +437,7 @@ class Uninstaller:
             STATE.write_text(json.dumps(self.state, indent=2))
 
 def main():
-    parser = argparse.ArgumentParser(description="Remove Freekstyle and what linux-install.py added (see the top of this file).")
+    parser = argparse.ArgumentParser(description="Remove Freekstyle; packages and Rust that linux-install.py added stay (see the top of this file).")
     parser.add_argument("-y", "--yes", action="store_true", help="don't ask: take each part's default (with --all: everything)")
     parser.add_argument("--all", action="store_true", help="default to removing everything, your saves and settings included")
     parser.add_argument("--dry-run", action="store_true", help="show what would be removed and change nothing")

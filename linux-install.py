@@ -49,13 +49,13 @@ SPACE_GB = 10
 # Below this the build can't work at all (it fails in odd places), so the
 # script stops instead of asking.
 MIN_SPACE_GB = 3
-# What this script added (packages, Rust, RPM Fusion, files, the system
-# install), for linux-uninstall.py: kept outside the source folder so it
-# survives that folder being deleted.
 # apt waits this long (seconds) for the package lock instead of failing at
 # once: a freshly started Ubuntu or Debian is often still running its
 # automatic updates (unattended-upgrades) when this script starts.
 APT_LOCK = ["-o", "DPkg::Lock::Timeout=600"]
+# What this script added (packages, Rust, RPM Fusion, files, the system
+# install), for linux-uninstall.py: kept outside the source folder so it
+# survives that folder being deleted.
 STATE = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "freekstyle" / "install.json"
 
 # ---- Messages ----

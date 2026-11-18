@@ -325,7 +325,8 @@ function Show-Leftovers($State) {
 function Save-State($State, [string[]]$Chosen) {
     if ($DryRun -or $State.Count -eq 0) { return }
     if ($Chosen -contains 'build') { $State['files'] = @() }
-    if ($Chosen -contains 'system') { $State.Remove('system') }
+    # Only once it is really gone (the administrator prompt may have been declined).
+    if ($Chosen -contains 'system' -and -not @(Get-SystemPaths).Count -and -not (Test-Path -LiteralPath $UninstallKey)) { $State.Remove('system') }
     if (-not ($State.system -or @($State.files | Where-Object { $_ }).Count)) {
         Remove-Item -LiteralPath $StateFile -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath (Split-Path $StateFile) -ErrorAction SilentlyContinue   # only if empty
