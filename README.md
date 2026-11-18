@@ -64,10 +64,11 @@ it offers to install the game to the system, like a game from a store:
 `freekstyle-launcher` on the command line. The source folder is then no
 longer needed to play; settings go to `~/.config/freekstyle`, saves to
 `~/.local/share/freekstyle/saves`. `./linux-uninstall.py` (also copied to
-`/opt/freekstyle/linux-uninstall.py`) removes the game and what `linux-install.py`
-added: it lists each part and asks, keeping your saves and settings,
-packages and Rust unless you say otherwise, and removes a package only if
-nothing else installed needs it (`--dry-run` shows what it would do). Or keep it in the folder and start
+`/opt/freekstyle/linux-uninstall.py`) removes the game: it lists each part
+and asks, keeping your saves and settings unless you say otherwise
+(`--dry-run` shows what it would do). The packages and Rust that
+`linux-install.py` added stay installed, since other software may use them;
+it ends with the list of those and the command that removes each. Or keep it in the folder and start
 `./target/release/freekstyle-launcher`. Steps already done are skipped, so
 running it again after a `git pull` only redoes what changed. For an
 unattended run: `./linux-install.py --yes --system` (or `--here`).
@@ -121,9 +122,10 @@ At the end it offers to install the game for all users:
 needed to play. Settings and saves go to `%APPDATA%\freekstyle`, the HD
 textures made while playing to `%APPDATA%\freekstyle\textures`.
 *Installed apps > Freekstyle > Uninstall* (or `windows-uninstall` in the
-source folder) removes the game and what the installer added: like the
-Linux one, it lists each part and asks, keeping your saves, the tools and
-Rust unless you say otherwise. For an unattended run, from PowerShell:
+source folder) removes the game: like the Linux one, it lists each part
+and asks, keeping your saves unless you say otherwise, and leaves the
+winget tools and Rust installed, ending with the commands that remove
+them. For an unattended run, from PowerShell:
 `.\windows-install.cmd -Yes -System` (or `-Here` to keep it in the folder).
 
 ### By hand

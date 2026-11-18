@@ -8,8 +8,8 @@ and offers to install the game to the system (/opt/freekstyle, with the
 launcher in the app menu's Games section). Steps already done are skipped,
 so it is safe to run again after a `git pull`. What it adds (packages,
 Rust, files, the system install) is recorded in
-~/.local/state/freekstyle/install.json, so that ./linux-uninstall.py can remove
-exactly that and nothing else.
+~/.local/state/freekstyle/install.json, so that ./linux-uninstall.py removes
+exactly the game's files and lists the packages and Rust it leaves.
 
 It speaks English, Brazilian Portuguese, Spanish or French, following the
 system language like the launcher. Everything it runs is logged to
@@ -43,9 +43,6 @@ ESRGAN_KEEP = ("realesrgan-ncnn-vulkan", "models/realesrgan-x4plus.bin", "models
                "models/realesrgan-x4plus-anime.bin", "models/realesrgan-x4plus-anime.param")
 MOVIES = ["OPENING/BIGLOGO", "OPENING/EAGAMES", "OPENING/EAS_BIG", "OPENING/INTRO", "ABOUTEA/PROD1"]
 PREFIX = Path("/opt/freekstyle")
-# Shell startup files rustup may write its PATH line to (from home).
-RUSTUP_SHELL_FILES = (".profile", ".bashrc", ".bash_profile", ".zshenv", ".config/fish/conf.d/rustup.fish",
-                      ".config/nushell/autoload/rustup.nu")
 MENU = [Path("/usr/share/applications/freekstyle.desktop"), Path("/usr/share/applications/freekstyle-launcher.desktop")]
 # Free space wanted for the build (it ends up around 7 GB) and the copies.
 SPACE_GB = 10
@@ -55,6 +52,10 @@ MIN_SPACE_GB = 3
 # What this script added (packages, Rust, RPM Fusion, files, the system
 # install), for linux-uninstall.py: kept outside the source folder so it
 # survives that folder being deleted.
+# apt waits this long (seconds) for the package lock instead of failing at
+# once: a freshly started Ubuntu or Debian is often still running its
+# automatic updates (unattended-upgrades) when this script starts.
+APT_LOCK = ["-o", "DPkg::Lock::Timeout=600"]
 STATE = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "freekstyle" / "install.json"
 
 # ---- Messages ----
@@ -193,10 +194,10 @@ MESSAGES = {
     "choose": ("Choose [1]: ", "Escolha [1]: ", "Elige [1]: ", "Choix [1] : "),
     "copying_disc": ("copying the disc image...", "copiando a imagem do disco...", "copiando la imagen del disco...", "copie de l'image du disque..."),
     "done": ("Done in %s", "Pronto em %s", "Listo en %s", "Terminé en %s"),
-    "done_system": ("Freekstyle is in your app menu under Games (also: freekstyle-launcher in a\nterminal). This folder isn't needed to play any more; ./linux-uninstall.py\n(or /opt/freekstyle/linux-uninstall.py) removes it and what this script added.",
-                    "O Freekstyle está no menu de aplicativos, em Jogos (ou: freekstyle-launcher\nno terminal). Esta pasta não é mais necessária para jogar; ./linux-uninstall.py\n(ou /opt/freekstyle/linux-uninstall.py) remove o jogo e o que este script adicionou.",
-                    "Freekstyle está en el menú de aplicaciones, en Juegos (o: freekstyle-launcher\nen una terminal). Esta carpeta ya no hace falta para jugar; ./linux-uninstall.py\n(o /opt/freekstyle/linux-uninstall.py) quita el juego y lo que añadió este script.",
-                    "Freekstyle est dans le menu des applications, dans Jeux (ou : freekstyle-launcher\ndans un terminal). Ce dossier n'est plus nécessaire pour jouer ; ./linux-uninstall.py\n(ou /opt/freekstyle/linux-uninstall.py) supprime le jeu et ce que ce script a ajouté."),
+    "done_system": ("Freekstyle is in your app menu under Games (also: freekstyle-launcher in a\nterminal). This folder isn't needed to play any more; ./linux-uninstall.py\n(or /opt/freekstyle/linux-uninstall.py) removes it; the packages and Rust it\nadded stay installed, and it shows how to remove those.",
+                    "O Freekstyle está no menu de aplicativos, em Jogos (ou: freekstyle-launcher\nno terminal). Esta pasta não é mais necessária para jogar; ./linux-uninstall.py\n(ou /opt/freekstyle/linux-uninstall.py) remove o jogo; os pacotes e a Rust\nadicionados continuam instalados, e ele mostra como removê-los.",
+                    "Freekstyle está en el menú de aplicaciones, en Juegos (o: freekstyle-launcher\nen una terminal). Esta carpeta ya no hace falta para jugar; ./linux-uninstall.py\n(o /opt/freekstyle/linux-uninstall.py) quita el juego; los paquetes y Rust\nañadidos siguen instalados, y muestra cómo quitarlos.",
+                    "Freekstyle est dans le menu des applications, dans Jeux (ou : freekstyle-launcher\ndans un terminal). Ce dossier n'est plus nécessaire pour jouer ; ./linux-uninstall.py\n(ou /opt/freekstyle/linux-uninstall.py) supprime le jeu ; les paquets et Rust\najoutés restent installés, et il indique comment les supprimer."),
     "done_here": ("Start the game with:   ./target/release/freekstyle-launcher", "Inicie o jogo com:   ./target/release/freekstyle-launcher",
                   "Inicia el juego con:   ./target/release/freekstyle-launcher", "Lancez le jeu avec :   ./target/release/freekstyle-launcher"),
     "failed_cmd": ("this command failed (exit %s): %s", "este comando falhou (saída %s): %s", "este comando falló (salida %s): %s", "cette commande a échoué (code %s) : %s"),
@@ -417,7 +418,7 @@ def installed_as(family, pkg):
 def install_command(family):
     """The package manager command, non-interactive (the user has already
     said yes)."""
-    return {"arch": ["pacman", "-S", "--needed", "--noconfirm"], "debian": ["apt-get", "install", "-y"],
+    return {"arch": ["pacman", "-S", "--needed", "--noconfirm"], "debian": ["apt-get"] + APT_LOCK + ["install", "-y"],
             "fedora": ["dnf", "install", "-y"], "suse": ["zypper", "--non-interactive", "install"]}[family]
 
 def packages(family):
@@ -546,7 +547,7 @@ class Installer:
                 new = [p for p in pkgs if not installed_as(self.family, p)]
                 if self.family == "debian":
                     # Package lists can be missing or stale on a fresh system.
-                    self.ui.run(["apt-get", "update"], sudo=True, attached=True)
+                    self.ui.run(["apt-get"] + APT_LOCK + ["update"], sudo=True, attached=True)
                 self.ui.run(command, sudo=True, attached=True)
                 self.record("packages", [n for n in (installed_as(self.family, p) for p in new) if n])
                 left = [label for key, label, present, needed in self.requirements() if not present and needed]
@@ -587,14 +588,8 @@ class Installer:
                 rustup_init = ROOT / "target" / "rustup-init.sh"
                 rustup_init.parent.mkdir(exist_ok=True)
                 rustup_init.write_text(script)
-                # rustup adds its PATH line to the shell's startup files,
-                # creating some (an empty ~/.profile is what its uninstall
-                # leaves): note those it creates, for linux-uninstall.py.
-                home = Path.home()
-                absent = [f for f in RUSTUP_SHELL_FILES if not (home / f).exists()]
                 self.ui.run(["sh", rustup_init, "-y", "--profile", "minimal"])
                 self.record("rustup", True)
-                self.record("rustup_created", [f for f in absent if (home / f).exists()])
                 os.environ["PATH"] = "%s%s%s" % (Path.home() / ".cargo" / "bin", os.pathsep, os.environ["PATH"])
             else:
                 raise Failure(t("rust_needed", min_rust()))
@@ -810,7 +805,7 @@ def refresh_menus(ui):
 
 def main():
     parser = argparse.ArgumentParser(description="Set up Freekstyle from your own disc dump (see README.md).")
-    parser.add_argument("--uninstall", action="store_true", help="run linux-uninstall.py (removes the game and what this script added)")
+    parser.add_argument("--uninstall", action="store_true", help="run linux-uninstall.py (removes the game; packages and Rust stay)")
     parser.add_argument("-y", "--yes", action="store_true", help="answer yes to every question (installs packages and Rust without asking)")
     where = parser.add_mutually_exclusive_group()
     where.add_argument("--system", action="store_true", help="install to %s at the end without asking" % PREFIX)

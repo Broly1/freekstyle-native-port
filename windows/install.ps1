@@ -12,7 +12,8 @@ in the Start menu and in Settings > Apps > Installed apps, where it can be
 uninstalled). Steps already done are skipped, so it is safe to run again
 after a `git pull`. What it adds (winget packages, Rust, files, the
 installed game) is recorded in %LOCALAPPDATA%\freekstyle\install.json, so
-that windows\uninstall.ps1 can remove exactly that and nothing else.
+that windows\uninstall.ps1 removes exactly the game's files and lists the
+tools and Rust it leaves.
 
 It speaks English, Brazilian Portuguese, Spanish or French, following the
 Windows display language (or LANG, as on Linux). Everything it runs is
@@ -27,7 +28,7 @@ Install to Program Files at the end without asking.
 .PARAMETER Here
 Keep the game in this folder at the end without asking.
 .PARAMETER Uninstall
-Run windows\uninstall.ps1 (removes the game and what this script added).
+Run windows\uninstall.ps1 (removes the game; the winget tools and Rust stay).
 #>
 [CmdletBinding()]
 param(
@@ -246,10 +247,10 @@ $Messages = @{
                        'la copia a Archivos de programa no terminó (solicitud de administrador rechazada, o ver install.log); el juego sigue siendo jugable desde esta carpeta.',
                        "la copie dans Program Files n'a pas abouti (demande d'administrateur refusée, ou voir install.log) ; le jeu reste jouable depuis ce dossier.")
     done = @('Done in {0}', 'Pronto em {0}', 'Listo en {0}', 'Terminé en {0}')
-    done_system = @("Freekstyle is in the Start menu. This folder isn't needed to play any more;`nSettings > Apps > Installed apps > Freekstyle > Uninstall (or windows-uninstall here)`nremoves it and what this script added.",
-                    'O Freekstyle está no menu Iniciar. Esta pasta não é mais necessária para jogar;`nConfigurações > Aplicativos > Aplicativos instalados > Freekstyle > Desinstalar (ou windows-uninstall aqui)`nremove o jogo e o que este script adicionou.',
-                    'Freekstyle está en el menú Inicio. Esta carpeta ya no hace falta para jugar;`nConfiguración > Aplicaciones > Aplicaciones instaladas > Freekstyle > Desinstalar (o windows-uninstall aquí)`nquita el juego y lo que añadió este script.',
-                    "Freekstyle est dans le menu Démarrer. Ce dossier n'est plus nécessaire pour jouer ;`nParamètres > Applications > Applications installées > Freekstyle > Désinstaller (ou windows-uninstall ici)`nsupprime le jeu et ce que ce script a ajouté.")
+    done_system = @("Freekstyle is in the Start menu. This folder isn't needed to play any more;`nSettings > Apps > Installed apps > Freekstyle > Uninstall (or windows-uninstall here)`nremoves it; the tools and Rust it added stay installed, and it shows how to remove those.",
+                    'O Freekstyle está no menu Iniciar. Esta pasta não é mais necessária para jogar;`nConfigurações > Aplicativos > Aplicativos instalados > Freekstyle > Desinstalar (ou windows-uninstall aqui)`nremove o jogo; as ferramentas e a Rust adicionadas continuam instaladas, e ele mostra como removê-las.',
+                    'Freekstyle está en el menú Inicio. Esta carpeta ya no hace falta para jugar;`nConfiguración > Aplicaciones > Aplicaciones instaladas > Freekstyle > Desinstalar (o windows-uninstall aquí)`nquita el juego; las herramientas y Rust añadidas siguen instaladas, y muestra cómo quitarlas.',
+                    "Freekstyle est dans le menu Démarrer. Ce dossier n'est plus nécessaire pour jouer ;`nParamètres > Applications > Applications installées > Freekstyle > Désinstaller (ou windows-uninstall ici)`nsupprime le jeu ; les outils et Rust ajoutés restent installés, et il indique comment les supprimer.")
     done_here = @('Start the game with:   target\release\freekstyle-launcher.exe', 'Inicie o jogo com:   target\release\freekstyle-launcher.exe',
                   'Inicia el juego con:   target\release\freekstyle-launcher.exe', 'Lancez le jeu avec :   target\release\freekstyle-launcher.exe')
     failed_cmd = @('this command failed (exit {0}): {1}', 'este comando falhou (saída {0}): {1}', 'este comando falló (salida {0}): {1}', 'cette commande a échoué (code {0}) : {1}')

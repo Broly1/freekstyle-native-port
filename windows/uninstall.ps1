@@ -1,7 +1,6 @@
 ﻿<#
 .SYNOPSIS
-Remove Freekstyle from Windows, and what windows-install added, without touching
-anything else.
+Remove Freekstyle from Windows, without touching anything else.
 
 .DESCRIPTION
 The Windows counterpart of linux-uninstall.py, run by double-clicking
@@ -15,13 +14,14 @@ about each part:
   - the HD textures made while playing (%APPDATA%\freekstyle\textures;
     they are made again as you play)                             [default: yes]
   - your saves and settings (%APPDATA%\freekstyle)               [default: no]
-  - tools windows-install installed with winget (only those it recorded)
-                                                                 [default: no]
-  - Rust, if windows-install installed it with rustup            [default: no]
+
+The tools windows-install added with winget and Rust stay installed, as
+other software (or a later rebuild) may use them: at the end it lists those
+still there, with the command that removes each.
 
 What windows-install did is read from %LOCALAPPDATA%\freekstyle\install.json.
-Only files and tools listed there or known to belong to the game are
-removed. -DryRun shows what would happen and changes nothing.
+Only files listed there or known to belong to the game are removed.
+-DryRun shows what would happen and changes nothing.
 
 windows-install copies it into the installed game's folder, and Settings > Apps
 > Installed apps > Freekstyle > Uninstall runs that copy, so it also works
@@ -31,7 +31,7 @@ remove the installed game.
 .PARAMETER Yes
 Don't ask: take each part's default (with -All: everything).
 .PARAMETER All
-Default to removing everything, saves, tools and Rust included.
+Default to removing everything, your saves and settings included.
 .PARAMETER DryRun
 Show what would be removed and change nothing.
 #>
@@ -60,7 +60,6 @@ $Shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Freeksty
 $StateFile = Join-Path $env:LOCALAPPDATA 'freekstyle\install.json'
 $Data = Join-Path $env:APPDATA 'freekstyle'
 $Cargo = Join-Path $env:USERPROFILE '.cargo'
-$Rustup = Join-Path $env:USERPROFILE '.rustup'
 
 # ---- Messages ----
 
@@ -101,18 +100,10 @@ $Messages = @{
     hd = @('HD textures made while playing: {0} (made again as you play)', 'Texturas em HD feitas enquanto você jogava: {0} (feitas de novo enquanto joga)',
            'Texturas en HD hechas mientras jugabas: {0} (se hacen de nuevo mientras juegas)', 'Textures HD faites pendant vos parties : {0} (refaites en jouant)')
     data = @('Your saves and settings: {0}', 'Seus saves e configurações: {0}', 'Tus partidas guardadas y ajustes: {0}', 'Vos sauvegardes et réglages : {0}')
-    winget = @('Tools windows-install installed with winget: {0}', 'Ferramentas que o windows-install instalou com o winget: {0}',
-               'Herramientas que instaló windows-install con winget: {0}', 'Outils installés par windows-install avec winget : {0}')
-    winget_note = @('other programs may use them too (the Build Tools and CMake build other software)',
-                    'outros programas podem usá-las também (as Build Tools e o CMake compilam outros programas)',
-                    'otros programas pueden usarlas también (las Build Tools y CMake compilan otro software)',
-                    "d'autres programmes peuvent aussi s'en servir (les Build Tools et CMake compilent d'autres logiciels)")
-    rust = @('Rust, installed by windows-install with rustup: removes .cargo and .rustup in your user folder',
-             'A Rust, instalada pelo windows-install com rustup: remove .cargo e .rustup da sua pasta de usuário',
-             'Rust, instalado por windows-install con rustup: quita .cargo y .rustup de tu carpeta de usuario',
-             'Rust, installé par windows-install avec rustup : supprime .cargo et .rustup de votre dossier utilisateur')
-    rust_tools = @('also removes these programs installed with cargo: {0}', 'também remove estes programas instalados com cargo: {0}',
-                   'también quita estos programas instalados con cargo: {0}', 'supprime aussi ces programmes installés avec cargo : {0}')
+    left = @("Left installed (windows-install added them to build the game; other software may use them too).`nTo remove them yourself:",
+             "Continuam instalados (o windows-install os adicionou para compilar o jogo; outros programas podem usá-los).`nPara removê-los você mesmo:",
+             "Siguen instalados (windows-install los añadió para compilar el juego; otros programas pueden usarlos).`nPara quitarlos tú mismo:",
+             "Restent installés (windows-install les a ajoutés pour compiler le jeu ; d'autres logiciels peuvent s'en servir).`nPour les supprimer vous-même :")
     remove_q = @('Remove?', 'Remover?', '¿Quitar?', 'Supprimer ?')
     removing = @('Removing', 'Removendo', 'Quitando', 'Suppression')
     elevate_failed = @('the installed game was not removed (administrator prompt declined)', 'o jogo instalado não foi removido (pedido de administrador recusado)',
@@ -232,15 +223,6 @@ function Test-WingetInstalled([string]$Id) {
     } finally { $ErrorActionPreference = $saved }
 }
 
-# Programs in .cargo\bin other than rustup's own.
-function Get-CargoTools {
-    $own = 'cargo', 'cargo-clippy', 'cargo-fmt', 'cargo-miri', 'clippy-driver', 'rls', 'rust-analyzer',
-           'rust-gdb', 'rust-gdbgui', 'rust-lldb', 'rustc', 'rustdoc', 'rustfmt', 'rustup'
-    $bin = Join-Path $Cargo 'bin'
-    if (-not (Test-Path -LiteralPath $bin)) { return @() }
-    return @(Get-ChildItem -LiteralPath $bin -File | ForEach-Object BaseName | Where-Object { $own -notcontains $_ } | Sort-Object)
-}
-
 function Show-Run([object[]]$Cmd) {
     Write-Host ('  > ' + ($Cmd -join ' ')) -ForegroundColor DarkGray
     if ($DryRun) { return $true }
@@ -318,26 +300,33 @@ function Remove-Build($State) {
     }
 }
 
-function Remove-Winget($State) {
-    foreach ($id in @($State.winget)) {
-        if (Test-WingetInstalled $id) {
-            [void](Show-Run @('winget', 'uninstall', '--exact', '--id', $id, '--source', 'winget', '--accept-source-agreements'))
-        }
+# What windows-install added that is still installed, with the command
+# that removes each: shown at the end, never removed here.
+function Show-Leftovers($State) {
+    $left = @()
+    foreach ($id in @($State.winget | Where-Object { $_ })) {
+        if (Test-WingetInstalled $id) { $left += , @($id, "winget uninstall --exact --id $id") }
+    }
+    if ($State.rustup -and (Test-Path -LiteralPath (Join-Path $Cargo 'bin\rustup.exe'))) {
+        $left += , @('Rust (rustup, .cargo .rustup)', 'rustup self uninstall')
+    }
+    if (-not $left.Count) { return }
+    Write-Host ''
+    Write-Host (T 'left')
+    foreach ($item in $left) {
+        Write-Host ('  - ' + $item[0])
+        Write-Host ('      ' + $item[1]) -ForegroundColor White
     }
 }
 
-function Remove-Rust {
-    [void](Show-Run @((Join-Path $Cargo 'bin\rustup.exe'), 'self', 'uninstall', '-y'))
-}
-
-# Forget what was removed, so a later run doesn't offer it again.
+# Forget what was removed, so a later run doesn't offer it again. Once the
+# game and its build output are gone the record goes too (the list of what
+# was left installed has just been shown).
 function Save-State($State, [string[]]$Chosen) {
     if ($DryRun -or $State.Count -eq 0) { return }
-    if ($Chosen -contains 'winget') { $State['winget'] = @(@($State.winget) | Where-Object { Test-WingetInstalled $_ }) }
-    if ($Chosen -contains 'rust') { $State['rustup'] = $false }
     if ($Chosen -contains 'build') { $State['files'] = @() }
     if ($Chosen -contains 'system') { $State.Remove('system') }
-    if (-not (@($State.winget | Where-Object { $_ }).Count -or $State.rustup -or $State.system -or @($State.files | Where-Object { $_ }).Count)) {
+    if (-not ($State.system -or @($State.files | Where-Object { $_ }).Count)) {
         Remove-Item -LiteralPath $StateFile -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath (Split-Path $StateFile) -ErrorAction SilentlyContinue   # only if empty
     } else {
@@ -387,17 +376,9 @@ function Main {
         $parts += [pscustomobject]@{ Key = 'data'; Label = (T 'data' (($saves -join ', ').Replace($env:USERPROFILE, '~'))); Default = $false
                                      Size = (Get-Size $saves); Note = $null }
     }
-    $tools = @(@($state.winget) | Where-Object { $_ -and (Test-WingetInstalled $_) })
-    if ($tools.Count) {
-        $parts += [pscustomobject]@{ Key = 'winget'; Label = (T 'winget' ($tools -join ' ')); Default = $false; Size = 0; Note = (T 'winget_note') }
-    }
-    if ($state.rustup -and (Test-Path -LiteralPath (Join-Path $Cargo 'bin\rustup.exe'))) {
-        $extra = Get-CargoTools
-        $note = if ($extra.Count) { T 'rust_tools' ($extra -join ', ') } else { $null }
-        $parts += [pscustomobject]@{ Key = 'rust'; Label = (T 'rust'); Default = $false; Size = (Get-Size @($Cargo, $Rustup)); Note = $note }
-    }
     if ($parts.Count -eq 0) {
         Write-Host (T 'nothing')
+        Show-Leftovers $state
         return 0
     }
 
@@ -420,8 +401,6 @@ function Main {
             'build' { Remove-Build $state }
             'hd' { Remove-Paths (Get-HdPaths) }
             'data' { Remove-Paths (Get-DataPaths $state) }
-            'winget' { Remove-Winget $state }
-            'rust' { Remove-Rust }
         }
     }
     Save-State $state @($chosen | ForEach-Object Key)
@@ -433,6 +412,7 @@ function Main {
     } else {
         Write-Host (T 'done') -ForegroundColor Green
     }
+    Show-Leftovers $state
     return 0
 }
 

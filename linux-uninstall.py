@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Remove Freekstyle and what linux-install.py added, without touching anything
-else on the system.
+"""Remove Freekstyle, without touching anything else on the system.
 
 It lists what it finds and asks about each part:
   - the system install (/opt/freekstyle, its menu entries, icons and the
@@ -12,14 +11,14 @@ It lists what it finds and asks about each part:
   - the HD textures made while playing (they are made again as you play)
                                                                  [default: yes]
   - your saves and settings                                      [default: no]
-  - packages linux-install.py installed (only those it recorded, and only
-    those no other installed software still needs)               [default: no]
-  - Rust, if linux-install.py installed it with rustup           [default: no]
-  - RPM Fusion, if linux-install.py enabled it (Fedora)          [default: no]
+
+Packages, Rust and RPM Fusion that linux-install.py added to build the game
+are left installed, as other software (or a later rebuild) may use them: at
+the end it lists those still there, with the command that removes each.
 
 What linux-install.py did is read from ~/.local/state/freekstyle/install.json.
-Only files and packages listed there or known to belong to the game are
-removed. --dry-run shows what would happen and changes nothing.
+Only files listed there or known to belong to the game are removed.
+--dry-run shows what would happen and changes nothing.
 
 It is copied into /opt/freekstyle by a system install, so it also works
 after the source folder is gone. Only the Python standard library is used.
@@ -84,32 +83,15 @@ MESSAGES = {
     "hd": ("HD textures made while playing: %s (made again as you play)", "Texturas em HD feitas enquanto você jogava: %s (feitas de novo enquanto joga)",
            "Texturas en HD hechas mientras jugabas: %s (se hacen de nuevo mientras juegas)", "Textures HD faites pendant vos parties : %s (refaites en jouant)"),
     "data": ("Your saves and settings: %s", "Seus saves e configurações: %s", "Tus partidas guardadas y ajustes: %s", "Vos sauvegardes et réglages : %s"),
-    "packages": ("Packages linux-install.py installed: %s", "Pacotes que o linux-install.py instalou: %s",
-                 "Paquetes que instaló linux-install.py: %s", "Paquets installés par linux-install.py : %s"),
-    "packages_note": ("only those no other installed software needs are removed; the rest stay",
-                      "só são removidos os que nenhum outro programa instalado usa; o resto fica",
-                      "solo se quitan los que ningún otro programa instalado necesita; el resto se queda",
-                      "seuls ceux dont aucun autre logiciel installé n'a besoin sont supprimés ; les autres restent"),
-    "rust": ("Rust, installed by linux-install.py with rustup: removes ~/.cargo and ~/.rustup",
-             "A Rust, instalada pelo linux-install.py com rustup: remove ~/.cargo e ~/.rustup",
-             "Rust, instalado por linux-install.py con rustup: quita ~/.cargo y ~/.rustup",
-             "Rust, installé par linux-install.py avec rustup : supprime ~/.cargo et ~/.rustup"),
-    "rust_tools": ("also removes these programs installed with cargo: %s", "também remove estes programas instalados com cargo: %s",
-                   "también quita estos programas instalados con cargo: %s", "supprime aussi ces programmes installés avec cargo : %s"),
-    "rpmfusion": ("RPM Fusion, enabled by linux-install.py for the full ffmpeg (ffmpeg-free comes back)",
-                  "O RPM Fusion, ativado pelo linux-install.py para o ffmpeg completo (o ffmpeg-free volta)",
-                  "RPM Fusion, activado por linux-install.py para el ffmpeg completo (vuelve ffmpeg-free)",
-                  "RPM Fusion, activé par linux-install.py pour le ffmpeg complet (ffmpeg-free revient)"),
+    "left": ("Left installed (linux-install.py added them to build the game; other software may use them too).\nTo remove them yourself:",
+             "Continuam instalados (o linux-install.py os adicionou para compilar o jogo; outros programas podem usá-los).\nPara removê-los você mesmo:",
+             "Siguen instalados (linux-install.py los añadió para compilar el juego; otros programas pueden usarlos).\nPara quitarlos tú mismo:",
+             "Restent installés (linux-install.py les a ajoutés pour compiler le jeu ; d'autres logiciels peuvent s'en servir).\nPour les supprimer vous-même :"),
+    "left_pkgs": ("packages", "pacotes", "paquetes", "paquets"),
+    "left_rpmfusion": ("RPM Fusion (for the full ffmpeg)", "RPM Fusion (para o ffmpeg completo)",
+                       "RPM Fusion (para el ffmpeg completo)", "RPM Fusion (pour le ffmpeg complet)"),
     "remove_q": ("Remove?", "Remover?", "¿Quitar?", "Supprimer ?"),
     "removing": ("Removing", "Removendo", "Quitando", "Suppression"),
-    "kept_used": ("kept, other software needs it: %s", "mantido, outro programa usa: %s", "se queda, otro programa lo necesita: %s",
-                  "conservé, un autre logiciel en a besoin : %s"),
-    "not_installed": ("already gone: %s", "já não está instalado: %s", "ya no está instalado: %s", "déjà absent : %s"),
-    "kept_drivers": ("kept, graphics drivers other games and apps use too: %s", "mantido, drivers de vídeo que outros jogos e apps também usam: %s",
-                     "se queda, drivers gráficos que usan también otros juegos y apps: %s",
-                     "conservé, pilotes graphiques utilisés aussi par d'autres jeux et applis : %s"),
-    "rpmfusion_kept": ("RPM Fusion kept: other packages from it are installed (%s)", "RPM Fusion mantido: há outros pacotes dele instalados (%s)",
-                       "RPM Fusion se queda: hay otros paquetes suyos instalados (%s)", "RPM Fusion conservé : d'autres paquets en viennent (%s)"),
     "dry": ("dry run: nothing was changed.", "simulação: nada foi alterado.", "simulación: no se cambió nada.", "simulation : rien n'a été modifié."),
     "done": ("Done. Freekstyle has been removed.", "Pronto. O Freekstyle foi removido.", "Listo. Freekstyle se ha quitado.", "Terminé. Freekstyle a été supprimé."),
     "done_partial": ("Done. Kept: %s", "Pronto. Mantido: %s", "Listo. Se conserva: %s", "Terminé. Conservé : %s"),
@@ -188,7 +170,7 @@ def located_in(path, folder):
     where = Path(os.path.realpath(Path(path).parent)) / Path(path).name
     return Path(os.path.realpath(folder)) in where.parents
 
-# ---- Packages ----
+# ---- Left installed ----
 
 def pkg_installed(family, pkg):
     if family == "arch":
@@ -197,59 +179,30 @@ def pkg_installed(family, pkg):
         return "install ok installed" in output(["dpkg-query", "-W", "-f=${Status}", pkg])
     return quiet(["rpm", "-q", pkg])
 
-def removable(family, pkgs):
-    """The package manager's own dry run: removing `pkgs` breaks nothing
-    else installed."""
-    if family == "arch":
-        return quiet(["pacman", "-Rs", "--print", "--noconfirm"] + pkgs)
-    if family == "debian":
-        # dpkg refuses to run, even a dry run, without ldconfig and
-        # start-stop-daemon in PATH, and Debian leaves the sbin folders
-        # out of an ordinary user's PATH.
-        path = os.environ.get("PATH", "") + ":/usr/local/sbin:/usr/sbin:/sbin"
-        return quiet(["dpkg", "--remove", "--dry-run"] + pkgs, env=dict(os.environ, PATH=path))
-    if family == "fedora":
-        # dnf's own dry run, not rpm -e --test: dnf also takes the
-        # dependencies that came with these packages and need them back
-        # (cmake-data needs cmake), which rpm counts as users of them. Safe
-        # when nothing outside that would go ("dependent packages").
-        out = output(["dnf", "remove", "--assumeno"] + pkgs, env=dict(os.environ, LC_ALL="C"), stderr=True)
-        return "Transaction Summary" in out and "Removing dependent packages" not in out
-    return quiet(["rpm", "-e", "--test"] + pkgs)
-
-def safe_set(family, pkgs):
-    """The largest set found that can go together: a package is added only
-    if the dry run still passes with it. Two passes, for packages among
-    them that need each other."""
-    safe = []
-    for _ in range(2):
-        for p in pkgs:
-            if p not in safe and removable(family, safe + [p]):
-                safe.append(p)
-    return safe
-
 def is_driver(pkg):
-    """A Vulkan/GPU driver. Nothing depends on a driver, so the dry run
-    always passes, yet games and desktops use it: never removed."""
+    """A Vulkan/GPU driver: games and desktops use it, so it is never
+    suggested for removal."""
     return pkg.startswith(("vulkan-", "libvulkan_", "mesa-vulkan", "nvidia")) and pkg != "vulkan-icd-loader"
 
-def remove_command(family, pkgs):
-    """Removal that also takes the dependencies these packages pulled in
-    and nothing else needs (pacman -s, zypper --clean-deps; dnf does it by
-    default; apt is handled by autoremove_new)."""
-    if family == "arch":
-        return ["pacman", "-Rs", "--noconfirm"] + pkgs
-    if family == "debian":
-        return ["apt-get", "remove", "-y"] + pkgs
-    if family == "fedora":
-        return ["dnf", "remove", "-y"] + pkgs
-    return ["zypper", "--non-interactive", "remove", "--clean-deps"] + pkgs
+def remove_hint(family, pkgs):
+    return {"arch": "sudo pacman -Rs %s",
+            "debian": "sudo apt remove %s && sudo apt autoremove",
+            "fedora": "sudo dnf remove %s"}.get(family, "sudo zypper remove --clean-deps %s") % " ".join(pkgs)
 
-def autoremovable():
-    """Packages apt would autoremove now (installed as dependencies of
-    something since removed)."""
-    out = output(["apt-get", "-s", "autoremove"])
-    return {line.split()[1] for line in out.splitlines() if line.startswith("Remv ")}
+def leftovers(state):
+    """(what, command) for each thing linux-install.py added that is still
+    installed."""
+    family = state.get("family")
+    out = []
+    pkgs = [p for p in state.get("packages", []) if family and not is_driver(p) and pkg_installed(family, p)]
+    if pkgs:
+        out.append((t("left_pkgs") + ": " + " ".join(pkgs), remove_hint(family, pkgs)))
+    if state.get("rustup") and (HOME / ".cargo" / "bin" / "rustup").exists():
+        out.append(("Rust (rustup, ~/.cargo ~/.rustup)", "rustup self uninstall"))
+    if state.get("rpmfusion") and quiet(["rpm", "-q", "rpmfusion-free-release"]):
+        out.append((t("left_rpmfusion"),
+                    "sudo dnf swap ffmpeg ffmpeg-free --allowerasing && sudo dnf remove rpmfusion-free-release"))
+    return out
 
 # ---- The parts ----
 
@@ -312,18 +265,10 @@ def data_paths(state):
         paths.append(source / "freekstyle.toml")
     return [p for p in paths if p.exists()]
 
-def cargo_tools():
-    """Programs in ~/.cargo/bin other than rustup's own."""
-    rustup_own = {"cargo", "cargo-clippy", "cargo-fmt", "cargo-miri", "clippy-driver", "rls", "rust-analyzer",
-                  "rust-gdb", "rust-gdbgui", "rust-lldb", "rustc", "rustdoc", "rustfmt", "rustup"}
-    folder = HOME / ".cargo" / "bin"
-    return sorted(p.name for p in folder.iterdir() if p.name not in rustup_own) if folder.is_dir() else []
-
 class Uninstaller:
     def __init__(self, args):
         self.args = args
         self.state = load_state()
-        self.family = self.state.get("family")
 
     def run(self, cmd, sudo=False):
         cmd = [str(c) for c in cmd]
@@ -367,18 +312,6 @@ class Uninstaller:
         data = data_paths(self.state)
         if data:
             parts.append(Part("data", t("data", ", ".join(str(p).replace(str(HOME), "~") for p in data)), False, size(data)))
-        pkgs = [p for p in self.state.get("packages", []) if self.family and not is_driver(p) and pkg_installed(self.family, p)]
-        # Offered only if some can go now: the rest are needed by other
-        # software (e.g. the Vulkan loader by the kept Vulkan driver), and
-        # nothing frees them unless something is removed first.
-        if pkgs and safe_set(self.family, pkgs):
-            parts.append(Part("packages", t("packages", " ".join(pkgs)), False, note=t("packages_note")))
-        if self.state.get("rustup") and (HOME / ".cargo" / "bin" / "rustup").exists():
-            tools = cargo_tools()
-            parts.append(Part("rust", t("rust"), False, size([HOME / ".cargo", HOME / ".rustup"]),
-                              note=t("rust_tools", ", ".join(tools)) if tools else None))
-        if self.state.get("rpmfusion") and quiet(["rpm", "-q", "rpmfusion-free-release"]):
-            parts.append(Part("rpmfusion", t("rpmfusion"), False))
         return parts
 
     def main(self):
@@ -388,6 +321,7 @@ class Uninstaller:
         parts = self.parts()
         if not parts:
             print(t("nothing"))
+            self.show_leftovers()
             return 0
         chosen, kept = [], []
         for part in parts:
@@ -408,7 +342,18 @@ class Uninstaller:
             print(t("done_partial", "; ".join(p.label.split(":")[0].split(" (")[0] for p in kept)))
         else:
             print(paint("1;32", t("done")))
+        self.show_leftovers()
         return 0
+
+    def show_leftovers(self):
+        left = leftovers(self.state)
+        if not left:
+            return
+        print()
+        print(t("left"))
+        for what, command in left:
+            print("  - " + what)
+            print("      " + paint("1", command))
 
     def remove_system(self):
         paths = system_paths()
@@ -456,75 +401,18 @@ class Uninstaller:
             else:
                 p.unlink()
 
-    def remove_packages(self):
-        drivers = [p for p in self.state.get("packages", []) if is_driver(p) and pkg_installed(self.family, p)]
-        if drivers:
-            print("  " + t("kept_drivers", " ".join(drivers)))
-        # Rounds: removing some packages (and the dependencies they pulled
-        # in) can free others, e.g. the Vulkan loader once ffmpeg's
-        # libplacebo is gone. A dry run removes nothing, so it shows one.
-        safe = []
-        for _ in range(1 if self.args.dry_run else 4):
-            pkgs = [p for p in self.state.get("packages", []) if not is_driver(p) and pkg_installed(self.family, p)]
-            safe = safe_set(self.family, pkgs)
-            if not safe:
-                break
-            orphans = autoremovable() if self.family == "debian" else set()
-            self.run(remove_command(self.family, safe), sudo=True)
-            if self.family == "debian":
-                # Only dependencies orphaned just now; older ones stay.
-                new = sorted(autoremovable() - orphans)
-                if new:
-                    self.run(["apt-get", "remove", "-y"] + new, sudo=True)
-        # (A dry run removed nothing: what it would have removed isn't kept.)
-        used = [p for p in self.state.get("packages", []) if not is_driver(p) and pkg_installed(self.family, p)
-                and not (self.args.dry_run and p in safe)]
-        if used:
-            print("  " + t("kept_used", " ".join(used)))
-
-    def remove_rust(self):
-        self.run([HOME / ".cargo" / "bin" / "rustup", "self", "uninstall", "-y"])
-        # Startup files rustup created, now empty again: its uninstall
-        # takes its line out but leaves the file. Kept if anything else
-        # was written to them since.
-        for name in self.state.get("rustup_created", []):
-            f = HOME / name
-            try:
-                if not self.args.dry_run and f.is_file() and not f.is_symlink() and not f.read_text().strip():
-                    print(paint("2", "  rm " + "~/" + name))
-                    f.unlink()
-            except OSError:
-                pass
-
-    def remove_rpmfusion(self):
-        if quiet(["rpm", "-q", "ffmpeg"]) and not quiet(["rpm", "-q", "ffmpeg-free"]):
-            self.run(["dnf", "swap", "-y", "ffmpeg", "ffmpeg-free", "--allowerasing"], sudo=True)
-        # Other packages from RPM Fusion would stop getting updates.
-        others = [line.split()[0] for line in output(["rpm", "-qa", "--qf", "%{NAME} %{VENDOR}\\n"]).splitlines()
-                  if "RPM Fusion" in line and not line.startswith("rpmfusion-")]
-        if others and not self.args.dry_run:
-            print("  " + t("rpmfusion_kept", " ".join(others[:8])))
-            return
-        self.run(["dnf", "remove", "-y", "rpmfusion-free-release"], sudo=True)
-
     def save_state(self, chosen):
-        """Forget what was removed, so a later run doesn't offer it again."""
+        """Forget what was removed, so a later run doesn't offer it again.
+        Once the game and its build output are gone the record goes too
+        (the list of what was left installed has just been shown)."""
         if self.args.dry_run or not self.state:
             return
         keys = {p.key for p in chosen}
-        if "packages" in keys:
-            self.state["packages"] = [p for p in self.state.get("packages", []) if pkg_installed(self.family, p)]
-        if "rust" in keys:
-            self.state["rustup"] = False
-            self.state.pop("rustup_created", None)
-        if "rpmfusion" in keys and not quiet(["rpm", "-q", "rpmfusion-free-release"]):
-            self.state["rpmfusion"] = False
         if "build" in keys:
             self.state["files"] = []
         if "system" in keys:
             self.state.pop("system", None)
-        if not (self.state.get("packages") or self.state.get("rustup") or self.state.get("rpmfusion")
-                or self.state.get("system") or self.state.get("files")):
+        if not (self.state.get("system") or self.state.get("files")):
             STATE.unlink(missing_ok=True)
             try:
                 STATE.parent.rmdir()
@@ -536,7 +424,7 @@ class Uninstaller:
 def main():
     parser = argparse.ArgumentParser(description="Remove Freekstyle and what linux-install.py added (see the top of this file).")
     parser.add_argument("-y", "--yes", action="store_true", help="don't ask: take each part's default (with --all: everything)")
-    parser.add_argument("--all", action="store_true", help="default to removing everything, saves, packages and Rust included")
+    parser.add_argument("--all", action="store_true", help="default to removing everything, your saves and settings included")
     parser.add_argument("--dry-run", action="store_true", help="show what would be removed and change nothing")
     args = parser.parse_args()
     if os.geteuid() == 0:
