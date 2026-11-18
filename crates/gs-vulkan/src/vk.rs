@@ -54,9 +54,26 @@ pub struct Vk {
     pub allocator: ManuallyDrop<Allocator>,
     pub swapchain: Swapchain,
     pub device_name: String,
+    pub discrete_gpu: bool,
+    pub present_mode: vk::PresentModeKHR,
     /// Anisotropic filtering, when the GPU has it, and its limit.
     pub anisotropy: bool,
     pub max_anisotropy: f32,
+}
+
+fn select_present_mode(modes: &[vk::PresentModeKHR], vsync: bool) -> vk::PresentModeKHR {
+    if vsync {
+        return vk::PresentModeKHR::FIFO;
+    }
+    // Prefer non-blocking modes (MAILBOX, or IMMEDIATE when MAILBOX is absent
+    // such as Intel on Windows, where DWM still composites windowed frames).
+    // The EE thread already paces the game to 59.94 Hz.
+    for candidate in [vk::PresentModeKHR::MAILBOX, vk::PresentModeKHR::IMMEDIATE, vk::PresentModeKHR::FIFO_RELAXED] {
+        if modes.contains(&candidate) {
+            return candidate;
+        }
+    }
+    vk::PresentModeKHR::FIFO
 }
 
 impl Vk {
@@ -97,7 +114,8 @@ impl Vk {
                 }
             }
         }
-        let (_, physical, queue_family, device_name) = best.ok_or("no Vulkan 1.3 GPU that can present to this window")?;
+        let (score, physical, queue_family, device_name) = best.ok_or("no Vulkan 1.3 GPU that can present to this window")?;
+        let discrete_gpu = score == 2;
 
         let mut v13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true).synchronization2(true);
         let prio = [1.0];
@@ -144,26 +162,21 @@ impl Vk {
             allocator: ManuallyDrop::new(allocator),
             swapchain,
             device_name,
+            discrete_gpu,
+            present_mode: vk::PresentModeKHR::FIFO,
             anisotropy,
             max_anisotropy,
         };
-        vk.recreate_swapchain(size)?;
+        let _ = vk.recreate_swapchain(size)?;
         Ok(vk)
     }
 
-    pub fn recreate_swapchain(&mut self, size: (u32, u32)) -> Result<()> {
+    pub fn recreate_swapchain(&mut self, size: (u32, u32)) -> Result<bool> {
+        if size.0 == 0 || size.1 == 0 {
+            return Ok(false);
+        }
         unsafe {
-            let _ = self.device.device_wait_idle();
             let caps = self.surface_loader.get_physical_device_surface_capabilities(self.physical, self.surface).map_err(err("surface caps"))?;
-            let formats = self.surface_loader.get_physical_device_surface_formats(self.physical, self.surface).map_err(err("surface formats"))?;
-            let modes = self.surface_loader.get_physical_device_surface_present_modes(self.physical, self.surface).map_err(err("present modes"))?;
-            // UNORM keeps the PS2's already gamma-encoded output untouched.
-            let format = formats
-                .iter()
-                .find(|f| f.format == vk::Format::B8G8R8A8_UNORM || f.format == vk::Format::R8G8B8A8_UNORM)
-                .copied()
-                .unwrap_or(formats[0]);
-            let mode = if modes.contains(&vk::PresentModeKHR::MAILBOX) { vk::PresentModeKHR::MAILBOX } else { vk::PresentModeKHR::FIFO };
             let extent = if caps.current_extent.width != u32::MAX {
                 caps.current_extent
             } else {
@@ -172,6 +185,20 @@ impl Vk {
                     height: size.1.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
                 }
             };
+            if extent.width == 0 || extent.height == 0 {
+                return Ok(false);
+            }
+            let _ = self.device.device_wait_idle();
+            let formats = self.surface_loader.get_physical_device_surface_formats(self.physical, self.surface).map_err(err("surface formats"))?;
+            let modes = self.surface_loader.get_physical_device_surface_present_modes(self.physical, self.surface).map_err(err("present modes"))?;
+            // UNORM keeps the PS2's already gamma-encoded output untouched.
+            let format = formats
+                .iter()
+                .find(|f| f.format == vk::Format::B8G8R8A8_UNORM || f.format == vk::Format::R8G8B8A8_UNORM)
+                .copied()
+                .unwrap_or(formats[0]);
+            let vsync = std::env::var_os("FREEK_VSYNC").is_some_and(|v| v != "0");
+            let mode = select_present_mode(&modes, vsync);
             let count = (caps.min_image_count + 1).min(if caps.max_image_count == 0 { u32::MAX } else { caps.max_image_count });
             let old = self.swapchain.swapchain;
             let info = vk::SwapchainCreateInfoKHR::default()
@@ -196,8 +223,9 @@ impl Vk {
             self.swapchain.images = self.swapchain.loader.get_swapchain_images(sc).map_err(err("swapchain images"))?;
             self.swapchain.extent = extent;
             self.swapchain.format = format.format;
+            self.present_mode = mode;
         }
-        Ok(())
+        Ok(true)
     }
 
     pub fn create_image(&mut self, w: u32, h: u32, format: vk::Format, usage: vk::ImageUsageFlags, name: &str) -> Result<Image> {
@@ -287,28 +315,95 @@ pub fn layers(aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceLayers {
     vk::ImageSubresourceLayers { aspect_mask: aspect, mip_level: 0, base_array_layer: 0, layer_count: 1 }
 }
 
-/// Full execution and memory barrier. The renderer's passes are simple
-/// enough that finer-grained barriers are not worth their complexity yet.
-pub fn barrier(dev: &ash::Device, cmd: vk::CommandBuffer) {
+/// Scoped barrier between consecutive transfer writes/reads (e.g. clear then blit).
+pub fn transfer_barrier(dev: &ash::Device, cmd: vk::CommandBuffer) {
     let mb = [vk::MemoryBarrier2::default()
-        .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-        .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
-        .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-        .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)];
+        .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+        .dst_access_mask(vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::TRANSFER_WRITE)];
     unsafe { dev.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&mb)) };
 }
 
-/// Layout transition with a full barrier.
+/// Scoped barrier after ending a render pass so subsequent attachment or
+/// shader passes see color/depth writes without stalling transfers or vertices.
+pub fn attachment_barrier(dev: &ash::Device, cmd: vk::CommandBuffer) {
+    let mb = [vk::MemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS)
+        .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+        .dst_stage_mask(
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+        )
+        .dst_access_mask(
+            vk::AccessFlags2::COLOR_ATTACHMENT_READ
+                | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+                | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        )];
+    unsafe { dev.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&mb)) };
+}
+
+/// Barrier from transfer write to host read (e.g. screenshot readback).
+pub fn transfer_to_host_barrier(dev: &ash::Device, cmd: vk::CommandBuffer) {
+    let mb = [vk::MemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+        .dst_access_mask(vk::AccessFlags2::HOST_READ)];
+    unsafe { dev.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&mb)) };
+}
+
+fn layout_sync(layout: vk::ImageLayout, is_dst: bool) -> (vk::PipelineStageFlags2, vk::AccessFlags2) {
+    match layout {
+        vk::ImageLayout::UNDEFINED => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::NONE),
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL => (vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_WRITE),
+        vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (
+            vk::PipelineStageFlags2::TRANSFER,
+            if is_dst { vk::AccessFlags2::TRANSFER_READ } else { vk::AccessFlags2::NONE },
+        ),
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
+            vk::PipelineStageFlags2::FRAGMENT_SHADER,
+            if is_dst { vk::AccessFlags2::SHADER_READ } else { vk::AccessFlags2::NONE },
+        ),
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            if is_dst {
+                vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+            } else {
+                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+            },
+        ),
+        vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL | vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => (
+            vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+            if is_dst {
+                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
+            } else {
+                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
+            },
+        ),
+        vk::ImageLayout::PRESENT_SRC_KHR => (vk::PipelineStageFlags2::BOTTOM_OF_PIPE, vk::AccessFlags2::NONE),
+        _ => (
+            vk::PipelineStageFlags2::ALL_COMMANDS,
+            if is_dst { vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE } else { vk::AccessFlags2::MEMORY_WRITE },
+        ),
+    }
+}
+
+/// Layout transition with scoped pipeline stage and access masks.
 pub fn transition(dev: &ash::Device, cmd: vk::CommandBuffer, image: vk::Image, aspect: vk::ImageAspectFlags, from: vk::ImageLayout, to: vk::ImageLayout) {
     transition_levels(dev, cmd, image, aspect, 1, from, to);
 }
 
 pub fn transition_levels(dev: &ash::Device, cmd: vk::CommandBuffer, image: vk::Image, aspect: vk::ImageAspectFlags, levels: u32, from: vk::ImageLayout, to: vk::ImageLayout) {
+    let (src_stage, src_access) = layout_sync(from, false);
+    let (dst_stage, dst_access) = layout_sync(to, true);
     let ib = [vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-        .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
-        .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-        .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+        .src_stage_mask(src_stage)
+        .src_access_mask(src_access)
+        .dst_stage_mask(dst_stage)
+        .dst_access_mask(dst_access)
         .old_layout(from)
         .new_layout(to)
         .image(image)

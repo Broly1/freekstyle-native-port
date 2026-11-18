@@ -46,9 +46,9 @@ mod profile;
 #[allow(clippy::all)]
 mod gen;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
 use std::{env, fs, process, thread};
 
@@ -163,8 +163,42 @@ fn options() -> Options {
 /// Recompiled code uses the host stack for guest calls; give it room.
 const STACK_SIZE: usize = 512 << 20;
 
+/// Request 1 ms system timer resolution on Windows so short sleeps in the EE
+/// idle loop and IOP audio ring do not stretch to the 15.6 ms default tick.
+#[cfg(target_os = "windows")]
+struct WinTimerPeriod;
+
+#[cfg(target_os = "windows")]
+impl WinTimerPeriod {
+    fn enable() -> Self {
+        #[link(name = "winmm")]
+        extern "system" {
+            fn timeBeginPeriod(period: u32) -> u32;
+        }
+        unsafe {
+            timeBeginPeriod(1);
+        }
+        Self
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WinTimerPeriod {
+    fn drop(&mut self) {
+        #[link(name = "winmm")]
+        extern "system" {
+            fn timeEndPeriod(period: u32) -> u32;
+        }
+        unsafe {
+            timeEndPeriod(1);
+        }
+    }
+}
+
 fn main() {
     freek_config::crash::install("Freekstyle");
+    #[cfg(target_os = "windows")]
+    let _win_timer = WinTimerPeriod::enable();
     let opts = options();
     ee_runtime::hle::WIDESCREEN.store(opts.widescreen, std::sync::atomic::Ordering::Relaxed);
     let path = opts.elf.clone();
@@ -210,7 +244,9 @@ fn main() {
                 c.mem.set_vu_programs(ee_runtime::vumicro::Programs(&gen::vu_programs::VU_PROGRAMS));
             }
             let entry = ee_runtime::load_elf(&mut c, &bytes).expect("load ELF");
-            eprintln!("[boot] {} functions, entry {entry:#x}", gen::FUNCS.len());
+            if !ee_runtime::quiet() {
+                eprintln!("[boot] {} functions, entry {entry:#x}", gen::FUNCS.len());
+            }
             ee_runtime::kernel::run_thread_body(&mut c, entry);
             eprintln!("[boot] main thread returned");
             // Other guest threads may still hold references to `c`.
@@ -241,6 +277,7 @@ fn main() {
     let mut app = App {
         opts,
         rx: gs_rx,
+        pending: VecDeque::new(),
         window: None,
         renderer: None,
         last_title: Instant::now(),
@@ -252,6 +289,7 @@ fn main() {
         last_buttons: 0,
         traces: 0,
         recording: false,
+        trace_button: env::var("FREEK_TRACE_BUTTON").ok().and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok()),
         key_map,
         pad_map,
     };
@@ -267,6 +305,7 @@ fn main() {
 struct App {
     opts: Options,
     rx: Receiver<gs::Msg>,
+    pending: VecDeque<gs::Msg>,
     window: Option<Window>,
     renderer: Option<gs_vulkan::Renderer>,
     last_title: Instant,
@@ -281,6 +320,7 @@ struct App {
     traces: u32,
     /// Recording textures for the launcher to upscale (`hdbuild`).
     recording: bool,
+    trace_button: Option<u16>,
     /// Bound keys (winit KeyCode names) and gamepad buttons, with the PS2
     /// buttons each one presses.
     key_map: HashMap<String, u16>,
@@ -357,7 +397,7 @@ impl App {
         // pressed, trace a frame and save its picture (effects too quick to
         // catch by hand), up to ten times.
         let buttons = players[0].map_or(0, |i| i.buttons);
-        if let Some(mask) = std::env::var("FREEK_TRACE_BUTTON").ok().and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok()) {
+        if let Some(mask) = self.trace_button {
             if buttons & mask != 0 && self.last_buttons & mask == 0 && self.traces < 10 {
                 if let Some(r) = &mut self.renderer {
                     self.traces += 1;
@@ -472,23 +512,58 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.update_input();
         let Some(r) = &mut self.renderer else { return };
-        // Run the GS until it presents a frame, bounded so the window stays
-        // responsive when the game is busy loading.
-        let deadline = Instant::now() + Duration::from_millis(20);
+        let is_frame = |m: &gs::Msg| matches!(m, gs::Msg::Vsync(_) | gs::Msg::Movie(Some(_)));
+        // Drain anything already queued so stale frames skip swapchain
+        // presentation and the display never falls seconds behind input.
         loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match self.rx.recv_timeout(left) {
-                Ok(msg) => {
-                    // The event loop polls, so the next frame continues here.
-                    if r.handle(msg) {
-                        break;
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => break,
-                Err(RecvTimeoutError::Disconnected) => {
+            match self.rx.try_recv() {
+                Ok(msg) => self.pending.push_back(msg),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
                     el.exit();
                     return;
                 }
+            }
+        }
+        if !self.pending.iter().any(is_frame) {
+            // Nothing ready to present yet: wait up to 20 ms, bounded so the
+            // window stays responsive when the game is busy loading.
+            let deadline = Instant::now() + Duration::from_millis(20);
+            loop {
+                let left = deadline.saturating_duration_since(Instant::now());
+                match self.rx.recv_timeout(left) {
+                    Ok(msg) => {
+                        let done = is_frame(&msg);
+                        self.pending.push_back(msg);
+                        if done {
+                            break;
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => break,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        el.exit();
+                        return;
+                    }
+                }
+            }
+            while let Ok(msg) = self.rx.try_recv() {
+                self.pending.push_back(msg);
+            }
+        }
+        // Bound catch-up per event-loop turn so Windows always gets control
+        // back to pump window messages and never marks the window Not Responding.
+        let budget = Instant::now() + Duration::from_millis(25);
+        while let Some(msg) = self.pending.pop_front() {
+            let frame_msg = is_frame(&msg);
+            let within_budget = Instant::now() < budget;
+            if frame_msg && within_budget {
+                while let Ok(newer) = self.rx.try_recv() {
+                    self.pending.push_back(newer);
+                }
+            }
+            let has_newer = frame_msg && within_budget && self.pending.iter().any(is_frame);
+            if r.handle_frame(msg, !has_newer) {
+                break;
             }
         }
         if self.last_title.elapsed() >= Duration::from_secs(1) {
