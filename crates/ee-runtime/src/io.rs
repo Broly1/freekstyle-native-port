@@ -163,7 +163,7 @@ impl Io {
     }
 
     pub fn warn_once(&mut self, msg: &str) {
-        if self.warned.insert(msg.to_string()) {
+        if self.warned.insert(msg.to_string()) && !crate::quiet() {
             eprintln!("[warn] {msg}");
         }
     }
@@ -185,8 +185,14 @@ impl Io {
         if self.tick_skip & 15 != 0 {
             return;
         }
+        self.tick_now();
+    }
+
+    /// Immediate clock check for kernel idle loops, which already sleep
+    /// between polls and cannot afford skipping 15 wakeups.
+    pub(crate) fn tick_now(&mut self) {
         let n = (self.start.elapsed().as_secs_f64() * VBLANK_HZ) as u64;
-        if n > self.vblanks + 6 && self.vblanks > 0 {
+        if n > self.vblanks + 6 && self.vblanks > 0 && !crate::quiet() {
             eprintln!(
                 "[stall] {} vblanks ({} ms) without a vblank check, at vblank {}; last guest fn {:#x}",
                 n - self.vblanks,

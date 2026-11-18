@@ -605,7 +605,9 @@ pub fn movie_play(c: &mut Cpu) {
         }
         (None, _) => {
             if let Some(path) = &opened {
-                eprintln!("[movie] no conversion of {path} in {} (see flm2mkv); skipped", dir.display());
+                if !crate::quiet() {
+                    eprintln!("[movie] no conversion of {path} in {} (see flm2mkv); skipped", dir.display());
+                }
             }
         }
         _ => {}

@@ -66,3 +66,16 @@ pub fn stats_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("FREEK_HEARTBEAT").is_some())
 }
+
+/// FREEK_QUIET is set (and not "0"): suppress routine startup and stub noise
+/// so targeted logs like FREEK_PAD_LOG are easy to read.
+pub fn quiet() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FREEK_QUIET").is_some_and(|v| v != "0"))
+}
+
+/// FREEK_PAD_LOG is set (and not "0"): log controller states and rumble.
+pub fn pad_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FREEK_PAD_LOG").is_some_and(|v| v != "0"))
+}

@@ -86,20 +86,68 @@ struct Port {
     buffer: u32,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct LoggedPad {
+    buttons: u16,
+    l2: u8,
+    r2: u8,
+    sticks: [u8; 4],
+    mode: u8,
+    connected: bool,
+}
+
 #[derive(Default)]
 pub struct Pad {
     ports: Vec<Port>,
     counter: u32,
     /// Analog mode per port (SetMainMode).
     analog: [bool; 2],
-    /// Buttons at the last FREEK_PAD_LOG report, per player.
-    logged: [u16; 2],
+    /// Last FREEK_PAD_LOG state reported, per player.
+    logged: [LoggedPad; 2],
     /// SetActAlign per port: which motor each byte of SetActDirect drives
     /// (0 small, 1 large, 0xff none).
     align: [[u8; 6]; 2],
     /// FREEK_PAD_SCRIPT taps: (first frame, last frame, player, buttons),
     /// for automated testing.
     script: Option<Vec<(u32, u32, usize, u16)>>,
+}
+
+/// Format pressed PS2 buttons as a human-readable list for FREEK_PAD_LOG.
+fn format_buttons(buttons: u16) -> String {
+    use button::*;
+    const NAMES: [(u16, &str); 16] = [
+        (CROSS, "CROSS"),
+        (CIRCLE, "CIRCLE"),
+        (SQUARE, "SQUARE"),
+        (TRIANGLE, "TRIANGLE"),
+        (L1, "L1"),
+        (R1, "R1"),
+        (L2, "L2"),
+        (R2, "R2"),
+        (SELECT, "SELECT"),
+        (START, "START"),
+        (L3, "L3"),
+        (R3, "R3"),
+        (UP, "UP"),
+        (DOWN, "DOWN"),
+        (LEFT, "LEFT"),
+        (RIGHT, "RIGHT"),
+    ];
+    let mut parts = Vec::new();
+    for &(bit, name) in &NAMES {
+        if buttons & bit != 0 {
+            parts.push(name);
+        }
+    }
+    if parts.is_empty() {
+        "none".into()
+    } else {
+        parts.join("+")
+    }
+}
+
+fn analog_changed(prev: u8, cur: u8, threshold: u8) -> bool {
+    prev != cur && (cur == 0 || prev == 0 || cur == 255 || prev == 255 || prev.abs_diff(cur) >= threshold)
 }
 
 /// Parse "600:a,900:start+up,1200-1800:a,2000:p2+a" into (first, last
@@ -159,13 +207,21 @@ impl Pad {
         match word(0) {
             0x01 => {
                 let p = Port { port: word(4), slot: word(8), buffer: word(16) };
+                if crate::pad_log() {
+                    eprintln!("[pad] rpc Open port={} slot={} buffer={:#x}", p.port, p.slot, p.buffer);
+                }
                 self.ports.retain(|q| (q.port, q.slot) != (p.port, p.slot));
                 self.ports.push(p);
                 put(12, 1);
             }
             0x06 => {
                 // SetMainMode(port, slot, mode, lock): 1 = analog.
-                self.analog[(word(4) as usize).min(1)] = word(12) == 1;
+                let port = (word(4) as usize).min(1);
+                let analog = word(12) == 1;
+                if crate::pad_log() {
+                    eprintln!("[pad] rpc SetMainMode port={port} analog={analog} lock={}", word(16));
+                }
+                self.analog[port] = analog;
                 put(20, 1);
             }
             0x08 => {
@@ -202,7 +258,7 @@ impl Pad {
                 _ => {}
             }
         }
-        if std::env::var_os("FREEK_PAD_LOG").is_some() && MOTORS.lock().unwrap()[port] != (small, large) {
+        if crate::pad_log() && MOTORS.lock().unwrap()[port] != (small, large) {
             eprintln!("[pad] port {port} motors: small {small} large {large} (raw {bytes:02x?}, align {:02x?})", self.align[port]);
         }
         MOTORS.lock().unwrap()[port] = (small, large);
@@ -228,12 +284,48 @@ impl Pad {
                 }
             }
         }
-        if std::env::var_os("FREEK_PAD_LOG").is_some() {
+        if crate::pad_log() {
             for (n, input) in players.iter().enumerate() {
-                let buttons = input.map_or(0, |i| i.buttons);
-                if buttons != self.logged[n] {
-                    eprintln!("[pad] vblank {vblank}: player {} buttons {buttons:#06x} (pressed {:#06x})", n + 1, buttons & !self.logged[n]);
-                    self.logged[n] = buttons;
+                let analog = self.analog[n];
+                let mode = if analog { MODE_ANALOG } else { MODE_DIGITAL };
+                let cur = match input {
+                    Some(i) => {
+                        let l2_out = i.l2.max(if i.buttons & button::L2 != 0 { 255 } else { 0 });
+                        let r2_out = i.r2.max(if i.buttons & button::R2 != 0 { 255 } else { 0 });
+                        LoggedPad { buttons: i.buttons, l2: l2_out, r2: r2_out, sticks: i.sticks, mode, connected: true }
+                    }
+                    None => LoggedPad { mode, ..Default::default() },
+                };
+                let prev = self.logged[n];
+                let stick_moved = (0..4).any(|k| analog_changed(prev.sticks[k], cur.sticks[k], 16));
+                let changed = cur.connected != prev.connected
+                    || cur.mode != prev.mode
+                    || cur.buttons != prev.buttons
+                    || analog_changed(prev.l2, cur.l2, 16)
+                    || analog_changed(prev.r2, cur.r2, 16)
+                    || stick_moved;
+                if changed {
+                    if !cur.connected {
+                        eprintln!("[pad] vblank {vblank}: p{} disconnected", n + 1);
+                    } else {
+                        let (l2_raw, r2_raw) = input.map_or((0, 0), |i| (i.l2, i.r2));
+                        eprintln!(
+                            "[pad] vblank {vblank}: p{} mode={:#04x} btns=[{}] ({:#06x}) L2={}/{} R2={}/{} LS=({},{}) RS=({},{})",
+                            n + 1,
+                            cur.mode,
+                            format_buttons(cur.buttons),
+                            cur.buttons,
+                            l2_raw,
+                            cur.l2,
+                            r2_raw,
+                            cur.r2,
+                            cur.sticks[2],
+                            cur.sticks[3],
+                            cur.sticks[0],
+                            cur.sticks[1],
+                        );
+                    }
+                    self.logged[n] = cur;
                 }
             }
         }
@@ -280,8 +372,14 @@ impl Pad {
             f[112] = if input.is_some() { STATE_STABLE } else { STATE_DISCONNECTED };
             f[113] = 0;
             f[114] = 1;
+            // Button-pressure capability mask (18 buttons = 0x3_ffff) read by
+            // scePadInfoPressMode via frame+121..124; without it the game drops
+            // to DualShock 1 mode (type 3 instead of 4).
+            if input.is_some() {
+                f[121..125].copy_from_slice(&0x0003_ffffu32.to_le_bytes());
+            }
             // Overwrite the older of the two frames.
-            if self.counter < 3 && std::env::var_os("FREEK_PAD_LOG").is_some() {
+            if self.counter < 3 && crate::pad_log() {
                 eprintln!("[pad] frame {} port {} slot {} -> {:#x}", self.counter, p.port, p.slot, p.buffer + (self.counter & 1) * 128);
             }
             write(p.buffer + (self.counter & 1) * 128, &f);

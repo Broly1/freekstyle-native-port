@@ -172,7 +172,7 @@ impl Card {
         let old = self.cwd.clone();
         match self.path(name) {
             Some(p) if p.is_dir() => {
-                let rel = p.strip_prefix(&self.root).unwrap().to_string_lossy().into_owned();
+                let rel = p.strip_prefix(&self.root).unwrap().to_string_lossy().replace('\\', "/");
                 self.cwd = format!("/{rel}");
                 (0, old)
             }

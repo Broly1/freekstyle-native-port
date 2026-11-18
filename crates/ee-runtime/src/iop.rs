@@ -63,7 +63,9 @@ impl Iop {
             }
         }
         let n = crate::text::patch_strings(&mut data[..e.size as usize]);
-        eprintln!("[text] rewrote {n} memory card messages in ENGLISH.DAT");
+        if !crate::quiet() {
+            eprintln!("[text] rewrote {n} memory card messages in ENGLISH.DAT");
+        }
         self.patched.push((e.lsn, data));
     }
 }

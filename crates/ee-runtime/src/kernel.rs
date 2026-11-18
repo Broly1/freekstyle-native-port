@@ -206,7 +206,7 @@ impl Kernel {
     }
 
     pub fn warn_once(&mut self, msg: &str) {
-        if self.warned.insert(msg.to_string()) {
+        if self.warned.insert(msg.to_string()) && !crate::quiet() {
             eprintln!("[warn] {msg}");
         }
     }
@@ -283,9 +283,12 @@ pub fn reschedule(c: &mut Cpu) {
 fn idle(c: &mut Cpu) {
     let start = Instant::now();
     let mut warned = false;
-    while c.kernel.best_ready().is_none() {
+    loop {
+        c.poll_interrupts_now();
+        if c.kernel.best_ready().is_some() {
+            return;
+        }
         std::thread::sleep(Duration::from_micros(200));
-        c.poll_interrupts();
         if !warned && start.elapsed() > Duration::from_secs(5) {
             warned = true;
             eprintln!("[kernel] all threads blocked for 5s:");
@@ -847,7 +850,7 @@ pub fn due_alarms(k: &mut Kernel) -> Vec<Alarm> {
 }
 
 fn log(c: &Cpu, name: &str, detail: &str) {
-    if c.kernel.trace || std::env::var_os("FREEK_QUIET").is_none() {
+    if c.kernel.trace || !crate::quiet() {
         eprintln!("[kernel] {name} {detail}");
     }
 }
