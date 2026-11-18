@@ -433,14 +433,19 @@ pub fn spawn(link: Arc<Link>, ring: Arc<AudioRing>, latency: usize) -> std::thre
                 let mut seen = (0, 0);
                 Box::new(move |count, out| {
                     n.render(count, out);
+                    let quiet = std::env::var_os("FREEK_QUIET").is_some_and(|v| v != "0");
                     let (banks, categories, _) = n.sfx_counts();
                     if (banks, categories) != seen {
                         seen = (banks, categories);
-                        eprintln!("[audio] {banks} sound banks, {categories} categories");
+                        if !quiet {
+                            eprintln!("[audio] {banks} sound banks, {categories} categories");
+                        }
                     }
                     if n.underruns() != reported {
                         reported = n.underruns();
-                        eprintln!("[audio] music ran out of data ({reported} times)");
+                        if !quiet {
+                            eprintln!("[audio] music ran out of data ({reported} times)");
+                        }
                     }
                 })
             } else {

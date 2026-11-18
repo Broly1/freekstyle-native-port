@@ -47,7 +47,8 @@ impl Health {
 }
 
 fn supervise(ring: Arc<AudioRing>, mute: bool) {
-    if mute {
+    let quiet = ee_runtime::quiet();
+    if mute && !quiet {
         eprintln!("[audio] muted; running silent");
     }
     let mut silent = Silent::new();
@@ -152,7 +153,9 @@ fn open(ring: Arc<AudioRing>, health: Arc<Health>) -> Result<cpal::Stream, Strin
         )
         .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
-    eprintln!("[audio] {} at 48 kHz", device.name().unwrap_or_default());
+    if !ee_runtime::quiet() {
+        eprintln!("[audio] {} at 48 kHz", device.name().unwrap_or_default());
+    }
     Ok(stream)
 }
 

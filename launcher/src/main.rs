@@ -646,18 +646,14 @@ impl Launcher {
                     got = Some(winit_key_name(physical_key.unwrap_or(*key)));
                 }
             }
-            // Modifiers are not keys in egui; the game accepts either side.
-            if got.is_none() {
-                let m = i.modifiers;
-                got = if m.shift { Some(Some("Shift".into())) } else if m.ctrl { Some(Some("Control".into())) } else if m.alt { Some(Some("Alt".into())) } else { None };
-            }
         });
         match got {
             Some(Some(name)) if name == "Escape" => self.capture = None,
+            _ if !slot.1 => {}
             Some(Some(name)) if RESERVED_KEYS.contains(&name.as_str()) => self.status = fill(self.tr().reserved_key, &[&name]),
-            Some(Some(name)) if slot.1 => self.bind(slot, name),
+            Some(Some(name)) => self.bind(slot, name),
             Some(None) => self.status = self.tr().cant_bind.into(),
-            _ => {}
+            None => {}
         }
     }
 }
@@ -796,13 +792,16 @@ fn winit_key_name(key: egui::Key) -> Option<String> {
     }
     Some(
         match name.as_str() {
+            "ShiftLeft" | "ShiftRight" => "Shift",
+            "ControlLeft" | "ControlRight" => "Control",
+            "AltLeft" | "AltRight" => "Alt",
             "OpenBracket" => "BracketLeft",
             "CloseBracket" => "BracketRight",
             "Backtick" => "Backquote",
             "Equals" => "Equal",
             "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "Escape" | "Tab" | "Backspace" | "Enter" | "Space" | "Insert"
             | "Delete" | "Home" | "End" | "PageUp" | "PageDown" | "Comma" | "Period" | "Minus" | "Semicolon" | "Quote" | "Slash"
-            | "Backslash" => return Some(name),
+            | "Backslash" | "IntlBackslash" => return Some(name),
             _ if name.starts_with('F') && name[1..].parse::<u32>().is_ok() => return Some(name),
             _ => return None,
         }
@@ -830,6 +829,7 @@ fn input_label(t: &Tr, name: &str, keyboard: bool) -> String {
             "Period" => ".",
             "Slash" => "/",
             "Backslash" => "\\",
+            "IntlBackslash" => "<>",
             "Semicolon" => ";",
             "Quote" => "'",
             other => other,

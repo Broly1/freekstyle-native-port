@@ -5,7 +5,18 @@
 //! and rumble work identically in both binaries.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+fn quiet() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FREEK_QUIET").is_some_and(|v| v != "0"))
+}
+
+fn pad_log() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FREEK_PAD_LOG").is_some_and(|v| v != "0"))
+}
 
 use ee_runtime::pad::{button, Input};
 use freek_config::Binding;
@@ -73,16 +84,6 @@ impl HatDir {
             HatDir::Down => "Down",
             HatDir::Left => "Left",
             HatDir::Right => "Right",
-        }
-    }
-
-    fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "Up" => Some(HatDir::Up),
-            "Down" => Some(HatDir::Down),
-            "Left" => Some(HatDir::Left),
-            "Right" => Some(HatDir::Right),
-            _ => None,
         }
     }
 
@@ -344,7 +345,7 @@ impl ControllerManager {
 
         if let Ok(rw) = IOStream::from_bytes(freek_config::GAMEPAD_MAPPINGS.as_bytes()) {
             match gamepad.load_mappings_from_rw(rw) {
-                Ok(n) if n > 0 => eprintln!("[input] loaded {n} bundled controller mappings"),
+                Ok(n) if n > 0 && !quiet() => eprintln!("[input] loaded {n} bundled controller mappings"),
                 Ok(_) => {}
                 Err(e) => eprintln!("[input] bundled controller mappings error: {e}"),
             }
@@ -352,9 +353,10 @@ impl ControllerManager {
 
         for path in freek_config::external_gamepad_db_paths() {
             match gamepad.load_mappings(&path) {
-                Ok(n) => {
+                Ok(n) if !quiet() => {
                     eprintln!("[input] loaded {n} mappings from {}", path.display());
                 }
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!("[input] failed to load {}: {e}", path.display());
                 }
@@ -375,7 +377,7 @@ impl ControllerManager {
 
         if let Ok(ids) = mgr.joystick.joysticks() {
             for id in ids {
-                mgr.add_device(id);
+                mgr.add_device(id, false);
             }
         }
 
@@ -399,14 +401,14 @@ impl ControllerManager {
                 self.seat(id);
             }
             match event {
-                Event::GamepadAdded { which, .. } | Event::GamepadRemapped { which, .. } => {
-                    self.add_device(which);
+                Event::GamepadAdded { which, .. } | Event::JoyDeviceAdded { which, .. } => {
+                    self.add_device(which, false);
+                }
+                Event::GamepadRemapped { which, .. } => {
+                    self.add_device(which, true);
                 }
                 Event::GamepadRemoved { which, .. } | Event::JoyDeviceRemoved { which, .. } => {
                     self.remove_device(which);
-                }
-                Event::JoyDeviceAdded { which, .. } => {
-                    self.add_device(which);
                 }
                 Event::GamepadButtonDown { button, .. } => {
                     captured = Some(canonical_button_name(button).to_string());
@@ -418,12 +420,18 @@ impl ControllerManager {
                         let is_down = value >= TRIGGER_PRESS_THRESHOLD;
                         match axis {
                             Axis::TriggerLeft => {
+                                if is_down != dev.left_trigger_down && pad_log() {
+                                    eprintln!("[input] sdl LeftTrigger2 raw={value} threshold={TRIGGER_PRESS_THRESHOLD} down={is_down}");
+                                }
                                 if is_down && !dev.left_trigger_down {
                                     captured = Some("LeftTrigger2".to_string());
                                 }
                                 dev.left_trigger_down = is_down;
                             }
                             Axis::TriggerRight => {
+                                if is_down != dev.right_trigger_down && pad_log() {
+                                    eprintln!("[input] sdl RightTrigger2 raw={value} threshold={TRIGGER_PRESS_THRESHOLD} down={is_down}");
+                                }
                                 if is_down && !dev.right_trigger_down {
                                     captured = Some("RightTrigger2".to_string());
                                 }
@@ -437,6 +445,9 @@ impl ControllerManager {
                     which, button_idx, ..
                 } => {
                     if self.devices.get(&which).is_some_and(|d| !d.is_gamepad()) {
+                        if pad_log() {
+                            eprintln!("[input] sdl raw JoyButton{button_idx} down");
+                        }
                         captured = Some(format!("JoyButton{button_idx}"));
                     }
                 }
@@ -448,6 +459,9 @@ impl ControllerManager {
                 } => {
                     if self.devices.get(&which).is_some_and(|d| !d.is_gamepad()) {
                         if let Some(dir) = HatDir::first_from_state(state) {
+                            if pad_log() {
+                                eprintln!("[input] sdl raw JoyHat{hat_idx}{}", dir.as_str());
+                            }
                             captured = Some(format!("JoyHat{hat_idx}{}", dir.as_str()));
                         }
                     }
@@ -464,6 +478,9 @@ impl ControllerManager {
                             let delta = value as i32 - rest as i32;
                             if delta.abs() > JOY_AXIS_DIGITAL_THRESHOLD as i32 {
                                 let sign = if delta > 0 { '+' } else { '-' };
+                                if pad_log() {
+                                    eprintln!("[input] sdl raw JoyAxis{axis_idx}{sign} value={value} rest={rest}");
+                                }
                                 captured = Some(format!("JoyAxis{axis_idx}{sign}"));
                             }
                         }
@@ -548,8 +565,11 @@ impl ControllerManager {
         }
     }
 
-    fn add_device(&mut self, id: JoystickId) {
+    fn add_device(&mut self, id: JoystickId, remapped: bool) {
         if self.gamepad.is_gamepad(id) {
+            if !remapped && self.devices.get(&id).is_some_and(DeviceState::is_gamepad) {
+                return;
+            }
             match self.gamepad.open(id) {
                 Ok(gp) => {
                     let name = gp.name().unwrap_or_else(|| "Gamepad".to_string());
@@ -586,6 +606,7 @@ impl ControllerManager {
                     .map(|idx| joy.axis(idx).unwrap_or(0))
                     .collect();
                 let guid = joy.guid().to_string();
+                let (axes, buttons, hats) = (joy.num_axes(), joy.num_buttons(), joy.num_hats());
                 let name = if joy.name().is_empty() {
                     format!("Controller ({guid})")
                 } else {
@@ -599,7 +620,7 @@ impl ControllerManager {
                         right_trigger_down: false,
                     },
                 );
-                eprintln!("[input] unmapped controller GUID: {guid} (using raw joystick fallback)");
+                eprintln!("[input] unmapped controller GUID: {guid} (raw joystick fallback: {axes} axes, {buttons} buttons, {hats} hats)");
                 eprintln!("[input] controller found (joystick): {name}; press a button to play");
             }
             Err(e) => eprintln!("[input] failed to open joystick {id}: {e}"),
@@ -730,24 +751,41 @@ fn read_raw_joystick_input(
     deadzone: f32,
 ) -> Input {
     let mut buttons = 0u16;
+    let mut l2 = 0u8;
+    let mut r2 = 0u8;
 
     if pad_map.has_raw_joy_bindings {
         for &(input, bit) in &pad_map.entries {
-            let pressed = match input {
-                PadInput::JoyButton(idx) => joy.button(idx as u32).unwrap_or(false),
-                PadInput::JoyHat(idx, dir) => joy
-                    .hat(idx as u32)
-                    .map(|state| dir.matches(state))
-                    .unwrap_or(false),
+            let (pressed, pressure) = match input {
+                PadInput::JoyButton(idx) => {
+                    let p = joy.button(idx as u32).unwrap_or(false);
+                    (p, if p { 0xff } else { 0 })
+                }
+                PadInput::JoyHat(idx, dir) => {
+                    let p = joy
+                        .hat(idx as u32)
+                        .map(|state| dir.matches(state))
+                        .unwrap_or(false);
+                    (p, if p { 0xff } else { 0 })
+                }
                 PadInput::JoyAxis(idx, positive) => {
                     let val = joy.axis(idx as u32).unwrap_or(0);
                     let rest = rest_axes.get(idx as usize).copied().unwrap_or(0);
-                    joy_axis_pressed(val, rest, positive)
+                    (
+                        joy_axis_pressed(val, rest, positive),
+                        joy_axis_pressure(val, rest, positive),
+                    )
                 }
-                PadInput::GamepadButton(_) | PadInput::GamepadTrigger(_) => false,
+                PadInput::GamepadButton(_) | PadInput::GamepadTrigger(_) => (false, 0),
             };
             if pressed {
                 buttons |= bit;
+            }
+            if bit & button::L2 != 0 {
+                l2 = l2.max(pressure);
+            }
+            if bit & button::R2 != 0 {
+                r2 = r2.max(pressure);
             }
         }
     } else {
@@ -775,6 +813,8 @@ fn read_raw_joystick_input(
                 }
             }
         }
+        l2 = if buttons & button::L2 != 0 { 0xff } else { 0 };
+        r2 = if buttons & button::R2 != 0 { 0xff } else { 0 };
     }
 
     let axis_or_zero = |idx: u32| -> i16 {
@@ -794,8 +834,8 @@ fn read_raw_joystick_input(
     Input {
         buttons,
         sticks: [rx, ry, lx, ly],
-        l2: if buttons & button::L2 != 0 { 0xff } else { 0 },
-        r2: if buttons & button::R2 != 0 { 0xff } else { 0 },
+        l2,
+        r2,
     }
 }
 
@@ -807,6 +847,24 @@ fn joy_axis_pressed(value: i16, rest: i16, positive: bool) -> bool {
     } else {
         delta < -thresh
     }
+}
+
+fn joy_axis_pressure(value: i16, rest: i16, positive: bool) -> u8 {
+    let delta = if positive {
+        value as i32 - rest as i32
+    } else {
+        rest as i32 - value as i32
+    };
+    if delta <= 0 {
+        return 0;
+    }
+    let span = if positive {
+        i16::MAX as i32 - rest as i32
+    } else {
+        rest as i32 - i16::MIN as i32
+    }
+    .max(1);
+    ((delta as u32 * 255) / span as u32).min(255) as u8
 }
 
 fn radial_deadzone(x: i16, y: i16, deadzone: f32) -> (u8, u8) {
