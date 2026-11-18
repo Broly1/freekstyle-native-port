@@ -669,7 +669,9 @@ class Installer:
         if not have("ffmpeg"):
             self.ui.warn(t("no_ffmpeg"))
             return
-        if (movies / "hd" / "intro.mkv").is_file() or (movies / "intro.mkv").is_file():
+        # Done only with all five: a run stopped halfway leaves some.
+        names = [m.split("/")[1].lower() + ".mkv" for m in MOVIES]
+        if any(all((folder / n).is_file() for n in names) for folder in (movies / "hd", movies)):
             self.ui.good(t("already"))
             self.movie_audio(movies)
             return
@@ -727,7 +729,7 @@ class Installer:
         flm2mkv = ROOT / "target" / "release" / "flm2mkv"
         # The CRT look needs ffmpeg's libplacebo filter and a Vulkan GPU (not
         # a software one, as in most virtual machines): try a tiny clip first.
-        crt = self.ui.run(["ffmpeg", "-hide_banner", "-loglevel", "quiet", "-f", "lavfi", "-i", "color=size=64x64:duration=0.1",
+        crt = self.ui.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "quiet", "-f", "lavfi", "-i", "color=size=64x64:duration=0.1",
                            "-vf", "libplacebo", "-f", "null", "-"], quiet=True, check=False)
         if crt and self.ui.run([flm2mkv, "--crt", flm, movies / "hd"], check=False):
             self.ui.good(t("crt"))
@@ -762,12 +764,15 @@ class Installer:
         run(["cp", "-L", "--reflink=auto", GAME / "Freekstyle.bin", PREFIX / "game" / "Freekstyle.bin"], sudo=True)
         if (GAME / "images").is_dir():
             run(["cp", "-r", GAME / "images", PREFIX / "game"], sudo=True)
-        if (GAME / "movies" / "hd").is_dir():
-            run(["cp", "-r", GAME / "movies" / "hd", PREFIX / "game" / "movies"], sudo=True)
+        # Finished movies only, never a <name>.part.mkv left by a stopped run.
+        hd = [str(p) for p in sorted((GAME / "movies" / "hd").glob("*.mkv")) if not p.name.endswith(".part.mkv")]
+        if hd:
+            run(["mkdir", "-p", PREFIX / "game" / "movies" / "hd"], sudo=True)
+            run(["cp"] + hd + [PREFIX / "game" / "movies" / "hd"], sudo=True)
         if (GAME / "textures" / "hd").is_dir():
             run(["mkdir", "-p", PREFIX / "game" / "textures"], sudo=True)
             run(["cp", "-r", GAME / "textures" / "hd", PREFIX / "game" / "textures"], sudo=True)
-        plain = glob.glob(str(GAME / "movies" / "*.mkv"))
+        plain = [p for p in glob.glob(str(GAME / "movies" / "*.mkv")) if not p.endswith(".part.mkv")]
         if plain:
             run(["cp"] + plain + [PREFIX / "game" / "movies"], sudo=True)
         # The uninstaller goes along, for when this folder is gone.

@@ -29,8 +29,17 @@
 //! unless --height says otherwise.
 
 use std::path::{Path, PathBuf};
-use std::process::{exit, Command};
+use std::process::{exit, Command, Stdio};
 use std::{env, fs};
+
+/// ffmpeg cut off from the keyboard: it otherwise reads the console it
+/// was started from, where a stray key stops the movie half done (`q`)
+/// or opens its command prompt (`c`), and Ctrl+C there kills it.
+fn ffmpeg() -> Command {
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-nostdin").stdin(Stdio::null());
+    cmd
+}
 
 /// Tag on the soundtrack of each movie made, saying which repair it had;
 /// `--audio` redoes the ones with an older tag or none.
@@ -69,7 +78,7 @@ fn resample() -> &'static str {
     static FILTER: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
     FILTER.get_or_init(|| {
         let soxr = "aresample=48000:resampler=soxr:precision=28";
-        let ok = Command::new("ffmpeg")
+        let ok = ffmpeg()
             .args(["-hide_banner", "-loglevel", "quiet", "-f", "lavfi", "-i", "anullsrc=r=22050", "-t", "0.05", "-af", soxr, "-f", "null", "-"])
             .status()
             .is_ok_and(|s| s.success());
@@ -81,7 +90,7 @@ fn resample() -> &'static str {
 /// stream headers say progressive either way, so this looks at the
 /// pictures (ffmpeg's idet).
 fn field_order(m2v: &Path, rate: &str) -> Result<Option<&'static str>, String> {
-    let out = Command::new("ffmpeg")
+    let out = ffmpeg()
         .args(["-hide_banner", "-nostats", "-r", rate, "-i"])
         .arg(m2v)
         .args(["-vf", "idet", "-an", "-f", "null", "-"])
@@ -111,13 +120,24 @@ fn convert(src: &Path, out_dir: &Path, height: Option<u32>, crt: bool) -> Result
     let data = fs::read(src).map_err(|e| format!("{}: {e}", src.display()))?;
     let movie = flm::demux(&data).map_err(|e| format!("{}: {e}", src.display()))?;
     let stem = src.file_stem().unwrap().to_string_lossy().to_ascii_lowercase();
+    // Before the work starts: with the CRT look on a laptop GPU the long
+    // movies take minutes each, with nothing else on screen meanwhile.
+    let name = src.file_name().unwrap().to_string_lossy();
+    if crt {
+        eprintln!("converting {name} (CRT look, this can take a few minutes)...");
+    } else {
+        eprintln!("converting {name}...");
+    }
     let tmp = env::temp_dir().join(format!("flm2mkv-{}-{stem}", std::process::id()));
     fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
     let m2v = tmp.join("video.m2v");
     fs::write(&m2v, &movie.video).map_err(|e| e.to_string())?;
     let (wav, fix) = soundtrack(&movie, &tmp)?;
-    // Absolute: ffmpeg runs in `tmp` (see the CRT shader below).
+    // Absolute: ffmpeg runs in `tmp` (see the CRT shader below). Written
+    // under another name and renamed when complete, so a conversion cut
+    // short never leaves a file that looks like the finished movie.
     let out = std::path::absolute(out_dir.join(format!("{stem}.mkv"))).map_err(|e| e.to_string())?;
+    let part = out.with_file_name(format!("{stem}.part.mkv"));
     let (num, den) = flm::VIDEO_FPS;
     let rate = format!("{num}/{den}");
     let fields = field_order(&m2v, &rate)?;
@@ -148,7 +168,7 @@ fn convert(src: &Path, out_dir: &Path, height: Option<u32>, crt: bool) -> Result
         }
         color = vec!["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"];
     }
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = ffmpeg();
     cmd.current_dir(&tmp);
     cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-r", &rate, "-i"]).arg(&m2v).arg("-i").arg(&wav);
     if !filters.is_empty() {
@@ -165,13 +185,15 @@ fn convert(src: &Path, out_dir: &Path, height: Option<u32>, crt: bool) -> Result
         .args(["-af", resample()])
         .args(OPUS)
         .args(["-metadata:s:a:0", &tag_arg(), "-shortest"])
-        .arg(&out)
+        .arg(&part)
         .status()
         .map_err(|e| format!("ffmpeg: {e}"))?;
     let _ = fs::remove_dir_all(&tmp);
     if !status.success() {
+        let _ = fs::remove_file(&part);
         return Err(format!("ffmpeg failed for {}", src.display()));
     }
+    fs::rename(&part, &out).map_err(|e| format!("{}: {e}", out.display()))?;
     let secs = movie.audio.len() as f64 / 2.0 / flm::AUDIO_RATE as f64;
     let kind = if fields.is_some() { "interlaced, deinterlaced to 59.94 fps" } else { "progressive" };
     let kind = if crt { format!("{kind}, CRT look") } else { kind.to_string() };
@@ -183,6 +205,7 @@ fn convert(src: &Path, out_dir: &Path, height: Option<u32>, crt: bool) -> Result
 /// The repair the soundtrack of `mkv` had, from its tag.
 fn audio_version(mkv: &Path) -> Option<String> {
     let out = Command::new("ffprobe")
+        .stdin(Stdio::null())
         .args(["-v", "error", "-select_streams", "a:0", "-show_entries", &format!("stream_tags={AUDIO_TAG}"), "-of", "csv=p=0"])
         .arg(mkv)
         .output()
@@ -205,7 +228,7 @@ fn update_audio(src: &Path, mkv_dir: &Path) -> Result<bool, String> {
     fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
     let (wav, fix) = soundtrack(&movie, &tmp)?;
     let part = mkv_dir.join(format!("{stem}.audio.mkv"));
-    let status = Command::new("ffmpeg")
+    let status = ffmpeg()
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(&mkv)
         .arg("-i")

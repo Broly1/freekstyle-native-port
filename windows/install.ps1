@@ -717,7 +717,12 @@ function Step-Movies {
         Warn (T 'no_ffmpeg')
         return
     }
-    if ((Test-Path -LiteralPath (Join-Path $movies 'hd\intro.mkv')) -or (Test-Path -LiteralPath (Join-Path $movies 'intro.mkv'))) {
+    # Done only with all five: a run stopped halfway leaves some.
+    $names = @($MovieList | ForEach-Object { $_.Split('/')[1].ToLower() + '.mkv' })
+    $done = foreach ($folder in (Join-Path $movies 'hd'), $movies) {
+        if (-not @($names | Where-Object { -not (Test-Path -LiteralPath (Join-Path $folder $_)) }).Count) { $true }
+    }
+    if ($done) {
         Good (T 'already')
         Update-MovieAudio $movies
         return
@@ -785,7 +790,7 @@ function Convert-Movies([string]$Movies, [string]$Flm) {
     $hd = Join-Path $Movies 'hd'
     # The CRT look needs ffmpeg's libplacebo filter and a Vulkan GPU (not a
     # software one, as in most virtual machines): try a tiny clip first.
-    $crt = TryRun @('ffmpeg', '-hide_banner', '-loglevel', 'quiet', '-f', 'lavfi', '-i', 'color=size=64x64:duration=0.1',
+    $crt = TryRun @('ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'quiet', '-f', 'lavfi', '-i', 'color=size=64x64:duration=0.1',
                     '-vf', 'libplacebo', '-f', 'null', '-') -Quiet
     if ($crt -and (TryRun @($flm2mkv, '--crt', $Flm, $hd))) {
         Good (T 'crt')
@@ -893,12 +898,18 @@ function Install-System([string]$PlanFile) {
         if (Test-Path -LiteralPath (Join-Path $release 'realesrgan')) { Copy-Item -LiteralPath (Join-Path $release 'realesrgan') $Prefix -Recurse }
         Copy-Item -LiteralPath (Join-Path $game 'SLUS_203.67'), (Join-Path $game 'Freekstyle.bin') (Join-Path $Prefix 'game')
         if (Test-Path -LiteralPath (Join-Path $game 'images')) { Copy-Item -LiteralPath (Join-Path $game 'images') (Join-Path $Prefix 'game') -Recurse }
-        if (Test-Path -LiteralPath (Join-Path $game 'movies\hd')) { Copy-Item -LiteralPath (Join-Path $game 'movies\hd') (Join-Path $Prefix 'game\movies') -Recurse }
+        # Finished movies only, never a <name>.part.mkv left by a stopped run.
+        $hdMovies = @(Get-ChildItem -LiteralPath (Join-Path $game 'movies\hd') -Filter '*.mkv' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.part.mkv' })
+        if ($hdMovies.Count) {
+            New-Item -ItemType Directory -Force (Join-Path $Prefix 'game\movies\hd') | Out-Null
+            $hdMovies | Copy-Item -Destination (Join-Path $Prefix 'game\movies\hd')
+        }
         if (Test-Path -LiteralPath (Join-Path $game 'textures\hd')) {
             New-Item -ItemType Directory -Force (Join-Path $Prefix 'game\textures') | Out-Null
             Copy-Item -LiteralPath (Join-Path $game 'textures\hd') (Join-Path $Prefix 'game\textures') -Recurse
         }
-        Get-ChildItem -LiteralPath (Join-Path $game 'movies') -Filter '*.mkv' -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $Prefix 'game\movies')
+        Get-ChildItem -LiteralPath (Join-Path $game 'movies') -Filter '*.mkv' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.part.mkv' } |
+            Copy-Item -Destination (Join-Path $Prefix 'game\movies')
         # The game plays its movies through ffmpeg; Windows finds a program
         # next to the game first, so a copy here works without PATH.
         foreach ($tool in @($plan.ffmpeg, $plan.ffprobe)) {
