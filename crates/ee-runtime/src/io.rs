@@ -3,7 +3,7 @@
 //! transfers complete instantly, and vblank is driven by the host clock.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
 /// NTSC field rate.
@@ -103,7 +103,7 @@ pub struct Io {
     start: Instant,
     pub vblanks: u64,
     /// Channel to the GS on the render thread; None runs headless.
-    pub gs: Option<Sender<gs::Msg>>,
+    pub gs: Option<SyncSender<gs::Msg>>,
     /// VU1's thread, waited for before anything that could show its work.
     pub vu1: Option<crate::vu1::Handle>,
     pub gif_packets: u64,

@@ -15,7 +15,7 @@ use gs::mem::{Psm, Vram};
 use gs::{Gs, MemRect, Shape, Vertex};
 
 use crate::blend::{self, Blend};
-use crate::vk::{attachment_barrier, layers, range, transfer_barrier, transfer_to_host_barrier, transition, transition_levels, Buffer, Image, Result, Vk};
+use crate::vk::{attachment_barrier, layers, range, transfer_barrier, transfer_to_host_barrier, transition, transition_discard, transition_levels, Buffer, Image, Result, Vk};
 
 const FRAMES: usize = 3;
 const VERTEX_BYTES: u64 = 32 << 20;
@@ -294,6 +294,12 @@ pub struct Hw {
     frames: Vec<Frame>,
     slot: usize,
     pub frame_no: u64,
+    /// Monotonic count of submitted command buffers (always advances in `finish_frame`,
+    /// even when skipped frames accumulate into the current command buffer).
+    submit_no: u64,
+    /// Last non-zero window size, used to recreate a valid swapchain if it starts 0x0
+    /// or becomes out of date before a resize event updates `swapchain.extent`.
+    window_size: (u32, u32),
     /// Vblank number of the frame being presented (the game's clock; the
     /// same one FREEK_PAD_SCRIPT uses).
     pub vblank: u64,
@@ -459,7 +465,10 @@ impl Hw {
             let frag_dual_nodst = module(include_bytes!(concat!(env!("OUT_DIR"), "/gs_dual_nodst.frag.spv")))?;
             let frag_dual = module(include_bytes!(concat!(env!("OUT_DIR"), "/gs_dual.frag.spv")))?;
             let white = vk.create_image(1, 1, COLOR, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST, "white")?;
-            let rendered = (0..vk.swapchain.images.len()).map(|_| dev.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap()).collect();
+            let rendered = (0..vk.swapchain.images.len())
+                .map(|_| dev.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).map_err(e("semaphore")))
+                .collect::<Result<Vec<_>>>()?;
+            let window_size = (vk.swapchain.extent.width, vk.swapchain.extent.height);
             let gpu_timer = crate::gputime::GpuTimer::new(&vk.instance, vk.physical, &dev, vk.queue_family, FRAMES);
             let mut hw = Hw {
                 vk,
@@ -467,6 +476,8 @@ impl Hw {
                 frames,
                 slot: 0,
                 frame_no: 0,
+                submit_no: 0,
+                window_size,
                 vblank: 0,
                 rendered,
                 set_layout,
@@ -716,15 +727,14 @@ impl Hw {
         let depth = self.vk.create_image(w * s, need_h * sy, DEPTH, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, "depth")?;
         let dev = self.vk.device.clone();
         let cmd = self.cmd();
-        transition(&dev, cmd, color.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-        transition(&dev, cmd, depth.image, vk::ImageAspectFlags::DEPTH, vk::ImageLayout::UNDEFINED, vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
         let mut t = Target { bp, bw, psm, w, h: need_h, sy, color, depth, snapshot: None, snapshot_valid: false, fresh: true };
+        transition(&dev, cmd, t.depth.image, vk::ImageAspectFlags::DEPTH, vk::ImageLayout::UNDEFINED, vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
         // Growing: keep the old picture.
         if let Some(old) = self.targets.remove(&key) {
             if self.target_log {
                 eprintln!("[target] recreate bp={bp:#x}: bw {} -> {bw}, h {} -> {need_h}, sy {} -> {sy} at vblank {}", old.bw, old.h, old.sy, self.vblank);
             }
-            transition(&dev, cmd, t.color.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+            transition(&dev, cmd, t.color.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
             transition(&dev, cmd, old.color.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
             let clear = vk::ClearColorValue { float32: [0.0; 4] };
             unsafe {
@@ -750,6 +760,8 @@ impl Hw {
             if let Some(s) = old.snapshot {
                 f.garbage.push(Garbage::Image(s));
             }
+        } else {
+            transition(&dev, cmd, t.color.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
         }
         self.targets.insert(key, t);
         Ok(key)
@@ -893,9 +905,9 @@ impl Hw {
             clut,
             gen: gs.vram.generation(pages),
         };
-        let frame = self.frame_no;
+        let submit = self.submit_no;
         if let Some(tex) = self.textures.get_mut(&key) {
-            tex.last_used = frame;
+            tex.last_used = submit;
             if let Some(hash) = tex.hd {
                 self.want_hd(hash, tw, th);
             }
@@ -938,7 +950,7 @@ impl Hw {
         };
         self.end_rendering();
         let image = self.upload_image(w, h, &px, vk::ImageUsageFlags::SAMPLED, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, "texture")?;
-        self.textures.insert(key, Texture { image, last_used: frame, bytes: w as u64 * h as u64 * 4, wide_picture, hd });
+        self.textures.insert(key, Texture { image, last_used: submit, bytes: w as u64 * h as u64 * 4, wide_picture, hd });
         self.texture_bytes += w as u64 * h as u64 * 4;
         if self.texture_bytes > TEXTURE_BUDGET {
             self.evict_lru();
@@ -950,7 +962,7 @@ impl Hw {
     /// Keep a replacement in memory, or have it loaded.
     fn want_hd(&mut self, hash: u64, w: u32, h: u32) {
         match self.hd_images.get_mut(&hash) {
-            Some(i) => i.last_used = self.frame_no,
+            Some(i) => i.last_used = self.submit_no,
             None => {
                 if let Some(p) = &mut self.pack {
                     p.request(hash, w, h);
@@ -975,6 +987,29 @@ impl Hw {
         Ok(())
     }
 
+    fn copy_target_to_snapshot(&mut self, bp: u32, off: vk::Offset3D, extent: vk::Extent3D, label: &'static str) {
+        let ext = self.targets[&bp].color.extent;
+        self.mark((label, ext.width, ext.height));
+        let dev = self.vk.device.clone();
+        let cmd = self.cmd();
+        let t = &self.targets[&bp];
+        let snap_img = t.snapshot.as_ref().unwrap().image;
+        transition(&dev, cmd, t.color.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+        transition(&dev, cmd, snap_img, vk::ImageAspectFlags::COLOR, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+        let copy = vk::ImageCopy::default()
+            .src_subresource(layers(vk::ImageAspectFlags::COLOR))
+            .dst_subresource(layers(vk::ImageAspectFlags::COLOR))
+            .src_offset(off)
+            .dst_offset(off)
+            .extent(extent);
+        unsafe { dev.cmd_copy_image(cmd, t.color.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, snap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy]) };
+        transition(&dev, cmd, t.color.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        transition(&dev, cmd, snap_img, vk::ImageAspectFlags::COLOR, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        self.mark(("between", 0, 0));
+        self.stats.snapshots += 1;
+        self.stats.snapshot_pixels += extent.width as u64 * extent.height as u64;
+    }
+
     /// Snapshot of the target with the area a batch covers brought up to
     /// date, for shaders that read the destination. Copying only that area
     /// keeps the many small masked draws cheap.
@@ -991,27 +1026,9 @@ impl Hw {
             let y1 = ((y1 * sy).ceil() as i32 + 1).min(scissor.offset.y + scissor.extent.height as i32).min(ext.height as i32);
             if x1 > x0 && y1 > y0 {
                 self.end_rendering();
-                let ext = self.targets[&bp].color.extent;
-                self.mark(("copy part of", ext.width, ext.height));
-                let dev = self.vk.device.clone();
-                let cmd = self.cmd();
-                let t = &self.targets[&bp];
-                let snap_img = t.snapshot.as_ref().unwrap().image;
-                transition(&dev, cmd, t.color.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-                transition(&dev, cmd, snap_img, vk::ImageAspectFlags::COLOR, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
                 let off = vk::Offset3D { x: x0, y: y0, z: 0 };
-                let copy = vk::ImageCopy::default()
-                    .src_subresource(layers(vk::ImageAspectFlags::COLOR))
-                    .dst_subresource(layers(vk::ImageAspectFlags::COLOR))
-                    .src_offset(off)
-                    .dst_offset(off)
-                    .extent(vk::Extent3D { width: (x1 - x0) as u32, height: (y1 - y0) as u32, depth: 1 });
-                unsafe { dev.cmd_copy_image(cmd, t.color.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, snap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy]) };
-                transition(&dev, cmd, t.color.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-                transition(&dev, cmd, snap_img, vk::ImageAspectFlags::COLOR, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-                self.mark(("between", 0, 0));
-                self.stats.snapshots += 1;
-                self.stats.snapshot_pixels += ((x1 - x0) * (y1 - y0)) as u64;
+                let extent = vk::Extent3D { width: (x1 - x0) as u32, height: (y1 - y0) as u32, depth: 1 };
+                self.copy_target_to_snapshot(bp, off, extent, "copy part of");
             }
         }
         Ok(self.targets[&bp].snapshot.as_ref().unwrap().view)
@@ -1032,23 +1049,7 @@ impl Hw {
                     let was = self.rendering;
                     self.end_rendering();
                     let ext = self.targets[&bp].color.extent;
-                    self.mark(("copy all of", ext.width, ext.height));
-                    let dev = self.vk.device.clone();
-                    let cmd = self.cmd();
-                    let t = &self.targets[&bp];
-                    let snap_img = t.snapshot.as_ref().unwrap().image;
-                    transition(&dev, cmd, t.color.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-                    transition(&dev, cmd, snap_img, vk::ImageAspectFlags::COLOR, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-                    let copy = vk::ImageCopy::default()
-                        .src_subresource(layers(vk::ImageAspectFlags::COLOR))
-                        .dst_subresource(layers(vk::ImageAspectFlags::COLOR))
-                        .extent(vk::Extent3D { width: t.color.extent.width, height: t.color.extent.height, depth: 1 });
-                    unsafe { dev.cmd_copy_image(cmd, t.color.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, snap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy]) };
-                    transition(&dev, cmd, t.color.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-                    transition(&dev, cmd, snap_img, vk::ImageAspectFlags::COLOR, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-                    self.stats.snapshots += 1;
-                    self.stats.snapshot_pixels += (t.color.extent.width * t.color.extent.height) as u64;
-                    self.mark(("between", 0, 0));
+                    self.copy_target_to_snapshot(bp, vk::Offset3D::default(), vk::Extent3D { width: ext.width, height: ext.height, depth: 1 }, "copy all of");
                     self.targets.get_mut(&bp).unwrap().snapshot_valid = true;
                     if let Some(b) = was {
                         self.begin_rendering(b);
@@ -1561,8 +1562,6 @@ impl Hw {
             if self.after_movie.is_some_and(|d| d != self.stats.draws) {
                 self.after_movie = None;
             }
-            self.evict_textures();
-            self.frame_no += 1;
             let f = &self.frames[self.slot];
             if f.vbuf_used > VERTEX_BYTES / 2
                 || f.staging_used > STAGING_BYTES / 2
@@ -1570,7 +1569,10 @@ impl Hw {
                 || f.garbage.len() > 256
             {
                 self.finish_frame(None, false);
+            } else {
+                self.frame_no += 1;
             }
+            self.evict_textures();
             return;
         }
         let d = gs.display;
@@ -1706,7 +1708,7 @@ impl Hw {
         let small = self.record.as_ref().unwrap().image.as_ref().unwrap().image;
         let cmd = self.cmd();
         let o = |x: u32, y: u32| vk::Offset3D { x: x as i32, y: y as i32, z: 1 };
-        transition(&self.vk.device, cmd, small, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+        transition_discard(&self.vk.device, cmd, small, vk::ImageAspectFlags::COLOR, vk::PipelineStageFlags2::TRANSFER, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
         blit(&self.vk.device, cmd, (image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, [vk::Offset3D { z: 0, ..o(sx, sy) }, o(sx + sw, sy + sh)]), (small, vk::ImageLayout::TRANSFER_DST_OPTIMAL, [vk::Offset3D::default(), o(ow, oh)]));
         transition(&self.vk.device, cmd, small, vk::ImageAspectFlags::COLOR, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
         let buf = self.vk.create_buffer(ow as u64 * oh as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, "recording")?;
@@ -1858,7 +1860,7 @@ impl Hw {
         let bytes = unsafe { std::slice::from_raw_parts(f.rgba.as_ptr() as *const u8, f.rgba.len() * 4) };
         let Ok((buf, off)) = self.stage(bytes) else { return };
         let image = self.movie.as_ref().unwrap().image;
-        transition(&self.vk.device, self.cmd(), image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+        transition_discard(&self.vk.device, self.cmd(), image, vk::ImageAspectFlags::COLOR, vk::PipelineStageFlags2::TRANSFER, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
         let region = vk::BufferImageCopy::default()
             .buffer_offset(off)
             .image_subresource(layers(vk::ImageAspectFlags::COLOR))
@@ -1899,15 +1901,20 @@ impl Hw {
         let dev = self.vk.device.clone();
         let cmd = self.cmd();
         let f = &self.frames[self.slot];
-        let acquired = unsafe { self.vk.swapchain.loader.acquire_next_image(self.vk.swapchain.swapchain, u64::MAX, f.acquired, vk::Fence::null()) };
-        let image_index = match acquired {
-            Ok((i, _)) => Some(i),
-            Err(_) => None,
+        let has_swapchain = self.vk.swapchain.swapchain != vk::SwapchainKHR::null()
+            && self.rendered.len() == self.vk.swapchain.images.len();
+        let image_index = if has_swapchain {
+            match unsafe { self.vk.swapchain.loader.acquire_next_image(self.vk.swapchain.swapchain, u64::MAX, f.acquired, vk::Fence::null()) } {
+                Ok((i, _)) => Some(i),
+                Err(_) => None,
+            }
+        } else {
+            None
         };
         if let Some(i) = image_index {
             let sw = self.vk.swapchain.images[i as usize];
             let ext = self.vk.swapchain.extent;
-            transition(&dev, cmd, sw, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+            transition_discard(&dev, cmd, sw, vk::ImageAspectFlags::COLOR, vk::PipelineStageFlags2::TRANSFER, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
             unsafe {
                 let black = vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] };
                 dev.cmd_clear_color_image(cmd, sw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &black, &[range(vk::ImageAspectFlags::COLOR)]);
@@ -1929,7 +1936,7 @@ impl Hw {
                     let mut from = (image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, src_rect);
                     for img in &self.blur {
                         let to = [vk::Offset3D::default(), vk::Offset3D { x: img.extent.width as i32, y: img.extent.height as i32, z: 1 }];
-                        transition(&dev, cmd, img.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+                        transition_discard(&dev, cmd, img.image, vk::ImageAspectFlags::COLOR, vk::PipelineStageFlags2::TRANSFER, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
                         blit(&dev, cmd, from, (img.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, to));
                         transition(&dev, cmd, img.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
                         from = (img.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, to);
@@ -1960,36 +1967,42 @@ impl Hw {
             let _ = dev.end_command_buffer(cmd);
             let cmds = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
             let waits = [vk::SemaphoreSubmitInfo::default().semaphore(self.frames[self.slot].acquired).stage_mask(vk::PipelineStageFlags2::TRANSFER)];
-            let signals = image_index.map(|i| [vk::SemaphoreSubmitInfo::default().semaphore(self.rendered[i as usize]).stage_mask(vk::PipelineStageFlags2::TRANSFER)]);
+            let signals = image_index.map(|i| [vk::SemaphoreSubmitInfo::default().semaphore(self.rendered[i as usize]).stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)]);
             let mut submit = vk::SubmitInfo2::default().command_buffer_infos(&cmds);
             if let Some(sig) = signals.as_ref() {
                 submit = submit.wait_semaphore_infos(&waits).signal_semaphore_infos(sig);
             }
             let _ = dev.queue_submit2(self.vk.queue, &[submit], self.frames[self.slot].fence);
             if present {
+                let mut need_resize = false;
                 if let Some(i) = image_index {
                     let sems = [self.rendered[i as usize]];
                     let scs = [self.vk.swapchain.swapchain];
                     let idx = [i];
                     let r = self.vk.swapchain.loader.queue_present(self.vk.queue, &vk::PresentInfoKHR::default().wait_semaphores(&sems).swapchains(&scs).image_indices(&idx));
                     if matches!(r, Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Ok(true)) {
-                        let e = self.vk.swapchain.extent;
-                        self.resize((e.width, e.height));
+                        need_resize = true;
                     }
                 } else {
-                    let e = self.vk.swapchain.extent;
-                    self.resize((e.width, e.height));
+                    need_resize = true;
+                }
+                if need_resize && self.window_size.0 > 0 && self.window_size.1 > 0 {
+                    self.resize(self.window_size);
                 }
             }
         }
         self.slot = (self.slot + 1) % FRAMES;
         self.frame_no += 1;
+        self.submit_no += 1;
         self.begin_frame();
         self.apply_sharpened();
         self.apply_hd();
     }
 
     pub fn resize(&mut self, size: (u32, u32)) {
+        if size.0 > 0 && size.1 > 0 {
+            self.window_size = size;
+        }
         self.draw_gen += 1;
         match self.vk.recreate_swapchain(size) {
             Ok(true) => {}
@@ -2003,7 +2016,20 @@ impl Hw {
         for s in self.rendered.drain(..) {
             unsafe { dev.destroy_semaphore(s, None) };
         }
-        self.rendered = (0..self.vk.swapchain.images.len()).map(|_| unsafe { dev.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap() }).collect();
+        let mut rendered = Vec::with_capacity(self.vk.swapchain.images.len());
+        for _ in 0..self.vk.swapchain.images.len() {
+            match unsafe { dev.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) } {
+                Ok(sem) => rendered.push(sem),
+                Err(e) => {
+                    eprintln!("[gs] semaphore: {e:?}");
+                    for sem in rendered {
+                        unsafe { dev.destroy_semaphore(sem, None) };
+                    }
+                    return;
+                }
+            }
+        }
+        self.rendered = rendered;
     }
 
     /// Swap in textures the xBRZ worker has finished, at the start of a
@@ -2045,13 +2071,18 @@ impl Hw {
             match self.upload_levels(&l.levels) {
                 Ok(image) => {
                     self.hd_bytes += bytes;
-                    self.hd_images.insert(l.hash, HdImage { image, last_used: self.frame_no, bytes });
+                    self.hd_images.insert(l.hash, HdImage { image, last_used: self.submit_no, bytes });
                 }
                 Err(e) => eprintln!("[textures] upload: {e}"),
             }
         }
         if self.hd_bytes > HD_BUDGET {
-            let mut by_age: Vec<(u64, u64)> = self.hd_images.iter().filter(|(_, i)| i.last_used + 2 < self.frame_no).map(|(&h, i)| (i.last_used, h)).collect();
+            let mut by_age: Vec<(u64, u64)> = self
+                .hd_images
+                .iter()
+                .filter(|(_, i)| self.submit_no.saturating_sub(i.last_used) >= FRAMES as u64)
+                .map(|(&h, i)| (i.last_used, h))
+                .collect();
             by_age.sort_unstable();
             for (_, hash) in by_age {
                 if self.hd_bytes <= HD_BUDGET / 4 * 3 {
@@ -2071,8 +2102,8 @@ impl Hw {
         if self.frame_no % 60 != 0 {
             return;
         }
-        let now = self.frame_no;
-        let old: Vec<TexKey> = self.textures.iter().filter(|(_, t)| now - t.last_used > TEXTURE_TTL).map(|(k, _)| *k).collect();
+        let now = self.submit_no;
+        let old: Vec<TexKey> = self.textures.iter().filter(|(_, t)| now.saturating_sub(t.last_used) > TEXTURE_TTL).map(|(k, _)| *k).collect();
         for k in old {
             let t = self.textures.remove(&k).unwrap();
             self.texture_bytes -= t.bytes;
@@ -2080,10 +2111,15 @@ impl Hw {
         }
     }
 
-    /// Drop least recently used textures (not used this frame) until the
-    /// cache is back under half its budget.
+    /// Drop least recently used textures (not used by in-flight submissions)
+    /// until the cache is back under half its budget.
     fn evict_lru(&mut self) {
-        let mut by_age: Vec<(u64, TexKey)> = self.textures.iter().filter(|(_, t)| t.last_used + 2 < self.frame_no).map(|(k, t)| (t.last_used, *k)).collect();
+        let mut by_age: Vec<(u64, TexKey)> = self
+            .textures
+            .iter()
+            .filter(|(_, t)| self.submit_no.saturating_sub(t.last_used) >= FRAMES as u64)
+            .map(|(k, t)| (t.last_used, *k))
+            .collect();
         by_age.sort_by_key(|e| e.0);
         for (_, k) in by_age {
             if self.texture_bytes <= TEXTURE_BUDGET / 2 {

@@ -4,266 +4,34 @@
 //! `gamecontrollerdb.txt` mappings, deadzone scaling, raw-joystick fallback,
 //! and rumble work identically in both binaries.
 
+mod input;
+mod mapping;
+
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-fn quiet() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("FREEK_QUIET").is_some_and(|v| v != "0"))
-}
-
-fn pad_log() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("FREEK_PAD_LOG").is_some_and(|v| v != "0"))
-}
-
-use ee_runtime::pad::{button, Input};
-use freek_config::Binding;
+use ee_runtime::pad::Input;
+use ee_runtime::{pad_log, quiet};
 use sdl3::event::Event;
-use sdl3::gamepad::{Axis, Button, Gamepad};
+use sdl3::gamepad::{Axis, Gamepad};
 use sdl3::iostream::IOStream;
-use sdl3::joystick::{HatState, Joystick, JoystickId, JoystickType};
+use sdl3::joystick::{Joystick, JoystickId, JoystickType};
 use sdl3::{EventPump, GamepadSubsystem, JoystickSubsystem, Sdl};
+
+use crate::input::{rumble_strength, JOY_AXIS_DIGITAL_THRESHOLD, TRIGGER_PRESS_THRESHOLD};
+pub use crate::mapping::{canonical_button_name, parse_pad_input, HatDir, PadInput, PadMap};
 
 const RUMBLE_PERIOD: Duration = Duration::from_millis(50);
 const RUMBLE_REFRESH: Duration = Duration::from_millis(500);
 const RUMBLE_DURATION_MS: u32 = 2_000;
-const TRIGGER_PRESS_THRESHOLD: i16 = 8_192;
-const JOY_AXIS_DIGITAL_THRESHOLD: i16 = 16_384;
-
-/// PS2 DualShock 2 button names (matching `freek_config::PS2_BUTTONS`) and bits.
-pub const PAD_BUTTONS: &[(&str, u16)] = &[
-    ("cross", button::CROSS),
-    ("circle", button::CIRCLE),
-    ("square", button::SQUARE),
-    ("triangle", button::TRIANGLE),
-    ("l1", button::L1),
-    ("r1", button::R1),
-    ("l2", button::L2),
-    ("r2", button::R2),
-    ("l3", button::L3),
-    ("r3", button::R3),
-    ("start", button::START),
-    ("select", button::SELECT),
-    ("up", button::UP),
-    ("down", button::DOWN),
-    ("left", button::LEFT),
-    ("right", button::RIGHT),
-];
-
-/// Fallback button layout when an unmapped raw joystick has no `Joy*` bindings.
-const RAW_FALLBACK_BUTTONS: &[u16] = &[
-    button::CROSS,
-    button::CIRCLE,
-    button::SQUARE,
-    button::TRIANGLE,
-    button::L1,
-    button::R1,
-    button::L2,
-    button::R2,
-    button::SELECT,
-    button::START,
-    button::L3,
-    button::R3,
-];
-
-/// Cardinal direction on a raw joystick hat switch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HatDir {
-    Up,
-    Down,
-    Left,
-    Right,
-}
-
-impl HatDir {
-    fn as_str(self) -> &'static str {
-        match self {
-            HatDir::Up => "Up",
-            HatDir::Down => "Down",
-            HatDir::Left => "Left",
-            HatDir::Right => "Right",
-        }
-    }
-
-    fn matches(self, state: HatState) -> bool {
-        match self {
-            HatDir::Up => matches!(state, HatState::Up | HatState::LeftUp | HatState::RightUp),
-            HatDir::Down => {
-                matches!(state, HatState::Down | HatState::LeftDown | HatState::RightDown)
-            }
-            HatDir::Left => matches!(state, HatState::Left | HatState::LeftUp | HatState::LeftDown),
-            HatDir::Right => {
-                matches!(state, HatState::Right | HatState::RightUp | HatState::RightDown)
-            }
-        }
-    }
-
-    fn first_from_state(state: HatState) -> Option<Self> {
-        match state {
-            HatState::Up | HatState::LeftUp | HatState::RightUp => Some(HatDir::Up),
-            HatState::Down | HatState::LeftDown | HatState::RightDown => Some(HatDir::Down),
-            HatState::Left => Some(HatDir::Left),
-            HatState::Right => Some(HatDir::Right),
-            HatState::Centered => None,
-        }
-    }
-}
-
-/// A parsed controller binding target supporting SDL gamepads and raw joysticks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PadInput {
-    GamepadButton(Button),
-    GamepadTrigger(Axis),
-    JoyButton(u8),
-    JoyHat(u8, HatDir),
-    JoyAxis(u8, bool),
-}
-
-/// Precompiled mapping from physical controller inputs to PS2 button bitmasks.
-#[derive(Clone, Debug, Default)]
-pub struct PadMap {
-    entries: Vec<(PadInput, u16)>,
-    has_raw_joy_bindings: bool,
-}
-
-impl PadMap {
-    /// Compile configured bindings into fast controller-lookup entries.
-    pub fn compile(bindings: &[Binding]) -> Self {
-        let mut entries = Vec::new();
-        let mut has_raw_joy_bindings = false;
-        for binding in bindings {
-            let Some(&(_, bit)) = PAD_BUTTONS.iter().find(|&&(name, _)| name == binding.button)
-            else {
-                continue;
-            };
-            for name in &binding.pad {
-                match parse_pad_input(name) {
-                    Some(input) => {
-                        if matches!(
-                            input,
-                            PadInput::JoyButton(_) | PadInput::JoyHat(_, _) | PadInput::JoyAxis(_, _)
-                        ) {
-                            has_raw_joy_bindings = true;
-                        }
-                        entries.push((input, bit));
-                    }
-                    None if !name.is_empty() => {
-                        eprintln!("[input] unknown gamepad button {name:?}");
-                    }
-                    None => {}
-                }
-            }
-        }
-        Self {
-            entries,
-            has_raw_joy_bindings,
-        }
-    }
-}
-
-/// Canonical string name stored in `freekstyle.toml` for an SDL gamepad button.
-///
-/// Preserves existing gilrs names (`"South"`, `"LeftTrigger"`, `"Select"`, etc.)
-/// so existing config files remain valid without migration.
-pub fn canonical_button_name(button: Button) -> &'static str {
-    match button {
-        Button::South => "South",
-        Button::East => "East",
-        Button::West => "West",
-        Button::North => "North",
-        Button::LeftShoulder => "LeftTrigger",
-        Button::RightShoulder => "RightTrigger",
-        Button::LeftStick => "LeftThumb",
-        Button::RightStick => "RightThumb",
-        Button::Start => "Start",
-        Button::Back => "Select",
-        Button::Guide => "Mode",
-        Button::DPadUp => "DPadUp",
-        Button::DPadDown => "DPadDown",
-        Button::DPadLeft => "DPadLeft",
-        Button::DPadRight => "DPadRight",
-        Button::Touchpad => "Touchpad",
-        Button::Misc1 => "Misc1",
-        Button::Misc2 => "Misc2",
-        Button::Misc3 => "Misc3",
-        Button::Misc4 => "Misc4",
-        Button::Misc5 => "Misc5",
-        Button::Misc6 => "Misc6",
-        Button::LeftPaddle1 => "LeftPaddle1",
-        Button::LeftPaddle2 => "LeftPaddle2",
-        Button::RightPaddle1 => "RightPaddle1",
-        Button::RightPaddle2 => "RightPaddle2",
-    }
-}
-
-/// Parse a binding string from `freekstyle.toml` into a `PadInput`.
-pub fn parse_pad_input(name: &str) -> Option<PadInput> {
-    let input = match name {
-        "South" => PadInput::GamepadButton(Button::South),
-        "East" => PadInput::GamepadButton(Button::East),
-        "West" => PadInput::GamepadButton(Button::West),
-        "North" => PadInput::GamepadButton(Button::North),
-        "LeftTrigger" | "LeftShoulder" => PadInput::GamepadButton(Button::LeftShoulder),
-        "RightTrigger" | "RightShoulder" => PadInput::GamepadButton(Button::RightShoulder),
-        "LeftTrigger2" => PadInput::GamepadTrigger(Axis::TriggerLeft),
-        "RightTrigger2" => PadInput::GamepadTrigger(Axis::TriggerRight),
-        "LeftThumb" | "LeftStick" => PadInput::GamepadButton(Button::LeftStick),
-        "RightThumb" | "RightStick" => PadInput::GamepadButton(Button::RightStick),
-        "Start" => PadInput::GamepadButton(Button::Start),
-        "Select" | "Back" => PadInput::GamepadButton(Button::Back),
-        "Mode" | "Guide" => PadInput::GamepadButton(Button::Guide),
-        "DPadUp" => PadInput::GamepadButton(Button::DPadUp),
-        "DPadDown" => PadInput::GamepadButton(Button::DPadDown),
-        "DPadLeft" => PadInput::GamepadButton(Button::DPadLeft),
-        "DPadRight" => PadInput::GamepadButton(Button::DPadRight),
-        "Touchpad" => PadInput::GamepadButton(Button::Touchpad),
-        "Misc1" => PadInput::GamepadButton(Button::Misc1),
-        "Misc2" => PadInput::GamepadButton(Button::Misc2),
-        "Misc3" => PadInput::GamepadButton(Button::Misc3),
-        "Misc4" => PadInput::GamepadButton(Button::Misc4),
-        "Misc5" => PadInput::GamepadButton(Button::Misc5),
-        "Misc6" => PadInput::GamepadButton(Button::Misc6),
-        "LeftPaddle1" => PadInput::GamepadButton(Button::LeftPaddle1),
-        "LeftPaddle2" => PadInput::GamepadButton(Button::LeftPaddle2),
-        "RightPaddle1" => PadInput::GamepadButton(Button::RightPaddle1),
-        "RightPaddle2" => PadInput::GamepadButton(Button::RightPaddle2),
-        _ => return parse_raw_joy_input(name),
-    };
-    Some(input)
-}
-
-fn parse_raw_joy_input(name: &str) -> Option<PadInput> {
-    if let Some(rest) = name.strip_prefix("JoyButton") {
-        let idx: u8 = rest.parse().ok()?;
-        return Some(PadInput::JoyButton(idx));
-    }
-    if let Some(rest) = name.strip_prefix("JoyHat") {
-        for dir in [HatDir::Up, HatDir::Down, HatDir::Left, HatDir::Right] {
-            if let Some(idx_str) = rest.strip_suffix(dir.as_str()) {
-                let idx: u8 = idx_str.parse().ok()?;
-                return Some(PadInput::JoyHat(idx, dir));
-            }
-        }
-        return None;
-    }
-    if let Some(rest) = name.strip_prefix("JoyAxis") {
-        if let Some(idx_str) = rest.strip_suffix('+') {
-            let idx: u8 = idx_str.parse().ok()?;
-            return Some(PadInput::JoyAxis(idx, true));
-        }
-        if let Some(idx_str) = rest.strip_suffix('-') {
-            let idx: u8 = idx_str.parse().ok()?;
-            return Some(PadInput::JoyAxis(idx, false));
-        }
-    }
-    None
-}
 
 enum DeviceKind {
     Gamepad(Gamepad),
-    RawJoystick { joy: Joystick, rest_axes: Vec<i16> },
+    RawJoystick {
+        joy: Joystick,
+        rest_axes: Vec<i16>,
+        axis_down: Vec<i8>,
+    },
 }
 
 struct DeviceState {
@@ -333,6 +101,7 @@ impl ControllerManager {
         sdl3::hint::set("SDL_NO_SIGNAL_HANDLERS", "1");
         // Required on Windows when another library (winit/eframe) owns the
         // window and SDL_INIT_VIDEO is not used.
+        #[cfg(target_os = "windows")]
         sdl3::hint::set("SDL_JOYSTICK_THREAD", "1");
         sdl3::hint::set("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
         sdl3::hint::set("SDL_JOYSTICK_HIDAPI", "1");
@@ -375,6 +144,8 @@ impl ControllerManager {
             _sdl: sdl,
         };
 
+        // Populate initial controller state before sampling `rest_axes`.
+        mgr.events.pump_events();
         if let Ok(ids) = mgr.joystick.joysticks() {
             for id in ids {
                 mgr.add_device(id, false);
@@ -472,17 +243,34 @@ impl ControllerManager {
                     value,
                     ..
                 } => {
-                    if let Some(dev) = self.devices.get(&which) {
-                        if let DeviceKind::RawJoystick { rest_axes, .. } = &dev.kind {
-                            let rest = rest_axes.get(axis_idx as usize).copied().unwrap_or(0);
+                    if let Some(dev) = self.devices.get_mut(&which) {
+                        if let DeviceKind::RawJoystick {
+                            rest_axes,
+                            axis_down,
+                            ..
+                        } = &mut dev.kind
+                        {
+                            let idx = axis_idx as usize;
+                            let rest = rest_axes.get(idx).copied().unwrap_or(0);
                             let delta = value as i32 - rest as i32;
-                            if delta.abs() > JOY_AXIS_DIGITAL_THRESHOLD as i32 {
-                                let sign = if delta > 0 { '+' } else { '-' };
+                            let dir: i8 = if delta > i32::from(JOY_AXIS_DIGITAL_THRESHOLD) {
+                                1
+                            } else if delta < -i32::from(JOY_AXIS_DIGITAL_THRESHOLD) {
+                                -1
+                            } else {
+                                0
+                            };
+                            if idx >= axis_down.len() {
+                                axis_down.resize(idx + 1, 0);
+                            }
+                            if dir != 0 && dir != axis_down[idx] {
+                                let sign = if dir > 0 { '+' } else { '-' };
                                 if pad_log() {
                                     eprintln!("[input] sdl raw JoyAxis{axis_idx}{sign} value={value} rest={rest}");
                                 }
                                 captured = Some(format!("JoyAxis{axis_idx}{sign}"));
                             }
+                            axis_down[idx] = dir;
                         }
                     }
                 }
@@ -602,9 +390,11 @@ impl ControllerManager {
                 if !is_plausible_raw_joystick(&joy, id) {
                     return;
                 }
+                self.joystick.update();
                 let rest_axes: Vec<i16> = (0..joy.num_axes())
                     .map(|idx| joy.axis(idx).unwrap_or(0))
                     .collect();
+                let axis_down = vec![0i8; rest_axes.len()];
                 let guid = joy.guid().to_string();
                 let (axes, buttons, hats) = (joy.num_axes(), joy.num_buttons(), joy.num_hats());
                 let name = if joy.name().is_empty() {
@@ -615,7 +405,11 @@ impl ControllerManager {
                 self.devices.insert(
                     id,
                     DeviceState {
-                        kind: DeviceKind::RawJoystick { joy, rest_axes },
+                        kind: DeviceKind::RawJoystick {
+                            joy,
+                            rest_axes,
+                            axis_down,
+                        },
                         left_trigger_down: false,
                         right_trigger_down: false,
                     },
@@ -682,6 +476,8 @@ impl ControllerManager {
 fn is_plausible_raw_joystick(joy: &Joystick, id: JoystickId) -> bool {
     // Filter non-gamepad HID devices (e.g. keyboards, sensors, mice) that
     // expose a stray RawInput/DirectInput node without controller controls.
+    // SAFETY: `id` is a live SDL3 joystick instance ID and the SDL joystick
+    // subsystem is initialized on the calling thread.
     let kind = JoystickType::from_ll(unsafe {
         sdl3::sys::joystick::SDL_GetJoystickTypeForID(id.into())
     });
@@ -698,207 +494,9 @@ fn is_plausible_raw_joystick(joy: &Joystick, id: JoystickId) -> bool {
 
 fn read_device_input(dev: &DeviceState, pad_map: &PadMap, deadzone: f32) -> Input {
     match &dev.kind {
-        DeviceKind::Gamepad(gp) => read_gamepad_input(gp, pad_map, deadzone),
-        DeviceKind::RawJoystick { joy, rest_axes } => {
-            read_raw_joystick_input(joy, rest_axes, pad_map, deadzone)
+        DeviceKind::Gamepad(gp) => input::read_gamepad_input(gp, pad_map, deadzone),
+        DeviceKind::RawJoystick { joy, rest_axes, .. } => {
+            input::read_raw_joystick_input(joy, rest_axes, pad_map, deadzone)
         }
     }
-}
-
-fn read_gamepad_input(gp: &Gamepad, pad_map: &PadMap, deadzone: f32) -> Input {
-    let mut buttons = 0u16;
-    let mut l2 = 0u8;
-    let mut r2 = 0u8;
-
-    for &(input, bit) in &pad_map.entries {
-        let (pressed, pressure) = match input {
-            PadInput::GamepadButton(b) => {
-                let p = gp.button(b);
-                (p, if p { 0xff } else { 0 })
-            }
-            PadInput::GamepadTrigger(axis) => {
-                let raw = gp.axis(axis);
-                (raw >= TRIGGER_PRESS_THRESHOLD, trigger_to_u8(raw))
-            }
-            PadInput::JoyButton(_) | PadInput::JoyHat(_, _) | PadInput::JoyAxis(_, _) => (false, 0),
-        };
-        if pressed {
-            buttons |= bit;
-        }
-        if bit & button::L2 != 0 {
-            l2 = l2.max(pressure);
-        }
-        if bit & button::R2 != 0 {
-            r2 = r2.max(pressure);
-        }
-    }
-
-    let (lx, ly) = radial_deadzone(gp.axis(Axis::LeftX), gp.axis(Axis::LeftY), deadzone);
-    let (rx, ry) = radial_deadzone(gp.axis(Axis::RightX), gp.axis(Axis::RightY), deadzone);
-
-    Input {
-        buttons,
-        sticks: [rx, ry, lx, ly],
-        l2,
-        r2,
-    }
-}
-
-fn read_raw_joystick_input(
-    joy: &Joystick,
-    rest_axes: &[i16],
-    pad_map: &PadMap,
-    deadzone: f32,
-) -> Input {
-    let mut buttons = 0u16;
-    let mut l2 = 0u8;
-    let mut r2 = 0u8;
-
-    if pad_map.has_raw_joy_bindings {
-        for &(input, bit) in &pad_map.entries {
-            let (pressed, pressure) = match input {
-                PadInput::JoyButton(idx) => {
-                    let p = joy.button(idx as u32).unwrap_or(false);
-                    (p, if p { 0xff } else { 0 })
-                }
-                PadInput::JoyHat(idx, dir) => {
-                    let p = joy
-                        .hat(idx as u32)
-                        .map(|state| dir.matches(state))
-                        .unwrap_or(false);
-                    (p, if p { 0xff } else { 0 })
-                }
-                PadInput::JoyAxis(idx, positive) => {
-                    let val = joy.axis(idx as u32).unwrap_or(0);
-                    let rest = rest_axes.get(idx as usize).copied().unwrap_or(0);
-                    (
-                        joy_axis_pressed(val, rest, positive),
-                        joy_axis_pressure(val, rest, positive),
-                    )
-                }
-                PadInput::GamepadButton(_) | PadInput::GamepadTrigger(_) => (false, 0),
-            };
-            if pressed {
-                buttons |= bit;
-            }
-            if bit & button::L2 != 0 {
-                l2 = l2.max(pressure);
-            }
-            if bit & button::R2 != 0 {
-                r2 = r2.max(pressure);
-            }
-        }
-    } else {
-        for (idx, &bit) in RAW_FALLBACK_BUTTONS.iter().enumerate() {
-            if idx as u32 >= joy.num_buttons() {
-                break;
-            }
-            if joy.button(idx as u32).unwrap_or(false) {
-                buttons |= bit;
-            }
-        }
-        if joy.num_hats() > 0 {
-            if let Ok(state) = joy.hat(0) {
-                if HatDir::Up.matches(state) {
-                    buttons |= button::UP;
-                }
-                if HatDir::Down.matches(state) {
-                    buttons |= button::DOWN;
-                }
-                if HatDir::Left.matches(state) {
-                    buttons |= button::LEFT;
-                }
-                if HatDir::Right.matches(state) {
-                    buttons |= button::RIGHT;
-                }
-            }
-        }
-        l2 = if buttons & button::L2 != 0 { 0xff } else { 0 };
-        r2 = if buttons & button::R2 != 0 { 0xff } else { 0 };
-    }
-
-    let axis_or_zero = |idx: u32| -> i16 {
-        if idx < joy.num_axes() {
-            joy.axis(idx).unwrap_or(0)
-        } else {
-            0
-        }
-    };
-    let (lx, ly) = radial_deadzone(axis_or_zero(0), axis_or_zero(1), deadzone);
-    let (rx, ry) = if joy.num_axes() >= 4 {
-        radial_deadzone(axis_or_zero(2), axis_or_zero(3), deadzone)
-    } else {
-        (0x80, 0x80)
-    };
-
-    Input {
-        buttons,
-        sticks: [rx, ry, lx, ly],
-        l2,
-        r2,
-    }
-}
-
-fn joy_axis_pressed(value: i16, rest: i16, positive: bool) -> bool {
-    let delta = value as i32 - rest as i32;
-    let thresh = JOY_AXIS_DIGITAL_THRESHOLD as i32;
-    if positive {
-        delta > thresh
-    } else {
-        delta < -thresh
-    }
-}
-
-fn joy_axis_pressure(value: i16, rest: i16, positive: bool) -> u8 {
-    let delta = if positive {
-        value as i32 - rest as i32
-    } else {
-        rest as i32 - value as i32
-    };
-    if delta <= 0 {
-        return 0;
-    }
-    let span = if positive {
-        i16::MAX as i32 - rest as i32
-    } else {
-        rest as i32 - i16::MIN as i32
-    }
-    .max(1);
-    ((delta as u32 * 255) / span as u32).min(255) as u8
-}
-
-fn radial_deadzone(x: i16, y: i16, deadzone: f32) -> (u8, u8) {
-    let fx = (x as f32 / 32767.0).clamp(-1.0, 1.0);
-    let fy = (y as f32 / 32767.0).clamp(-1.0, 1.0);
-    let mag = (fx * fx + fy * fy).sqrt();
-    let dz = deadzone.clamp(0.0, 0.5);
-    if mag <= dz || mag == 0.0 {
-        return (0x80, 0x80);
-    }
-    let scale = ((mag - dz) / (1.0 - dz)).min(1.0) / mag;
-    (norm_to_u8(fx * scale), norm_to_u8(fy * scale))
-}
-
-fn norm_to_u8(v: f32) -> u8 {
-    ((v * 127.5) + 127.5).round().clamp(0.0, 255.0) as u8
-}
-
-fn trigger_to_u8(v: i16) -> u8 {
-    ((v.max(0) as u32 * 255) / 32767).min(255) as u8
-}
-
-/// Convert PS2 `(small, large)` motor speeds into `(weak, strong)` u16 strengths.
-///
-/// The light motor spins above zero as a binary pulse; the heavy motor curves
-/// up quadratically above the PS2 quiet threshold so mild bumps stay quiet.
-fn rumble_strength((small, large): (u8, u8)) -> (u16, u16) {
-    const QUIET: f32 = 110.0;
-    let weak = if small != 0 { 8_000 } else { 0 };
-    let strong = if (large as f32) <= QUIET {
-        0
-    } else {
-        let x = (large as f32 - QUIET) / (255.0 - QUIET);
-        (x * x * 50_000.0) as u16
-    };
-    (weak, strong)
 }

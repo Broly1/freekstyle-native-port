@@ -12,7 +12,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -78,7 +78,7 @@ fn decoder(path: &Path, output: &[&str]) -> Result<Child, String> {
 }
 
 /// Play `path` to the end, or until skipped.
-pub fn play(path: &Path, gs: &Sender<gs::Msg>) -> Result<(), String> {
+pub fn play(path: &Path, gs: &SyncSender<gs::Msg>) -> Result<(), String> {
     let (w, h, fps) = probe(path).ok_or_else(|| format!("{}: unreadable (is ffmpeg installed?)", path.display()))?;
     let mut video = decoder(path, &["-an", "-f", "rawvideo", "-pix_fmt", "rgba"])?;
     let mut audio = match decoder(path, &["-vn", "-f", "s16le", "-ac", "2", "-ar", "48000"]) {

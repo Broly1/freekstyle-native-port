@@ -51,15 +51,21 @@ impl Default for Card {
     }
 }
 
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
 impl Card {
     pub fn new() -> Card {
-        let base = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
-            .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        #[cfg(windows)]
+        let base = env_path("APPDATA")
+            .or_else(|| env_path("LOCALAPPDATA"))
             .unwrap_or_else(|| PathBuf::from("."));
-        Card { root: base.join("freekstyle/saves"), cwd: "/".into(), files: Vec::new(), seen: false, dir_iter: Vec::new() }
+        #[cfg(not(windows))]
+        let base = env_path("XDG_DATA_HOME")
+            .or_else(|| env_path("HOME").map(|h| h.join(".local/share")))
+            .unwrap_or_else(|| PathBuf::from("."));
+        Card { root: base.join("freekstyle").join("saves"), cwd: "/".into(), files: Vec::new(), seen: false, dir_iter: Vec::new() }
     }
 
     /// Host path for a card path, relative to the current directory. Rejects

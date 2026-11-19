@@ -166,7 +166,9 @@ const STACK_SIZE: usize = 512 << 20;
 /// Request 1 ms system timer resolution on Windows so short sleeps in the EE
 /// idle loop and IOP audio ring do not stretch to the 15.6 ms default tick.
 #[cfg(target_os = "windows")]
-struct WinTimerPeriod;
+struct WinTimerPeriod {
+    active: bool,
+}
 
 #[cfg(target_os = "windows")]
 impl WinTimerPeriod {
@@ -175,16 +177,17 @@ impl WinTimerPeriod {
         extern "system" {
             fn timeBeginPeriod(period: u32) -> u32;
         }
-        unsafe {
-            timeBeginPeriod(1);
-        }
-        Self
+        let active = unsafe { timeBeginPeriod(1) == 0 };
+        Self { active }
     }
 }
 
 #[cfg(target_os = "windows")]
 impl Drop for WinTimerPeriod {
     fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
         #[link(name = "winmm")]
         extern "system" {
             fn timeEndPeriod(period: u32) -> u32;
@@ -197,8 +200,6 @@ impl Drop for WinTimerPeriod {
 
 fn main() {
     freek_config::crash::install("Freekstyle");
-    #[cfg(target_os = "windows")]
-    let _win_timer = WinTimerPeriod::enable();
     let opts = options();
     ee_runtime::hle::WIDESCREEN.store(opts.widescreen, std::sync::atomic::Ordering::Relaxed);
     let path = opts.elf.clone();
@@ -214,6 +215,8 @@ fn main() {
         eprintln!("{path} is not the executable the code was generated from; re-run ee-recomp");
         process::exit(1);
     }
+    #[cfg(target_os = "windows")]
+    let _win_timer = WinTimerPeriod::enable();
 
     // The IOP (sound driver and SPU2) runs on its own thread, paced by the
     // audio device.
@@ -225,7 +228,7 @@ fn main() {
 
     // Converted pictures live next to the disc image (see lsc2png).
     let images_dir = std::path::Path::new(&opts.disc).parent().unwrap_or(std::path::Path::new(".")).join("images");
-    let (gs_tx, gs_rx) = std::sync::mpsc::channel();
+    let (gs_tx, gs_rx) = std::sync::mpsc::sync_channel(4096);
     let replay = env::var("FREEK_GS_REPLAY").ok();
     if replay.is_none() {
     thread::Builder::new()
@@ -278,6 +281,7 @@ fn main() {
         opts,
         rx: gs_rx,
         pending: VecDeque::new(),
+        pending_frames: 0,
         window: None,
         renderer: None,
         last_title: Instant::now(),
@@ -299,13 +303,53 @@ fn main() {
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("event loop: {e}");
     }
+    if let Some(c) = &mut app.controllers {
+        c.set_rumble([(0, 0); 2], false);
+    }
+    drop(app);
+    #[cfg(target_os = "windows")]
+    drop(_win_timer);
     process::exit(0);
+}
+
+const MAX_PENDING_MSGS: usize = 4096;
+const MAX_PENDING_FRAMES: usize = 3;
+
+fn is_frame_msg(m: &gs::Msg) -> bool {
+    matches!(m, gs::Msg::Vsync(_) | gs::Msg::Movie(Some(_)))
+}
+
+fn push_pending(pending: &mut VecDeque<gs::Msg>, pending_frames: &mut usize, msg: gs::Msg) {
+    if is_frame_msg(&msg) {
+        *pending_frames += 1;
+    }
+    pending.push_back(msg);
+}
+
+fn pop_pending(pending: &mut VecDeque<gs::Msg>, pending_frames: &mut usize) -> Option<gs::Msg> {
+    let msg = pending.pop_front()?;
+    if is_frame_msg(&msg) {
+        *pending_frames = pending_frames.saturating_sub(1);
+    }
+    Some(msg)
+}
+
+fn drain_rx(rx: &Receiver<gs::Msg>, pending: &mut VecDeque<gs::Msg>, pending_frames: &mut usize) -> bool {
+    while pending.len() < MAX_PENDING_MSGS && *pending_frames < MAX_PENDING_FRAMES {
+        match rx.try_recv() {
+            Ok(msg) => push_pending(pending, pending_frames, msg),
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => return false,
+        }
+    }
+    true
 }
 
 struct App {
     opts: Options,
     rx: Receiver<gs::Msg>,
     pending: VecDeque<gs::Msg>,
+    pending_frames: usize,
     window: Option<Window>,
     renderer: Option<gs_vulkan::Renderer>,
     last_title: Instant,
@@ -512,29 +556,22 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.update_input();
         let Some(r) = &mut self.renderer else { return };
-        let is_frame = |m: &gs::Msg| matches!(m, gs::Msg::Vsync(_) | gs::Msg::Movie(Some(_)));
-        // Drain anything already queued so stale frames skip swapchain
-        // presentation and the display never falls seconds behind input.
-        loop {
-            match self.rx.try_recv() {
-                Ok(msg) => self.pending.push_back(msg),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    el.exit();
-                    return;
-                }
-            }
+        // Drain a bounded slice of queued messages so stale frames skip swapchain
+        // presentation while bounded backpressure keeps EE/GS memory in check.
+        if !drain_rx(&self.rx, &mut self.pending, &mut self.pending_frames) {
+            el.exit();
+            return;
         }
-        if !self.pending.iter().any(is_frame) {
+        if self.pending_frames == 0 {
             // Nothing ready to present yet: wait up to 20 ms, bounded so the
             // window stays responsive when the game is busy loading.
             let deadline = Instant::now() + Duration::from_millis(20);
-            loop {
+            while self.pending.len() < MAX_PENDING_MSGS {
                 let left = deadline.saturating_duration_since(Instant::now());
                 match self.rx.recv_timeout(left) {
                     Ok(msg) => {
-                        let done = is_frame(&msg);
-                        self.pending.push_back(msg);
+                        let done = is_frame_msg(&msg);
+                        push_pending(&mut self.pending, &mut self.pending_frames, msg);
                         if done {
                             break;
                         }
@@ -546,23 +583,26 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            while let Ok(msg) = self.rx.try_recv() {
-                self.pending.push_back(msg);
+            if !drain_rx(&self.rx, &mut self.pending, &mut self.pending_frames) {
+                el.exit();
+                return;
             }
         }
         // Bound catch-up per event-loop turn so Windows always gets control
         // back to pump window messages and never marks the window Not Responding.
         let budget = Instant::now() + Duration::from_millis(25);
-        while let Some(msg) = self.pending.pop_front() {
-            let frame_msg = is_frame(&msg);
+        while let Some(msg) = pop_pending(&mut self.pending, &mut self.pending_frames) {
+            let frame_msg = is_frame_msg(&msg);
             let within_budget = Instant::now() < budget;
-            if frame_msg && within_budget {
-                while let Ok(newer) = self.rx.try_recv() {
-                    self.pending.push_back(newer);
-                }
+            if frame_msg && within_budget && !drain_rx(&self.rx, &mut self.pending, &mut self.pending_frames) {
+                el.exit();
+                return;
             }
-            let has_newer = frame_msg && within_budget && self.pending.iter().any(is_frame);
+            let has_newer = frame_msg && within_budget && self.pending_frames > 0;
             if r.handle_frame(msg, !has_newer) {
+                break;
+            }
+            if Instant::now() >= budget {
                 break;
             }
         }

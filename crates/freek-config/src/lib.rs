@@ -35,13 +35,22 @@ pub fn external_gamepad_db_paths() -> Vec<PathBuf> {
         candidates.push(dir.join("gamecontrollerdb.txt"));
     }
     let mut out: Vec<PathBuf> = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
     for p in candidates {
+        if !p.is_file() {
+            continue;
+        }
         let canonical = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
-        if p.is_file() && !out.iter().any(|existing| std::fs::canonicalize(existing).unwrap_or_else(|_| existing.clone()) == canonical) {
+        if !seen.contains(&canonical) {
+            seen.push(canonical);
             out.push(p);
         }
     }
     out
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
 /// Where the launcher writes and the game looks: `freekstyle.toml` in the
@@ -56,11 +65,13 @@ pub fn path() -> &'static Path {
         if here.is_file() || writable(Path::new(".")) {
             return here;
         }
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
-            .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
-            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".config")))
+        #[cfg(windows)]
+        let config = env_path("APPDATA")
+            .or_else(|| env_path("LOCALAPPDATA"))
+            .unwrap_or_default();
+        #[cfg(not(windows))]
+        let config = env_path("XDG_CONFIG_HOME")
+            .or_else(|| env_path("HOME").map(|h| h.join(".config")))
             .unwrap_or_default();
         config.join("freekstyle").join(FILE)
     })
@@ -233,6 +244,7 @@ impl Config {
             Err(e) => return Err(format!("{}: {e}", path.display())),
         };
         let mut c: Config = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        c.stick_deadzone = c.deadzone();
         c.bindings.retain(|b| button_bit(&b.button).is_some());
         for d in default_bindings() {
             if !c.bindings.iter().any(|b| b.button == d.button) {

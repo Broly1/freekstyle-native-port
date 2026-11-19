@@ -202,7 +202,7 @@ impl Pad {
     pub fn rpc(&mut self, request: &[u8], rsize: u32) -> Vec<u8> {
         let word = |o: usize| request.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
         let mut reply = request.to_vec();
-        reply.resize(rsize.max(24) as usize, 0);
+        reply.resize(rsize.max(32) as usize, 0);
         let mut put = |o: usize, v: u32| reply[o..o + 4].copy_from_slice(&v.to_le_bytes());
         match word(0) {
             0x01 => {
@@ -231,6 +231,8 @@ impl Pad {
                 }
                 put(20, 1);
             }
+            0x0a => put(16, 1), // EnterPressMode / ExitPressMode
+            0x0b => put(28, 1), // SetVrefParam
             0x12 => put(12, 0x0400), // padman 4.0
             0x0e => {
                 let (port, slot) = (word(4), word(8));
@@ -258,10 +260,11 @@ impl Pad {
                 _ => {}
             }
         }
-        if crate::pad_log() && MOTORS.lock().unwrap()[port] != (small, large) {
+        let mut motors = MOTORS.lock().unwrap();
+        if crate::pad_log() && motors[port] != (small, large) {
             eprintln!("[pad] port {port} motors: small {small} large {large} (raw {bytes:02x?}, align {:02x?})", self.align[port]);
         }
-        MOTORS.lock().unwrap()[port] = (small, large);
+        motors[port] = (small, large);
     }
 
     /// Fill one frame for every open port with the current input.
@@ -281,6 +284,12 @@ impl Pad {
             if let Some(input) = &mut players[player] {
                 if (first..=last).contains(&self.counter) {
                     input.buttons |= b;
+                    if b & button::L2 != 0 {
+                        input.l2 = 255;
+                    }
+                    if b & button::R2 != 0 {
+                        input.r2 = 255;
+                    }
                 }
             }
         }
@@ -290,8 +299,8 @@ impl Pad {
                 let mode = if analog { MODE_ANALOG } else { MODE_DIGITAL };
                 let cur = match input {
                     Some(i) => {
-                        let l2_out = i.l2.max(if i.buttons & button::L2 != 0 { 255 } else { 0 });
-                        let r2_out = i.r2.max(if i.buttons & button::R2 != 0 { 255 } else { 0 });
+                        let l2_out = if i.l2 > 0 { i.l2 } else if i.buttons & button::L2 != 0 { 255 } else { 0 };
+                        let r2_out = if i.r2 > 0 { i.r2 } else if i.buttons & button::R2 != 0 { 255 } else { 0 };
                         LoggedPad { buttons: i.buttons, l2: l2_out, r2: r2_out, sticks: i.sticks, mode, connected: true }
                     }
                     None => LoggedPad { mode, ..Default::default() },
@@ -349,8 +358,8 @@ impl Pad {
                 for (n, m) in order.iter().enumerate() {
                     f[8 + n] = pressed(*m);
                 }
-                f[18] = input.l2.max(pressed(L2));
-                f[19] = input.r2.max(pressed(R2));
+                f[18] = if input.l2 > 0 { input.l2 } else { pressed(L2) };
+                f[19] = if input.r2 > 0 { input.r2 } else { pressed(R2) };
             }
             // Two actuators, DualShock 2 style: function, subfunction, size
             // (0 one bit, small motor; 1 eight bits, large motor), current.

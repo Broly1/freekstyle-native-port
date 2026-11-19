@@ -54,7 +54,6 @@ pub struct Vk {
     pub allocator: ManuallyDrop<Allocator>,
     pub swapchain: Swapchain,
     pub device_name: String,
-    pub discrete_gpu: bool,
     pub present_mode: vk::PresentModeKHR,
     /// Anisotropic filtering, when the GPU has it, and its limit.
     pub anisotropy: bool,
@@ -65,10 +64,18 @@ fn select_present_mode(modes: &[vk::PresentModeKHR], vsync: bool) -> vk::Present
     if vsync {
         return vk::PresentModeKHR::FIFO;
     }
-    // Prefer non-blocking modes (MAILBOX, or IMMEDIATE when MAILBOX is absent
-    // such as Intel on Windows, where DWM still composites windowed frames).
-    // The EE thread already paces the game to 59.94 Hz.
-    for candidate in [vk::PresentModeKHR::MAILBOX, vk::PresentModeKHR::IMMEDIATE, vk::PresentModeKHR::FIFO_RELAXED] {
+    // On Windows, prefer non-blocking modes (MAILBOX, or IMMEDIATE when MAILBOX
+    // is absent such as Intel on Windows, where DWM still composites windowed frames).
+    // On Linux/Unix, stick to MAILBOX -> FIFO to guarantee tear-free presentation.
+    #[cfg(target_os = "windows")]
+    let candidates: &[vk::PresentModeKHR] = &[
+        vk::PresentModeKHR::MAILBOX,
+        vk::PresentModeKHR::IMMEDIATE,
+        vk::PresentModeKHR::FIFO_RELAXED,
+    ];
+    #[cfg(not(target_os = "windows"))]
+    let candidates: &[vk::PresentModeKHR] = &[vk::PresentModeKHR::MAILBOX];
+    for &candidate in candidates {
         if modes.contains(&candidate) {
             return candidate;
         }
@@ -114,8 +121,7 @@ impl Vk {
                 }
             }
         }
-        let (score, physical, queue_family, device_name) = best.ok_or("no Vulkan 1.3 GPU that can present to this window")?;
-        let discrete_gpu = score == 2;
+        let (_, physical, queue_family, device_name) = best.ok_or("no Vulkan 1.3 GPU that can present to this window")?;
 
         let mut v13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true).synchronization2(true);
         let prio = [1.0];
@@ -162,7 +168,6 @@ impl Vk {
             allocator: ManuallyDrop::new(allocator),
             swapchain,
             device_name,
-            discrete_gpu,
             present_mode: vk::PresentModeKHR::FIFO,
             anisotropy,
             max_anisotropy,
@@ -329,7 +334,11 @@ pub fn transfer_barrier(dev: &ash::Device, cmd: vk::CommandBuffer) {
 /// shader passes see color/depth writes without stalling transfers or vertices.
 pub fn attachment_barrier(dev: &ash::Device, cmd: vk::CommandBuffer) {
     let mb = [vk::MemoryBarrier2::default()
-        .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS)
+        .src_stage_mask(
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+        )
         .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
         .dst_stage_mask(
             vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT
@@ -383,7 +392,7 @@ fn layout_sync(layout: vk::ImageLayout, is_dst: bool) -> (vk::PipelineStageFlags
                 vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
             },
         ),
-        vk::ImageLayout::PRESENT_SRC_KHR => (vk::PipelineStageFlags2::BOTTOM_OF_PIPE, vk::AccessFlags2::NONE),
+        vk::ImageLayout::PRESENT_SRC_KHR => (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE),
         _ => (
             vk::PipelineStageFlags2::ALL_COMMANDS,
             if is_dst { vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE } else { vk::AccessFlags2::MEMORY_WRITE },
@@ -411,11 +420,37 @@ pub fn transition_levels(dev: &ash::Device, cmd: vk::CommandBuffer, image: vk::I
     unsafe { dev.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&ib)) };
 }
 
+/// Layout transition discarding prior contents (`old_layout = UNDEFINED`)
+/// while waiting for `src_stage` (e.g. a previous transfer read or acquire
+/// semaphore wait) before performing the transition.
+pub fn transition_discard(
+    dev: &ash::Device,
+    cmd: vk::CommandBuffer,
+    image: vk::Image,
+    aspect: vk::ImageAspectFlags,
+    src_stage: vk::PipelineStageFlags2,
+    to: vk::ImageLayout,
+) {
+    let (dst_stage, dst_access) = layout_sync(to, true);
+    let ib = [vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(src_stage)
+        .src_access_mask(vk::AccessFlags2::NONE)
+        .dst_stage_mask(dst_stage)
+        .dst_access_mask(dst_access)
+        .old_layout(vk::ImageLayout::UNDEFINED)
+        .new_layout(to)
+        .image(image)
+        .subresource_range(range(aspect))];
+    unsafe { dev.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&ib)) };
+}
+
 impl Drop for Vk {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
-            self.swapchain.loader.destroy_swapchain(self.swapchain.swapchain, None);
+            if self.swapchain.swapchain != vk::SwapchainKHR::null() {
+                self.swapchain.loader.destroy_swapchain(self.swapchain.swapchain, None);
+            }
             ManuallyDrop::drop(&mut self.allocator);
             self.device.destroy_device(None);
             self.surface_loader.destroy_surface(self.surface, None);

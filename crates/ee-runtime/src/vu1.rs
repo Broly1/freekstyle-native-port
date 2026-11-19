@@ -10,7 +10,7 @@
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -135,7 +135,7 @@ impl Vu1 {
     /// Run a VIF1 transfer: queued for the worker, or right here with
     /// FREEK_MTVU=0. `io` gets the GIF output when run here; `gs` is the
     /// channel the worker sends it to.
-    pub fn submit(&mut self, words: Vec<u32>, io: &mut dyn VifIo, gs: Option<&Sender<gs::Msg>>) {
+    pub fn submit(&mut self, words: Vec<u32>, io: &mut dyn VifIo, gs: Option<&SyncSender<gs::Msg>>) {
         if !self.threaded {
             self.get().run(&words, io);
             return;
@@ -162,7 +162,7 @@ impl Default for Vu1 {
 
 /// GIF output from the worker: straight to the GS.
 struct WorkerIo {
-    gs: Option<Sender<gs::Msg>>,
+    gs: Option<SyncSender<gs::Msg>>,
     shared: Arc<Shared>,
     warned: std::collections::HashSet<String>,
 }
@@ -198,7 +198,7 @@ impl Drop for EndOnPanic {
     }
 }
 
-fn worker(shared: Arc<Shared>, rx: Receiver<Vec<u32>>, gs: Option<Sender<gs::Msg>>) {
+fn worker(shared: Arc<Shared>, rx: Receiver<Vec<u32>>, gs: Option<SyncSender<gs::Msg>>) {
     let _end_on_panic = EndOnPanic;
     let mut io = WorkerIo { gs, shared: shared.clone(), warned: Default::default() };
     let mut idle = 0u32;
@@ -247,7 +247,7 @@ mod tests {
     }
 
     fn threaded() -> (Vu1, Io, Receiver<gs::Msg>) {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(4096);
         let mut vu1 = Vu1::new();
         vu1.threaded = true;
         let mut io = Io::new();
