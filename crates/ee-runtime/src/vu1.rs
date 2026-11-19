@@ -11,7 +11,7 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use crate::dma::{Target, Vif, VifIo};
@@ -66,6 +66,9 @@ struct Shared {
     pending: AtomicUsize,
     /// VU1 output wrote GS FINISH (see `io::writes_finish`).
     finish: AtomicBool,
+    idle_lock: Mutex<()>,
+    idle_cv: Condvar,
+    waiters: AtomicUsize,
 }
 
 // SAFETY: `unit` is used by the worker only while it runs a queued transfer
@@ -81,15 +84,26 @@ impl Shared {
         }
         let t = Instant::now();
         let mut spins = 0u32;
-        while self.pending.load(Acquire) != 0 {
+        while spins < 2000 && self.pending.load(Acquire) != 0 {
             spins += 1;
-            if spins < 2000 {
-                std::hint::spin_loop();
-            } else {
-                std::thread::yield_now();
+            std::hint::spin_loop();
+        }
+        if self.pending.load(Acquire) != 0 {
+            let mut guard = self.idle_lock.lock().unwrap();
+            self.waiters.fetch_add(1, SeqCst);
+            while self.pending.load(SeqCst) != 0 {
+                guard = self.idle_cv.wait(guard).unwrap();
             }
+            self.waiters.fetch_sub(1, Relaxed);
         }
         WAIT_US.fetch_add(t.elapsed().as_micros() as u64, Relaxed);
+    }
+
+    fn finish_one(&self) {
+        if self.pending.fetch_sub(1, SeqCst) == 1 && self.waiters.load(SeqCst) != 0 {
+            let _guard = self.idle_lock.lock().unwrap();
+            self.idle_cv.notify_all();
+        }
     }
 }
 
@@ -116,7 +130,14 @@ pub struct Vu1 {
 impl Vu1 {
     pub fn new() -> Vu1 {
         let threaded = std::env::var("FREEK_MTVU").map_or(true, |v| v != "0");
-        let shared = Arc::new(Shared { unit: UnsafeCell::new(Unit::new()), pending: AtomicUsize::new(0), finish: AtomicBool::new(false) });
+        let shared = Arc::new(Shared {
+            unit: UnsafeCell::new(Unit::new()),
+            pending: AtomicUsize::new(0),
+            finish: AtomicBool::new(false),
+            idle_lock: Mutex::new(()),
+            idle_cv: Condvar::new(),
+            waiters: AtomicUsize::new(0),
+        });
         Vu1 { shared, queue: None, threaded }
     }
 
@@ -149,7 +170,7 @@ impl Vu1 {
         });
         self.shared.pending.fetch_add(1, AcqRel);
         if queue.send(words).is_err() {
-            self.shared.pending.fetch_sub(1, AcqRel);
+            self.shared.finish_one();
         }
     }
 }
@@ -222,7 +243,7 @@ fn worker(shared: Arc<Shared>, rx: Receiver<Vec<u32>>, gs: Option<SyncSender<gs:
         // the EE thread stays away from the unit until it is done.
         let unit = unsafe { &mut *shared.unit.get() };
         unit.run(&words, &mut io);
-        shared.pending.fetch_sub(1, Release);
+        shared.finish_one();
     }
 }
 

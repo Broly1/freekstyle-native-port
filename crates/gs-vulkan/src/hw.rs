@@ -7,7 +7,7 @@
 //! stays in DEPTH_ATTACHMENT_OPTIMAL, and sampled textures stay in
 //! SHADER_READ_ONLY_OPTIMAL. Draws are batched while state is unchanged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Cursor;
 
 use ash::vk;
@@ -285,6 +285,8 @@ pub struct Config {
     /// Where to record the textures the game shows, for `freekstyle-hd`
     /// to upscale (FREEK_DUMP_TEXTURES overrides it).
     pub texture_dump: Option<std::path::PathBuf>,
+    /// On-disk pipeline cache file to prevent JIT shader compilation stutter.
+    pub pipeline_cache: Option<std::path::PathBuf>,
 }
 
 pub struct Hw {
@@ -300,6 +302,7 @@ pub struct Hw {
     /// Last non-zero window size, used to recreate a valid swapchain if it starts 0x0
     /// or becomes out of date before a resize event updates `swapchain.extent`.
     window_size: (u32, u32),
+    minimized: bool,
     /// Vblank number of the frame being presented (the game's clock; the
     /// same one FREEK_PAD_SCRIPT uses).
     pub vblank: u64,
@@ -313,6 +316,9 @@ pub struct Hw {
     frag_dual_nodst: vk::ShaderModule,
     /// The fragment shader with the dual-source blend output.
     frag_dual: vk::ShaderModule,
+    pipeline_cache: vk::PipelineCache,
+    pipeline_cache_dirty: bool,
+    pipeline_cache_dirty_at: u64,
     pipelines: FastMap<PipeKey, vk::Pipeline>,
     samplers: FastMap<SamplerKey, vk::Sampler>,
     targets: FastMap<u32, Target>,
@@ -329,10 +335,13 @@ pub struct Hw {
     /// Hash of the CLUT entries a texture uses: (GS CLUT generation,
     /// offset, entries, hash), recomputed only after a CLUT load.
     clut_hash: (u64, usize, usize, u64),
-    /// Palettes for T8h reads of render targets, and the last one used.
-    palettes: HashMap<u64, Image>,
+    /// Palettes for T8h reads of render targets, with `submit_no` of last use.
+    palettes: HashMap<u64, (Image, u64)>,
     palette: u64,
     pictures: Option<crate::pictures::Pictures>,
+    picture_loader: Option<PictureLoader>,
+    /// Images retired from shared maps; kept alive `FRAMES` submits so in-flight GPUs finish sampling.
+    deferred_garbage: VecDeque<(u64, Garbage)>,
     /// A wide picture fills the screen (set by drawing one, cleared by 3D
     /// or another background), so overlays follow its stretch curve.
     on_wide_picture: bool,
@@ -470,6 +479,9 @@ impl Hw {
                 .collect::<Result<Vec<_>>>()?;
             let window_size = (vk.swapchain.extent.width, vk.swapchain.extent.height);
             let gpu_timer = crate::gputime::GpuTimer::new(&vk.instance, vk.physical, &dev, vk.queue_family, FRAMES);
+            let pipeline_cache = create_pipeline_cache(&dev, cfg.pipeline_cache.as_deref());
+            let pictures = cfg.pictures.as_deref().map(|d| crate::pictures::Pictures::load(d, cfg.xbox_icons));
+            let picture_loader = pictures.as_ref().map(|_| PictureLoader::spawn());
             let mut hw = Hw {
                 vk,
                 cmd_pool,
@@ -478,6 +490,7 @@ impl Hw {
                 frame_no: 0,
                 submit_no: 0,
                 window_size,
+                minimized: window_size.0 == 0 || window_size.1 == 0,
                 vblank: 0,
                 rendered,
                 set_layout,
@@ -488,6 +501,9 @@ impl Hw {
                 frag,
                 frag_dual_nodst,
                 frag_dual,
+                pipeline_cache,
+                pipeline_cache_dirty: false,
+                pipeline_cache_dirty_at: 0,
                 pipelines: FastMap::default(),
                 samplers: FastMap::default(),
                 targets: FastMap::default(),
@@ -501,7 +517,9 @@ impl Hw {
                 clut_hash: (u64::MAX, 0, 0, 0),
                 palettes: HashMap::new(),
                 palette: 0,
-                pictures: cfg.pictures.as_deref().map(|d| crate::pictures::Pictures::load(d, cfg.xbox_icons)),
+                pictures,
+                picture_loader,
+                deferred_garbage: VecDeque::new(),
                 on_wide_picture: false,
                 cfg,
                 blur: Vec::new(),
@@ -599,6 +617,38 @@ impl Hw {
                 Garbage::Recorded(b) => self.record_ready(b),
             }
         }
+        while self.deferred_garbage.front().is_some_and(|(retire_at, _)| self.submit_no >= *retire_at) {
+            let (_, g) = self.deferred_garbage.pop_front().unwrap();
+            match g {
+                Garbage::Image(i) => self.vk.destroy_image(i),
+                Garbage::Buffer(b) => self.vk.destroy_buffer(b),
+                Garbage::Recorded(b) => self.record_ready(b),
+            }
+        }
+    }
+
+    fn retire_image(&mut self, img: Image) {
+        self.deferred_garbage.push_back((self.submit_no + FRAMES as u64, Garbage::Image(img)));
+    }
+
+    fn save_pipeline_cache(&mut self) {
+        if self.pipeline_cache == vk::PipelineCache::null() {
+            return;
+        }
+        if let Some(path) = &self.cfg.pipeline_cache {
+            if let Ok(data) = unsafe { self.vk.device.get_pipeline_cache_data(self.pipeline_cache) } {
+                if !data.is_empty() {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let tmp = path.with_extension("bin.tmp");
+                    if std::fs::write(&tmp, &data).is_ok() && std::fs::rename(&tmp, path).is_err() {
+                        let _ = std::fs::remove_file(&tmp);
+                    }
+                }
+            }
+        }
+        self.pipeline_cache_dirty = false;
     }
 
     // ---- staging ----
@@ -754,11 +804,10 @@ impl Hw {
             // which LOAD_OP_CLEAR would also do to colour. Clear depth here.
             t.fresh = false;
             self.clear_depth_now(&t);
-            let f = &mut self.frames[self.slot];
-            f.garbage.push(Garbage::Image(old.color));
-            f.garbage.push(Garbage::Image(old.depth));
+            self.retire_image(old.color);
+            self.retire_image(old.depth);
             if let Some(s) = old.snapshot {
-                f.garbage.push(Garbage::Image(s));
+                self.retire_image(s);
             }
         } else {
             transition(&dev, cmd, t.color.image, vk::ImageAspectFlags::COLOR, vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
@@ -881,15 +930,35 @@ impl Hw {
         if t.psm() == Psm::T8h {
             if let Some(k) = self.targets.get_key_value(&target_key(t.tbp0(), t.tbw())).map(|(&k, _)| k) {
                 let pk = clut ^ (gs.texa.0 * (gs.clut_psm != Psm::Ct32) as u64).rotate_left(7);
-                if !self.palettes.contains_key(&pk) {
+                if let Some((_, last_used)) = self.palettes.get_mut(&pk) {
+                    *last_used = self.submit_no;
+                } else {
                     let pal: Vec<u32> = gs.clut.iter().map(|&c| if gs.clut_psm == Psm::Ct32 { c } else { gs::tex::rgba16(c, gs.texa) }).collect();
                     if self.palettes.len() >= 64 {
-                        let old: Vec<Image> = self.palettes.drain().map(|(_, i)| i).collect();
-                        self.frames[self.slot].garbage.extend(old.into_iter().map(Garbage::Image));
+                        let stale: Vec<u64> = self
+                            .palettes
+                            .iter()
+                            .filter(|(_, (_, last_used))| self.submit_no.saturating_sub(*last_used) >= FRAMES as u64)
+                            .map(|(&h, _)| h)
+                            .collect();
+                        for h in stale {
+                            if let Some((img, _)) = self.palettes.remove(&h) {
+                                self.retire_image(img);
+                            }
+                        }
+                    }
+                    if self.palettes.len() >= 64 {
+                        let mut by_age: Vec<(u64, u64)> = self.palettes.iter().map(|(&h, (_, last_used))| (*last_used, h)).collect();
+                        by_age.sort_unstable();
+                        for (_, h) in by_age.into_iter().take(self.palettes.len() / 2) {
+                            if let Some((img, _)) = self.palettes.remove(&h) {
+                                self.retire_image(img);
+                            }
+                        }
                     }
                     self.end_rendering();
                     let img = self.upload_image(256, 1, &pal, vk::ImageUsageFlags::SAMPLED, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, "palette")?;
-                    self.palettes.insert(pk, img);
+                    self.palettes.insert(pk, (img, self.submit_no));
                 }
                 self.palette = pk;
                 let rt = &self.targets[&k];
@@ -918,15 +987,24 @@ impl Hw {
         if let (Some(d), Some(hash)) = (&mut self.dumper, hash) {
             d.dump(hash, t.psm(), sprite, w, h, &px);
         }
-        // Pictures in high resolution; PlayStation button prompts become
-        // Xbox buttons.
-        let picture = match &self.pictures {
-            Some(p) if !t.psm().is_indexed() => p.replace(w, h, &px, (self.cfg.scale_x, self.cfg.scale), self.cfg.widescreen),
+        // Pictures in high resolution (loaded off-thread unless capturing);
+        // PlayStation button prompts become Xbox buttons.
+        let picture_job = match &self.pictures {
+            Some(p) if !t.psm().is_indexed() => p.identify(w, h, &px, (self.cfg.scale_x, self.cfg.scale), self.cfg.widescreen),
             _ => None,
         };
         let mut hd = None;
-        let (w, h, px, wide_picture) = match picture {
-            Some(r) => r,
+        let (w, h, px, wide_picture) = match picture_job {
+            Some(job) if self.capturing() => match job.build() {
+                Some(pic) => (pic.w, pic.h, pic.px, pic.wide_picture),
+                None => (w, h, px, false),
+            },
+            Some(job) => {
+                if let Some(loader) = &mut self.picture_loader {
+                    loader.queue(key, job);
+                }
+                (w, h, px, false)
+            }
             None => match self.cfg.xbox_icons.then(|| crate::icons::replace(w, h, &px)).flatten() {
                 Some((w, h, px)) => (w, h, px, false),
                 None => {
@@ -1146,8 +1224,10 @@ impl Hw {
             .dynamic_state(&dy)
             .layout(self.layout)
             .push_next(&mut rendering);
-        let p = unsafe { self.vk.device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }.expect("pipeline")[0];
+        let p = unsafe { self.vk.device.create_graphics_pipelines(self.pipeline_cache, &[info], None) }.expect("pipeline")[0];
         self.pipelines.insert(k, p);
+        self.pipeline_cache_dirty = true;
+        self.pipeline_cache_dirty_at = self.frame_no;
         p
     }
 
@@ -1183,7 +1263,7 @@ impl Hw {
         // The destination alpha test and masked alpha writes read the
         // target as it was before this batch.
         let dst = if k.push.flags & (F_DATE | F_AMERGE | F_DBLEND) != 0 { self.snapshot_rect(k.target, &verts, k.scissor).unwrap_or(self.white.view) } else { self.white.view };
-        let pal = k.palette.and_then(|p| self.palettes.get(&p)).map_or(self.white.view, |i| i.view);
+        let pal = k.palette.and_then(|p| self.palettes.get(&p)).map_or(self.white.view, |(i, _)| i.view);
         self.begin_rendering(k.target);
         let pipeline = self.pipeline(k.pipe);
         let sampler = self.sampler(k.sampler);
@@ -1567,6 +1647,7 @@ impl Hw {
                 || f.staging_used > STAGING_BYTES / 2
                 || f.sets_used > MAX_SETS / 2
                 || f.garbage.len() > 256
+                || self.deferred_garbage.len() > 256
             {
                 self.finish_frame(None, false);
             } else {
@@ -1671,6 +1752,9 @@ impl Hw {
             self.save_shot(buf, w, h);
         }
         self.evict_textures();
+        if self.pipeline_cache_dirty && self.frame_no >= self.pipeline_cache_dirty_at.saturating_add(120) {
+            self.save_pipeline_cache();
+        }
     }
 
     /// Copy the displayed region at internal resolution into a buffer.
@@ -1774,7 +1858,7 @@ impl Hw {
     fn stop_recording(&mut self) {
         if let Some(r) = self.record.take() {
             if let Some(img) = r.image {
-                self.frames[self.slot].garbage.push(Garbage::Image(img));
+                self.retire_image(img);
             }
             eprintln!("[capture] recording stopped at vblank {}", self.vblank);
         }
@@ -1848,7 +1932,7 @@ impl Hw {
             match self.vk.create_image(f.w, f.h, COLOR, vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST, "movie") {
                 Ok(img) => {
                     if let Some(old) = self.movie.replace(img) {
-                        self.frames[self.slot].garbage.push(Garbage::Image(old));
+                        self.retire_image(old);
                     }
                 }
                 Err(e) => {
@@ -1875,7 +1959,7 @@ impl Hw {
     pub fn end_movie(&mut self) {
         self.draw_gen += 1;
         if let Some(img) = self.movie.take() {
-            self.frames[self.slot].garbage.push(Garbage::Image(img));
+            self.retire_image(img);
         }
         // Also for a movie skipped before its first frame: there was no image.
         self.after_movie = Some(self.stats.draws);
@@ -1901,7 +1985,8 @@ impl Hw {
         let dev = self.vk.device.clone();
         let cmd = self.cmd();
         let f = &self.frames[self.slot];
-        let has_swapchain = self.vk.swapchain.swapchain != vk::SwapchainKHR::null()
+        let has_swapchain = !self.minimized
+            && self.vk.swapchain.swapchain != vk::SwapchainKHR::null()
             && self.rendered.len() == self.vk.swapchain.images.len();
         let image_index = if has_swapchain {
             match unsafe { self.vk.swapchain.loader.acquire_next_image(self.vk.swapchain.swapchain, u64::MAX, f.acquired, vk::Fence::null()) } {
@@ -1975,6 +2060,7 @@ impl Hw {
             let _ = dev.queue_submit2(self.vk.queue, &[submit], self.frames[self.slot].fence);
             if present {
                 let mut need_resize = false;
+                let probe_restore = self.minimized && self.frame_no % 60 == 0;
                 if let Some(i) = image_index {
                     let sems = [self.rendered[i as usize]];
                     let scs = [self.vk.swapchain.swapchain];
@@ -1983,7 +2069,7 @@ impl Hw {
                     if matches!(r, Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Ok(true)) {
                         need_resize = true;
                     }
-                } else {
+                } else if !self.minimized || probe_restore {
                     need_resize = true;
                 }
                 if need_resize && self.window_size.0 > 0 && self.window_size.1 > 0 {
@@ -1997,16 +2083,22 @@ impl Hw {
         self.begin_frame();
         self.apply_sharpened();
         self.apply_hd();
+        self.apply_pictures();
     }
 
     pub fn resize(&mut self, size: (u32, u32)) {
-        if size.0 > 0 && size.1 > 0 {
-            self.window_size = size;
+        if size.0 == 0 || size.1 == 0 {
+            self.minimized = true;
+            return;
         }
+        self.window_size = size;
         self.draw_gen += 1;
         match self.vk.recreate_swapchain(size) {
-            Ok(true) => {}
-            Ok(false) => return,
+            Ok(true) => self.minimized = false,
+            Ok(false) => {
+                self.minimized = true;
+                return;
+            }
             Err(e) => {
                 eprintln!("[gs] swapchain: {e}");
                 return;
@@ -2050,7 +2142,34 @@ impl Hw {
             let bytes = d.w as u64 * d.h as u64 * 4;
             self.texture_bytes = self.texture_bytes - t.bytes + bytes;
             t.bytes = bytes;
-            self.frames[self.slot].garbage.push(Garbage::Image(old));
+            self.retire_image(old);
+        }
+    }
+
+    /// Swap in high-resolution title/loading pictures decoded on the worker
+    /// thread at the start of a frame.
+    fn apply_pictures(&mut self) {
+        let done: Vec<PictureDone> = match &mut self.picture_loader {
+            Some(l) => l.finished(),
+            None => return,
+        };
+        for d in done {
+            let Some(pic) = d.pic else { continue };
+            if !self.textures.contains_key(&d.key) {
+                continue;
+            }
+            let Ok(image) = self.upload_image(pic.w, pic.h, &pic.px, vk::ImageUsageFlags::SAMPLED, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, "picture") else { continue };
+            let t = self.textures.get_mut(&d.key).unwrap();
+            let old = std::mem::replace(&mut t.image, image);
+            let bytes = pic.w as u64 * pic.h as u64 * 4;
+            self.texture_bytes = self.texture_bytes - t.bytes + bytes;
+            t.bytes = bytes;
+            t.wide_picture = pic.wide_picture;
+            self.draw_gen += 1;
+            self.retire_image(old);
+        }
+        if self.texture_bytes > TEXTURE_BUDGET {
+            self.evict_lru();
         }
     }
 
@@ -2093,7 +2212,7 @@ impl Hw {
                 if let Some(p) = &mut self.pack {
                     p.forget(hash);
                 }
-                self.frames[self.slot].garbage.push(Garbage::Image(i.image));
+                self.retire_image(i.image);
             }
         }
     }
@@ -2107,7 +2226,10 @@ impl Hw {
         for k in old {
             let t = self.textures.remove(&k).unwrap();
             self.texture_bytes -= t.bytes;
-            self.frames[self.slot].garbage.push(Garbage::Image(t.image));
+            if let Some(pl) = &mut self.picture_loader {
+                pl.forget(&k);
+            }
+            self.retire_image(t.image);
         }
     }
 
@@ -2127,7 +2249,10 @@ impl Hw {
             }
             let t = self.textures.remove(&k).unwrap();
             self.texture_bytes -= t.bytes;
-            self.frames[self.slot].garbage.push(Garbage::Image(t.image));
+            if let Some(pl) = &mut self.picture_loader {
+                pl.forget(&k);
+            }
+            self.retire_image(t.image);
         }
     }
 }
@@ -2200,14 +2325,152 @@ fn sharpen(scale: u32, w: u32, h: u32, px: Vec<u32>) -> (u32, u32, Vec<u32>) {
     (w * f, h * f, px)
 }
 
+fn create_pipeline_cache(dev: &ash::Device, path: Option<&std::path::Path>) -> vk::PipelineCache {
+    if let Some(p) = path {
+        if let Ok(bytes) = std::fs::read(p) {
+            if !bytes.is_empty() {
+                let info = vk::PipelineCacheCreateInfo::default().initial_data(&bytes);
+                match unsafe { dev.create_pipeline_cache(&info, None) } {
+                    Ok(c) => return c,
+                    Err(e) => eprintln!("[gs] pipeline cache rejected ({e:?}); recreating empty cache"),
+                }
+            }
+        }
+    }
+    unsafe { dev.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None) }.unwrap_or(vk::PipelineCache::null())
+}
+
+struct PictureDone {
+    key: TexKey,
+    pic: Option<crate::pictures::ReadyPicture>,
+}
+
+struct PictureLoader {
+    jobs: std::sync::mpsc::Sender<(TexKey, crate::pictures::PictureJob)>,
+    done: std::sync::mpsc::Receiver<PictureDone>,
+    in_flight: HashSet<TexKey>,
+}
+
+impl PictureLoader {
+    fn spawn() -> PictureLoader {
+        let (jobs, rx) = std::sync::mpsc::channel::<(TexKey, crate::pictures::PictureJob)>();
+        let (tx, done) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("pictures".into())
+            .spawn(move || {
+                for (key, job) in rx {
+                    let pic = job.build();
+                    if tx.send(PictureDone { key, pic }).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn pictures thread");
+        PictureLoader { jobs, done, in_flight: HashSet::new() }
+    }
+
+    fn queue(&mut self, key: TexKey, job: crate::pictures::PictureJob) {
+        if self.in_flight.insert(key) && self.jobs.send((key, job)).is_err() {
+            self.in_flight.remove(&key);
+        }
+    }
+
+    fn finished(&mut self) -> Vec<PictureDone> {
+        let done: Vec<PictureDone> = self.done.try_iter().collect();
+        for d in &done {
+            self.in_flight.remove(&d.key);
+        }
+        done
+    }
+
+    fn forget(&mut self, key: &TexKey) {
+        self.in_flight.remove(key);
+    }
+}
+
 impl Drop for Hw {
     fn drop(&mut self) {
-        unsafe {
-            let _ = self.vk.device.device_wait_idle();
-            if let Some(t) = &mut self.gpu_timer {
-                t.destroy(&self.vk.device);
+        fn destroy_garbage(vk: &mut Vk, g: Garbage) {
+            match g {
+                Garbage::Image(i) => vk.destroy_image(i),
+                Garbage::Buffer(b) | Garbage::Recorded(b) => vk.destroy_buffer(b),
             }
-            self.vk.device.destroy_command_pool(self.cmd_pool, None);
+        }
+        let dev = self.vk.device.clone();
+        unsafe {
+            let _ = dev.device_wait_idle();
+        }
+        if let Some(t) = &mut self.gpu_timer {
+            t.destroy(&dev);
+        }
+        if self.pipeline_cache != vk::PipelineCache::null() {
+            let need_save = self.pipeline_cache_dirty || self.cfg.pipeline_cache.as_ref().is_some_and(|p| !p.exists());
+            if need_save {
+                self.save_pipeline_cache();
+            }
+            unsafe { dev.destroy_pipeline_cache(self.pipeline_cache, None) };
+        }
+        unsafe {
+            for (_, p) in self.pipelines.drain() {
+                dev.destroy_pipeline(p, None);
+            }
+            for (_, s) in self.samplers.drain() {
+                dev.destroy_sampler(s, None);
+            }
+            while let Some((_, g)) = self.deferred_garbage.pop_front() {
+                destroy_garbage(&mut self.vk, g);
+            }
+            for mut f in self.frames.drain(..) {
+                for g in f.garbage.drain(..) {
+                    destroy_garbage(&mut self.vk, g);
+                }
+                self.vk.destroy_buffer(f.vbuf);
+                self.vk.destroy_buffer(f.staging);
+                dev.destroy_descriptor_pool(f.pool, None);
+                dev.destroy_semaphore(f.acquired, None);
+                dev.destroy_fence(f.fence, None);
+            }
+            for sem in self.rendered.drain(..) {
+                dev.destroy_semaphore(sem, None);
+            }
+            for (_, t) in self.targets.drain() {
+                self.vk.destroy_image(t.color);
+                self.vk.destroy_image(t.depth);
+                if let Some(s) = t.snapshot {
+                    self.vk.destroy_image(s);
+                }
+            }
+            for (_, t) in self.textures.drain() {
+                self.vk.destroy_image(t.image);
+            }
+            for (_, i) in self.hd_images.drain() {
+                self.vk.destroy_image(i.image);
+            }
+            for (_, (img, _)) in self.palettes.drain() {
+                self.vk.destroy_image(img);
+            }
+            for img in self.blur.drain(..) {
+                self.vk.destroy_image(img);
+            }
+            if let Some(img) = self.movie.take() {
+                self.vk.destroy_image(img);
+            }
+            if let Some(mut r) = self.record.take() {
+                if let Some(img) = r.image.take() {
+                    self.vk.destroy_image(img);
+                }
+            }
+            dev.destroy_image_view(self.white.view, None);
+            dev.destroy_image(self.white.image, None);
+            if let Some(a) = self.white.alloc.take() {
+                let _ = self.vk.allocator.free(a);
+            }
+            for shader in [self.vert, self.frag_simple, self.frag_nodst, self.frag, self.frag_dual_nodst, self.frag_dual] {
+                dev.destroy_shader_module(shader, None);
+            }
+            dev.destroy_pipeline_layout(self.layout, None);
+            dev.destroy_descriptor_set_layout(self.set_layout, None);
+            dev.destroy_command_pool(self.cmd_pool, None);
         }
     }
 }

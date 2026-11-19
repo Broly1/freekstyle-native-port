@@ -49,6 +49,7 @@ mod gen;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{env, fs, process, thread};
 
@@ -230,7 +231,9 @@ fn main() {
     let images_dir = std::path::Path::new(&opts.disc).parent().unwrap_or(std::path::Path::new(".")).join("images");
     let (gs_tx, gs_rx) = std::sync::mpsc::sync_channel(4096);
     let replay = env::var("FREEK_GS_REPLAY").ok();
+    let frame_gate = (!opts.headless && replay.is_none()).then(|| Arc::new(ee_runtime::io::FrameGate::new(MAX_FRAMES_IN_FLIGHT)));
     if replay.is_none() {
+    let ee_gate = frame_gate.clone();
     thread::Builder::new()
         .name("ee-main".into())
         .stack_size(STACK_SIZE)
@@ -242,6 +245,7 @@ fn main() {
             c.iop.images = std::path::Path::new(&images_dir).to_path_buf();
             c.iop.patch_disc_files();
             c.mem.io.gs = Some(gs_tx);
+            c.mem.io.frame_gate = ee_gate;
             // FREEK_VU_INTERP: interpret all VU microcode (debugging aid).
             if env::var_os("FREEK_VU_INTERP").is_none() {
                 c.mem.set_vu_programs(ee_runtime::vumicro::Programs(&gen::vu_programs::VU_PROGRAMS));
@@ -282,6 +286,8 @@ fn main() {
         rx: gs_rx,
         pending: VecDeque::new(),
         pending_frames: 0,
+        consecutive_skips: 0,
+        rx_closed: false,
         window: None,
         renderer: None,
         last_title: Instant::now(),
@@ -296,6 +302,7 @@ fn main() {
         trace_button: env::var("FREEK_TRACE_BUTTON").ok().and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok()),
         key_map,
         pad_map,
+        frame_gate,
     };
     // A replay draws a recording, not the game: nothing new to record.
     app.recording = app.opts.build_hd_textures && env::var_os("FREEK_GS_REPLAY").is_none() && hdbuild::available();
@@ -314,6 +321,8 @@ fn main() {
 
 const MAX_PENDING_MSGS: usize = 4096;
 const MAX_PENDING_FRAMES: usize = 3;
+const MAX_CONSECUTIVE_SKIPS: u32 = 2;
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 fn is_frame_msg(m: &gs::Msg) -> bool {
     matches!(m, gs::Msg::Vsync(_) | gs::Msg::Movie(Some(_)))
@@ -350,6 +359,8 @@ struct App {
     rx: Receiver<gs::Msg>,
     pending: VecDeque<gs::Msg>,
     pending_frames: usize,
+    consecutive_skips: u32,
+    rx_closed: bool,
     window: Option<Window>,
     renderer: Option<gs_vulkan::Renderer>,
     last_title: Instant,
@@ -369,6 +380,15 @@ struct App {
     /// buttons each one presses.
     key_map: HashMap<String, u16>,
     pad_map: PadMap,
+    frame_gate: Option<Arc<ee_runtime::io::FrameGate>>,
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(gate) = &self.frame_gate {
+            gate.close();
+        }
+    }
 }
 
 /// A key's name in freekstyle.toml: its winit KeyCode name, except that
@@ -502,6 +522,7 @@ impl ApplicationHandler for App {
             pictures: Some(pictures),
             texture_packs,
             texture_dump,
+            pipeline_cache: Some(freek_config::data_dir().join("vk_pipeline_cache.bin")),
         };
         let renderer = gs_vulkan::Renderer::new(&window, (size.width, size.height), cfg).unwrap_or_else(|e| {
             eprintln!("Vulkan: {e}");
@@ -513,7 +534,12 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => {
+                if let Some(gate) = &self.frame_gate {
+                    gate.close();
+                }
+                el.exit();
+            }
             WindowEvent::Resized(s) => {
                 if let Some(r) = &mut self.renderer {
                     r.resize(s.width, s.height);
@@ -535,7 +561,12 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event: KeyEvent { logical_key, state: ElementState::Pressed, .. }, .. } => match logical_key {
-                Key::Named(NamedKey::Escape) => el.exit(),
+                Key::Named(NamedKey::Escape) => {
+                    if let Some(gate) = &self.frame_gate {
+                        gate.close();
+                    }
+                    el.exit();
+                }
                 Key::Named(NamedKey::F12) => {
                     if let Some(r) = &mut self.renderer {
                         r.toggle_recording();
@@ -555,14 +586,15 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.update_input();
-        let Some(r) = &mut self.renderer else { return };
-        // Drain a bounded slice of queued messages so stale frames skip swapchain
-        // presentation while bounded backpressure keeps EE/GS memory in check.
-        if !drain_rx(&self.rx, &mut self.pending, &mut self.pending_frames) {
-            el.exit();
+        if self.renderer.is_none() {
             return;
         }
-        if self.pending_frames == 0 {
+        // Drain a bounded slice of queued messages only once any previously
+        // queued frame batch is finished, so catch-up cannot starve presentation.
+        if !self.rx_closed && self.pending_frames == 0 && !drain_rx(&self.rx, &mut self.pending, &mut self.pending_frames) {
+            self.rx_closed = true;
+        }
+        if !self.rx_closed && self.pending_frames == 0 {
             // Nothing ready to present yet: wait up to 20 ms, bounded so the
             // window stays responsive when the game is busy loading.
             let deadline = Instant::now() + Duration::from_millis(20);
@@ -578,41 +610,62 @@ impl ApplicationHandler for App {
                     }
                     Err(RecvTimeoutError::Timeout) => break,
                     Err(RecvTimeoutError::Disconnected) => {
-                        el.exit();
-                        return;
+                        self.rx_closed = true;
+                        break;
                     }
                 }
             }
-            if !drain_rx(&self.rx, &mut self.pending, &mut self.pending_frames) {
-                el.exit();
-                return;
+            if !self.rx_closed && !drain_rx(&self.rx, &mut self.pending, &mut self.pending_frames) {
+                self.rx_closed = true;
             }
         }
         // Bound catch-up per event-loop turn so Windows always gets control
         // back to pump window messages and never marks the window Not Responding.
         let budget = Instant::now() + Duration::from_millis(25);
-        while let Some(msg) = pop_pending(&mut self.pending, &mut self.pending_frames) {
-            let frame_msg = is_frame_msg(&msg);
-            let within_budget = Instant::now() < budget;
-            if frame_msg && within_budget && !drain_rx(&self.rx, &mut self.pending, &mut self.pending_frames) {
-                el.exit();
-                return;
-            }
-            let has_newer = frame_msg && within_budget && self.pending_frames > 0;
-            if r.handle_frame(msg, !has_newer) {
-                break;
-            }
-            if Instant::now() >= budget {
-                break;
+        let mut consumed_vsyncs = 0usize;
+        if let Some(r) = &mut self.renderer {
+            while let Some(msg) = pop_pending(&mut self.pending, &mut self.pending_frames) {
+                let is_vsync = matches!(&msg, gs::Msg::Vsync(_));
+                let frame_msg = is_frame_msg(&msg);
+                let within_budget = Instant::now() < budget;
+                let can_skip = within_budget && self.consecutive_skips < MAX_CONSECUTIVE_SKIPS;
+                let has_newer = frame_msg && can_skip && self.pending_frames > 0;
+                let presented = r.handle_frame(msg, !has_newer);
+                if is_vsync {
+                    consumed_vsyncs += 1;
+                }
+                if presented {
+                    self.consecutive_skips = 0;
+                    break;
+                }
+                if frame_msg && has_newer {
+                    self.consecutive_skips += 1;
+                }
+                if Instant::now() >= budget {
+                    break;
+                }
             }
         }
-        if self.last_title.elapsed() >= Duration::from_secs(1) {
-            let frames = r.frame() - self.last_frame;
-            let st = r.stats();
-            if let Some(w) = &self.window {
-                w.set_title(&format!("Freekstyle | {frames} fps | {}x | draws {} batches {}", self.opts.scale, st.draws, st.batches));
+        if consumed_vsyncs > 0 {
+            self.update_input();
+            if let Some(gate) = &self.frame_gate {
+                gate.release(consumed_vsyncs);
             }
-            self.last_frame = r.frame();
+        }
+        if self.rx_closed && self.pending.is_empty() {
+            if let Some(gate) = &self.frame_gate {
+                gate.close();
+            }
+            el.exit();
+            return;
+        }
+        if self.last_title.elapsed() >= Duration::from_secs(1) {
+            let (frames, st) = self.renderer.as_ref().map(|r| (r.frame(), r.stats())).unwrap_or((0, Default::default()));
+            let diff = frames - self.last_frame;
+            if let Some(w) = &self.window {
+                w.set_title(&format!("Freekstyle | {diff} fps | {}x | draws {} batches {}", self.opts.scale, st.draws, st.batches));
+            }
+            self.last_frame = frames;
             self.last_title = Instant::now();
         }
     }

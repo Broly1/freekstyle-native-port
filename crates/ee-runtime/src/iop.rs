@@ -43,24 +43,17 @@ impl Iop {
     pub fn read_file(&mut self, path: &str) -> Option<Vec<u8>> {
         let disc = self.disc.as_mut()?;
         let e = disc.find(path)?;
-        let sector = crate::disc::SECTOR;
-        let mut data = vec![0u8; e.size.div_ceil(sector as u32) as usize * sector];
-        for (n, chunk) in data.chunks_mut(sector).enumerate() {
-            disc.read_into(e.lsn + n as u32, chunk).ok()?;
-        }
-        data.truncate(e.size as usize);
-        Some(data)
+        disc.read_file(&e).ok()
     }
 
     /// Prepare file patches for the PC version (memory card wording).
     pub fn patch_disc_files(&mut self) {
         let Some(disc) = self.disc.as_mut() else { return };
         let Some(e) = disc.find("\\SXDATA\\FEND\\ENGLISH.DAT") else { return };
-        let mut data = vec![0u8; e.size.div_ceil(crate::disc::SECTOR as u32) as usize * crate::disc::SECTOR];
-        for (n, chunk) in data.chunks_mut(crate::disc::SECTOR).enumerate() {
-            if disc.read_into(e.lsn + n as u32, chunk).is_err() {
-                return;
-            }
+        let count = e.size.div_ceil(crate::disc::SECTOR as u32);
+        let mut data = vec![0u8; count as usize * crate::disc::SECTOR];
+        if disc.read_sectors(e.lsn, count, &mut data).is_err() {
+            return;
         }
         let n = crate::text::patch_strings(&mut data[..e.size as usize]);
         if !crate::quiet() {
@@ -167,18 +160,21 @@ fn cd_read(c: &mut Cpu, request: &[u8], rsize: u32) -> Vec<u8> {
         c.kernel.warn_once("sceCdRead: no disc image loaded");
         return vec![0; rsize as usize];
     };
+    let avail = disc.sectors.saturating_sub(lsn).min(count);
     let mut data = vec![0u8; count as usize * crate::disc::SECTOR];
-    for (n, chunk) in data.chunks_mut(crate::disc::SECTOR).enumerate() {
-        if let Err(e) = disc.read_into(lsn + n as u32, chunk) {
+    if avail > 0 {
+        if let Err(e) = disc.read_sectors(lsn, avail, &mut data[..avail as usize * crate::disc::SECTOR]) {
             eprintln!("[cd] read error: {e}");
-            break;
         }
+    }
+    if avail < count {
+        eprintln!("[cd] read error: sectors {lsn}..{} past the end of the disc ({} sectors)", lsn as u64 + count as u64, disc.sectors);
     }
     // Overlay patched files.
     for (start, file) in &c.iop.patched {
         let file_sectors = (file.len() / crate::disc::SECTOR) as u32;
-        for n in 0..count {
-            let s = lsn + n;
+        for n in 0..avail {
+            let Some(s) = lsn.checked_add(n) else { break };
             if (*start..*start + file_sectors).contains(&s) {
                 let off = ((s - start) as usize) * crate::disc::SECTOR;
                 let dst = n as usize * crate::disc::SECTOR;

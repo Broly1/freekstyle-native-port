@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 /// NTSC field rate.
@@ -94,6 +95,58 @@ impl Regs {
     }
 }
 
+/// Frame gate limiting the number of unpresented frames in flight between
+/// the EE producer and the GS/present consumer.
+///
+/// Prevents runaway simulation (fast-forward bursts) and input lag when the
+/// renderer hitches on shader compilation or device presentation.
+pub struct FrameGate {
+    max: usize,
+    state: Mutex<(usize, bool)>,
+    cv: Condvar,
+}
+
+impl FrameGate {
+    pub fn new(max: usize) -> Self {
+        Self {
+            max: max.max(1),
+            state: Mutex::new((0, false)),
+            cv: Condvar::new(),
+        }
+    }
+
+    /// Block until in-flight frames are below `max`, or until the gate is closed.
+    /// Returns `true` if a frame slot was successfully acquired, or `false` if closed.
+    pub fn acquire(&self) -> bool {
+        let mut s = self.state.lock().unwrap();
+        while s.0 >= self.max && !s.1 {
+            s = self.cv.wait(s).unwrap();
+        }
+        if s.1 {
+            return false;
+        }
+        s.0 += 1;
+        true
+    }
+
+    /// Release `n` frame slots consumed by the renderer and wake waiting producer threads.
+    pub fn release(&self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let mut s = self.state.lock().unwrap();
+        s.0 = s.0.saturating_sub(n);
+        self.cv.notify_all();
+    }
+
+    /// Close the gate so any waiting threads unblock immediately.
+    pub fn close(&self) {
+        let mut s = self.state.lock().unwrap();
+        s.1 = true;
+        self.cv.notify_all();
+    }
+}
+
 pub struct Io {
     regs: Regs,
     logged: HashSet<(u32, bool)>,
@@ -104,6 +157,8 @@ pub struct Io {
     pub vblanks: u64,
     /// Channel to the GS on the render thread; None runs headless.
     pub gs: Option<SyncSender<gs::Msg>>,
+    /// Backpressure gate limiting frames in flight between EE producer and GS consumer.
+    pub frame_gate: Option<Arc<FrameGate>>,
     /// VU1's thread, waited for before anything that could show its work.
     pub vu1: Option<crate::vu1::Handle>,
     pub gif_packets: u64,
@@ -128,6 +183,7 @@ impl Io {
             start: Instant::now(),
             vblanks: 0,
             gs: None,
+            frame_gate: None,
             gif_packets: 0,
             vu1: None,
             warned: HashSet::new(),
@@ -191,7 +247,7 @@ impl Io {
     /// Immediate clock check for kernel idle loops, which already sleep
     /// between polls and cannot afford skipping 15 wakeups.
     pub(crate) fn tick_now(&mut self) {
-        let n = (self.start.elapsed().as_secs_f64() * VBLANK_HZ) as u64;
+        let mut n = (self.start.elapsed().as_secs_f64() * VBLANK_HZ) as u64;
         if n > self.vblanks + 6 && self.vblanks > 0 && !crate::quiet() {
             eprintln!(
                 "[stall] {} vblanks ({} ms) without a vblank check, at vblank {}; last guest fn {:#x}",
@@ -202,6 +258,17 @@ impl Io {
             );
         }
         if n > self.vblanks {
+            if let Some(gate) = &self.frame_gate {
+                if !gate.acquire() {
+                    return;
+                }
+                // If elapsed time drifted ahead while waiting on the gate,
+                // realign n to the current host clock to avoid catch-up debt.
+                let now_n = (self.start.elapsed().as_secs_f64() * VBLANK_HZ) as u64;
+                if now_n > n {
+                    n = now_n;
+                }
+            }
             self.vblanks = n;
             self.new_vblank = true;
             let stat = self.reg(INTC_STAT) | 1 << INT_VBLANK_START | 1 << INT_VBLANK_END;
@@ -211,7 +278,13 @@ impl Io {
             self.regs.insert(GS_CSR, csr);
             self.sync_vu1();
             if let Some(tx) = &self.gs {
-                let _ = tx.send(gs::Msg::Vsync(n));
+                if tx.send(gs::Msg::Vsync(n)).is_err() {
+                    if let Some(gate) = &self.frame_gate {
+                        gate.release(1);
+                    }
+                }
+            } else if let Some(gate) = &self.frame_gate {
+                gate.release(1);
             }
         }
     }

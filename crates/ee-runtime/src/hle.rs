@@ -369,9 +369,7 @@ impl Cpu {
     }
 
     fn write_bytes(&mut self, dest: u32, data: &[u8]) {
-        for (i, &b) in data.iter().enumerate() {
-            self.mem.w8(dest + i as u32, b);
-        }
+        self.mem.write_bytes(dest, data);
     }
 
     fn sif_command(&mut self, cid: u32, packet: &[u8]) {

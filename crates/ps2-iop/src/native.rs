@@ -339,7 +339,7 @@ impl Native {
         Native { link, music: Music::new(), sfx: Sfx::new(), status_addr: 0, status_slot: 0 }
     }
 
-    fn mail(&mut self) {
+    pub(crate) fn mail(&mut self) {
         if !self.link.iop_mail.load(Ordering::Acquire) {
             return;
         }
