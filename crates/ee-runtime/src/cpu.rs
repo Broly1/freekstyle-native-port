@@ -175,6 +175,14 @@ impl Cpu {
     /// syscalls, which are safe points for recompiled code. Returns whether
     /// any handler ran (it may have readied a thread).
     pub fn poll_interrupts(&mut self) -> bool {
+        self.poll_interrupts_inner(false)
+    }
+
+    pub(crate) fn poll_interrupts_now(&mut self) -> bool {
+        self.poll_interrupts_inner(true)
+    }
+
+    fn poll_interrupts_inner(&mut self, immediate_clock: bool) -> bool {
         use crate::io::{D_STAT, INTC_MASK, INTC_STAT, INT_DMAC};
         if self.in_interrupt || self.cop0[12] & (1 << 16) == 0 {
             return false;
@@ -185,7 +193,11 @@ impl Cpu {
             self.run_handler(a.id, a.func, (a.ticks as u32, a.arg));
             ran = true;
         }
-        self.mem.io.tick();
+        if immediate_clock {
+            self.mem.io.tick_now();
+        } else {
+            self.mem.io.tick();
+        }
         self.mem.service_vblank();
         // The kernel keeps the DMAC line enabled and dispatches per channel
         // through D_STAT's own mask, so it is never masked at the INTC.

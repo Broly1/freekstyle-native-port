@@ -2,9 +2,9 @@
 //! counter for 10 s with SIGPROF and write `profile.txt` (raw addresses,
 //! relative to the executable, ready for addr2line). FREEK_PROFILE_GS does
 //! the same for the render thread into `profile_gs.txt`. Use one at a time.
-//! A debugging aid (Unix/Linux only; no-op on Windows).
+//! A debugging aid (Linux x86_64 only; no-op elsewhere).
 
-#[cfg(unix)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod imp {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
     use std::time::Duration;
@@ -62,9 +62,9 @@ mod imp {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use imp::start_if_requested;
 
 /// Call from the thread to profile: `var` holds the delay, samples go to `out`.
-#[cfg(not(unix))]
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 pub fn start_if_requested(_var: &str, _out: &'static str) {}

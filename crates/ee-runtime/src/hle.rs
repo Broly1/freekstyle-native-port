@@ -369,9 +369,7 @@ impl Cpu {
     }
 
     fn write_bytes(&mut self, dest: u32, data: &[u8]) {
-        for (i, &b) in data.iter().enumerate() {
-            self.mem.w8(dest + i as u32, b);
-        }
+        self.mem.write_bytes(dest, data);
     }
 
     fn sif_command(&mut self, cid: u32, packet: &[u8]) {
@@ -605,7 +603,9 @@ pub fn movie_play(c: &mut Cpu) {
         }
         (None, _) => {
             if let Some(path) = &opened {
-                eprintln!("[movie] no conversion of {path} in {} (see flm2mkv); skipped", dir.display());
+                if !crate::quiet() {
+                    eprintln!("[movie] no conversion of {path} in {} (see flm2mkv); skipped", dir.display());
+                }
             }
         }
         _ => {}

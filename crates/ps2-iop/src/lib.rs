@@ -60,8 +60,13 @@ pub struct Link {
 
 impl Link {
     pub fn send(&self, m: ToIop) {
-        self.to_iop.lock().unwrap().push_back(m);
+        let mut q = self.to_iop.lock().unwrap();
+        q.push_back(m);
         self.iop_mail.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn has_iop_mail(&self) -> bool {
+        self.iop_mail.load(Ordering::Acquire)
     }
 
     /// Cheap check for messages to the EE.
@@ -426,36 +431,68 @@ pub fn spawn(link: Arc<Link>, ring: Arc<AudioRing>, latency: usize) -> std::thre
     std::thread::Builder::new()
         .name("iop".into())
         .spawn(move || {
+            enum Backend {
+                Native { n: native::Native, reported: u64, seen: (usize, usize), quiet: bool },
+                Emulated(Box<Machine>),
+            }
+            impl Backend {
+                fn poll_mail(&mut self) {
+                    match self {
+                        Self::Native { n, .. } => n.mail(),
+                        Self::Emulated(m) => {
+                            if m.has_mail() {
+                                m.mail();
+                            }
+                        }
+                    }
+                }
+                fn render(&mut self, count: usize, out: &mut Vec<[i16; 2]>) {
+                    match self {
+                        Self::Native { n, reported, seen, quiet } => {
+                            n.render(count, out);
+                            let (banks, categories, _) = n.sfx_counts();
+                            if (banks, categories) != *seen {
+                                *seen = (banks, categories);
+                                if !*quiet {
+                                    eprintln!("[audio] {banks} sound banks, {categories} categories");
+                                }
+                            }
+                            if n.underruns() != *reported {
+                                *reported = n.underruns();
+                                if !*quiet {
+                                    eprintln!("[audio] music ran out of data ({reported} times)");
+                                }
+                            }
+                        }
+                        Self::Emulated(m) => m.render(count, out),
+                    }
+                }
+            }
+            let link_poll = link.clone();
             // Native sound unless FREEK_AUDIO=emulated (see `native`).
-            let mut render: Box<dyn FnMut(usize, &mut Vec<[i16; 2]>)> = if native::enabled() {
-                let mut n = native::Native::new(link);
-                let mut reported = 0;
-                let mut seen = (0, 0);
-                Box::new(move |count, out| {
-                    n.render(count, out);
-                    let (banks, categories, _) = n.sfx_counts();
-                    if (banks, categories) != seen {
-                        seen = (banks, categories);
-                        eprintln!("[audio] {banks} sound banks, {categories} categories");
-                    }
-                    if n.underruns() != reported {
-                        reported = n.underruns();
-                        eprintln!("[audio] music ran out of data ({reported} times)");
-                    }
-                })
+            let mut backend = if native::enabled() {
+                Backend::Native {
+                    n: native::Native::new(link),
+                    reported: 0,
+                    seen: (0, 0),
+                    quiet: std::env::var_os("FREEK_QUIET").is_some_and(|v| v != "0"),
+                }
             } else {
-                let mut m = Machine::new(link);
-                Box::new(move |count, out| m.render(count, out))
+                Backend::Emulated(Box::new(Machine::new(link)))
             };
             let mut chunk = Vec::with_capacity(64);
             // IOP_WAV=path: also record the output (debugging aid).
             let mut wav = std::env::var_os("IOP_WAV").map(|p| (p, Vec::<[i16; 2]>::new()));
             loop {
                 while ring.len() > latency {
+                    if link_poll.has_iop_mail() {
+                        backend.poll_mail();
+                        continue;
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 chunk.clear();
-                render(48, &mut chunk);
+                backend.render(48, &mut chunk);
                 ring.buf.lock().unwrap().extend(chunk.iter().copied());
                 if let Some((path, rec)) = wav.as_mut() {
                     rec.extend_from_slice(&chunk);

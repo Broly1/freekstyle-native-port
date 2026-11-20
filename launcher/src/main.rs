@@ -40,7 +40,9 @@ const ICONS: [(u32, &[u8]); 9] = [
     (256, include_bytes!("../../freekstyle/assets/icon/256.png")),
     (512, include_bytes!("../../freekstyle/assets/icon/512.png")),
 ];
-/// The launcher's icon (the Freekstyle wordmark), same sizes.
+const LAUNCHER_ICON_256: &[u8] = include_bytes!("../../freekstyle/assets/launcher/256.png");
+/// The launcher's icon (the Freekstyle wordmark), same sizes for Linux hicolor themes.
+#[cfg(target_os = "linux")]
 const LAUNCHER_ICONS: [(u32, &[u8]); 9] = [
     (16, include_bytes!("../../freekstyle/assets/launcher/16.png")),
     (22, include_bytes!("../../freekstyle/assets/launcher/22.png")),
@@ -49,7 +51,7 @@ const LAUNCHER_ICONS: [(u32, &[u8]); 9] = [
     (48, include_bytes!("../../freekstyle/assets/launcher/48.png")),
     (64, include_bytes!("../../freekstyle/assets/launcher/64.png")),
     (128, include_bytes!("../../freekstyle/assets/launcher/128.png")),
-    (256, include_bytes!("../../freekstyle/assets/launcher/256.png")),
+    (256, LAUNCHER_ICON_256),
     (512, include_bytes!("../../freekstyle/assets/launcher/512.png")),
 ];
 const WORDMARK_PNG: &[u8] = include_bytes!("../../freekstyle/assets/launcher/wordmark.png");
@@ -102,7 +104,7 @@ fn main() -> eframe::Result {
             .with_app_id("freekstyle-launcher")
             .with_inner_size([760.0, 640.0])
             .with_min_inner_size([560.0, 420.0])
-            .with_icon(eframe::icon_data::from_png_bytes(LAUNCHER_ICONS[7].1).unwrap_or_default()),
+            .with_icon(eframe::icon_data::from_png_bytes(LAUNCHER_ICON_256).unwrap_or_default()),
         ..Default::default()
     };
     eframe::run_native("Freekstyle Launcher", options, Box::new(|cc| Ok(Box::new(Launcher::new(cc)))))
@@ -399,6 +401,10 @@ impl Launcher {
         match Command::new(&bin).spawn() {
             Ok(child) => {
                 self.game = Some(child);
+                // Release SDL3/HIDAPI controller handles while the game runs so
+                // exclusive controller/rumble access on Windows is never contended.
+                self.controllers = None;
+                self.capture = None;
                 self.status = self.tr().game_running.into();
             }
             Err(e) => self.status = format!("{}: {e} ({})", bin.display(), self.tr().build_hint),
@@ -646,18 +652,14 @@ impl Launcher {
                     got = Some(winit_key_name(physical_key.unwrap_or(*key)));
                 }
             }
-            // Modifiers are not keys in egui; the game accepts either side.
-            if got.is_none() {
-                let m = i.modifiers;
-                got = if m.shift { Some(Some("Shift".into())) } else if m.ctrl { Some(Some("Control".into())) } else if m.alt { Some(Some("Alt".into())) } else { None };
-            }
         });
         match got {
             Some(Some(name)) if name == "Escape" => self.capture = None,
+            _ if !slot.1 => {}
             Some(Some(name)) if RESERVED_KEYS.contains(&name.as_str()) => self.status = fill(self.tr().reserved_key, &[&name]),
-            Some(Some(name)) if slot.1 => self.bind(slot, name),
+            Some(Some(name)) => self.bind(slot, name),
             Some(None) => self.status = self.tr().cant_bind.into(),
-            _ => {}
+            None => {}
         }
     }
 }
@@ -670,6 +672,7 @@ impl eframe::App for Launcher {
             if let Ok(Some(status)) = child.try_wait() {
                 self.status = if status.success() { t.game_closed.into() } else { fill(t.game_exited, &[&status.to_string()]) };
                 self.game = None;
+                self.controllers = ControllerManager::new().map_err(|e| eprintln!("[input] gamepads unavailable: {e}")).ok();
             }
         }
         if let Some(job) = &mut self.hd {
@@ -796,13 +799,16 @@ fn winit_key_name(key: egui::Key) -> Option<String> {
     }
     Some(
         match name.as_str() {
+            "ShiftLeft" | "ShiftRight" => "Shift",
+            "ControlLeft" | "ControlRight" => "Control",
+            "AltLeft" | "AltRight" => "Alt",
             "OpenBracket" => "BracketLeft",
             "CloseBracket" => "BracketRight",
             "Backtick" => "Backquote",
             "Equals" => "Equal",
             "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "Escape" | "Tab" | "Backspace" | "Enter" | "Space" | "Insert"
             | "Delete" | "Home" | "End" | "PageUp" | "PageDown" | "Comma" | "Period" | "Minus" | "Semicolon" | "Quote" | "Slash"
-            | "Backslash" => return Some(name),
+            | "Backslash" | "IntlBackslash" => return Some(name),
             _ if name.starts_with('F') && name[1..].parse::<u32>().is_ok() => return Some(name),
             _ => return None,
         }
@@ -830,6 +836,7 @@ fn input_label(t: &Tr, name: &str, keyboard: bool) -> String {
             "Period" => ".",
             "Slash" => "/",
             "Backslash" => "\\",
+            "IntlBackslash" => "<>",
             "Semicolon" => ";",
             "Quote" => "'",
             other => other,

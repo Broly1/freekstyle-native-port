@@ -62,6 +62,45 @@ impl Disc {
         self.file.read_exact(&mut buf[..SECTOR]).map_err(|e| e.to_string())
     }
 
+    /// Read multiple contiguous sectors into `buf` (at least `count * SECTOR` bytes).
+    pub fn read_sectors(&mut self, lsn: u32, count: u32, buf: &mut [u8]) -> Result<(), String> {
+        if count == 0 {
+            return Ok(());
+        }
+        let end = (lsn as u64) + (count as u64);
+        if end > self.sectors as u64 {
+            return Err(format!("sectors {lsn}..{end} past the end of the disc ({} sectors)", self.sectors));
+        }
+        let total = count as usize * SECTOR;
+        if buf.len() < total {
+            return Err(format!("buffer too small: {} < {total}", buf.len()));
+        }
+        if !self.raw {
+            let off = lsn as u64 * SECTOR as u64;
+            self.file.seek(SeekFrom::Start(off)).map_err(|e| e.to_string())?;
+            self.file.read_exact(&mut buf[..total]).map_err(|e| e.to_string())?;
+        } else {
+            const CHUNK_SECTORS: usize = 256;
+            let off = lsn as u64 * RAW_SECTOR;
+            self.file.seek(SeekFrom::Start(off)).map_err(|e| e.to_string())?;
+            let chunk_cap = (count as usize).min(CHUNK_SECTORS);
+            let mut raw_buf = vec![0u8; chunk_cap * RAW_SECTOR as usize];
+            let mut done = 0usize;
+            while done < count as usize {
+                let n = (count as usize - done).min(chunk_cap);
+                let raw_slice = &mut raw_buf[..n * RAW_SECTOR as usize];
+                self.file.read_exact(raw_slice).map_err(|e| e.to_string())?;
+                for i in 0..n {
+                    let src = i * RAW_SECTOR as usize + RAW_DATA as usize;
+                    let dst = (done + i) * SECTOR;
+                    buf[dst..dst + SECTOR].copy_from_slice(&raw_slice[src..src + SECTOR]);
+                }
+                done += n;
+            }
+        }
+        Ok(())
+    }
+
     /// Look up a path such as `\SXDATA\AV\ALL.AV;1` (case-insensitive;
     /// the `;1` version suffix is optional).
     pub fn find(&mut self, path: &str) -> Option<Entry> {
@@ -116,9 +155,7 @@ impl Disc {
             return Err(format!("file at sector {} ({} bytes) runs past the end of the disc", e.lsn, e.size));
         }
         let mut data = vec![0u8; count as usize * SECTOR];
-        for (n, chunk) in data.chunks_mut(SECTOR).enumerate() {
-            self.read_into(e.lsn + n as u32, chunk)?;
-        }
+        self.read_sectors(e.lsn, count, &mut data)?;
         data.truncate(e.size as usize);
         Ok(data)
     }

@@ -47,10 +47,13 @@ const uint TME = 1u, TCC = 8u, FGE = 16u, ATE = 32u, DATE = 16384u, DATM = 32768
 const uint FBA = 65536u, AMERGE = 131072u, PAL8H = 262144u, DBLEND = 33554432u;
 const uint FACTOR_A = 67108864u;
 
+#ifndef NO_DST
 vec3 blend_sel(uint s, vec3 cs, vec3 cd) {
     return s == 0u ? cs : s == 1u ? cd : vec3(0.0);
 }
+#endif
 
+#ifndef SIMPLE_PASS
 bool alpha_pass(float a) {
     float r = pc.aref;
     switch ((pc.flags >> 6) & 7u) {
@@ -64,8 +67,10 @@ bool alpha_pass(float a) {
         default: return a != r;
     }
 }
+#endif
 
 void main() {
+#ifndef NO_DST
     // Destination alpha test: targets store alpha / 0x80, so the GS alpha
     // bit (alpha >= 0x80) is a stored 1.0.
     if ((pc.flags & DATE) != 0u) {
@@ -74,10 +79,12 @@ void main() {
             discard;
         }
     }
+#endif
     vec4 c = floor(v_color * 255.0 + 0.5);
     if ((pc.flags & TME) != 0u) {
         vec2 uv = v_stq.xy / v_stq.z * pc.tex_scale;
         vec4 t;
+#ifndef NO_DST
         if ((pc.flags & PAL8H) != 0u) {
             ivec2 size = textureSize(tex, 0);
             ivec2 p = clamp(ivec2(floor(uv * vec2(size))), ivec2(0), size - 1);
@@ -86,6 +93,9 @@ void main() {
         } else {
             t = floor(texture(sampler2D(tex, tex_sampler), uv) * 255.0 + 0.5);
         }
+#else
+        t = floor(texture(sampler2D(tex, tex_sampler), uv) * 255.0 + 0.5);
+#endif
         bool tcc = (pc.flags & TCC) != 0u;
         switch ((pc.flags >> 1) & 3u) {
             case 0u: // MODULATE
@@ -111,6 +121,7 @@ void main() {
         float f = v_fog;
         c.rgb = floor(c.rgb * f + pc.fogcol.rgb * 255.0 * (1.0 - f));
     }
+#ifndef SIMPLE_PASS
     // RGB_ONLY alpha test failure: the target keeps its alpha.
     bool keep_a = false;
     if ((pc.flags & ATE) != 0u && !alpha_pass(c.a)) {
@@ -120,11 +131,13 @@ void main() {
         if (((pc.flags >> 9) & 3u) == 0u) {
             discard;
         }
+#ifndef NO_DST
         // RGB_ONLY must not write depth either, or floor drawn after a shadow
         // is hidden behind it. Pixels the shadow leaves alone can just go.
         if (keep_a && (pc.flags & PAL8H) != 0u && c.a == 0.0) {
             discard;
         }
+#endif
     }
     uint scale = (pc.flags >> 11) & 3u;
     if (scale == 1u) {
@@ -132,6 +145,8 @@ void main() {
     } else if (scale == 2u) {
         c.rgb *= 1.0 + pc.fix;
     }
+#endif
+#ifndef NO_DST
     if ((pc.flags & DBLEND) != 0u) {
         vec4 d = floor(texelFetch(dst, ivec2(gl_FragCoord.xy), 0) * 255.0 + 0.5);
         vec3 x = blend_sel((pc.flags >> 19) & 3u, c.rgb, d.rgb);
@@ -139,15 +154,20 @@ void main() {
         vec3 z = blend_sel((pc.flags >> 23) & 3u, c.rgb, d.rgb);
         c.rgb = clamp(floor((x - y) * d.a / 128.0) + z, 0.0, 255.0);
     }
+#endif
     uint a = uint(clamp(c.a, 0.0, 255.0));
+#ifndef SIMPLE_PASS
     if ((pc.flags & FBA) != 0u) {
         a |= 0x80u;
     }
+#ifndef NO_DST
     if ((pc.flags & AMERGE) != 0u) {
         uint d = uint(texelFetch(dst, ivec2(gl_FragCoord.xy), 0).a * 255.0 + 0.5);
         uint m = keep_a ? 0xffu : pc.amask;
         a = (a & ~m) | (d & m);
     }
+#endif
+#endif
     float factor = clamp(c.a / 128.0, 0.0, 1.0);
 #ifdef DUAL_SOURCE
     o_color = vec4(c.rgb / 255.0, float(a) / 255.0);

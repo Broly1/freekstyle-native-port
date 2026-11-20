@@ -124,6 +124,58 @@ fn decode_png(data: impl std::io::BufRead + std::io::Seek) -> Result<(u32, u32, 
     Ok((w, h, rgba))
 }
 
+pub struct PictureJob {
+    path: PathBuf,
+    name: String,
+    pw: u32,
+    ph: u32,
+    w: u32,
+    h: u32,
+    scale: (u32, u32),
+    use_wide: bool,
+    xbox: bool,
+}
+
+pub struct ReadyPicture {
+    pub w: u32,
+    pub h: u32,
+    pub px: Vec<u32>,
+    pub wide_picture: bool,
+}
+
+impl PictureJob {
+    pub fn build(self) -> Option<ReadyPicture> {
+        let (sx, sy) = self.scale;
+        let t = std::time::Instant::now();
+        match load_png(&self.path) {
+            Ok((sw, sh, rgba)) => {
+                let mut out = place(&rgba, sw, sh, self.pw * sx, self.ph * sy, self.w * sx, self.h * sy);
+                if self.xbox {
+                    if let Some((_, badges)) = BADGES.iter().find(|b| b.0 == self.name) {
+                        paint_badges(&mut out, self.w * sx, self.pw * sx, self.ph * sy, badges, self.use_wide);
+                        if self.name == "LDCNTL.png" {
+                            paint_pad(&mut out, self.w * sx, self.pw * sx, self.ph * sy, self.use_wide);
+                        }
+                    }
+                }
+                if std::env::var_os("FREEK_GS_LOG").is_some() {
+                    eprintln!("[pictures] {} {sw}x{sh} -> {}x{} in {} ms", self.path.display(), self.pw * sx, self.ph * sy, t.elapsed().as_millis());
+                }
+                Some(ReadyPicture {
+                    w: self.w * sx,
+                    h: self.h * sy,
+                    px: out,
+                    wide_picture: self.use_wide,
+                })
+            }
+            Err(e) => {
+                eprintln!("[pictures] {}: {e}", self.path.display());
+                None
+            }
+        }
+    }
+}
+
 impl Pictures {
     /// Index the originals in `dir` that have a replacement in `dir/hd`.
     /// With `xbox`, pictures in [`BADGES`] are replaced even without a
@@ -165,10 +217,9 @@ impl Pictures {
         Pictures { hd, xbox, known }
     }
 
-    /// Replacement for a decoded `w` x `h` texture holding a known
-    /// picture, at `(sx, sy)` texels per GS pixel; the 16:9 version if
-    /// `wide` and there is one. The flag says which was used.
-    pub fn replace(&self, w: u32, h: u32, px: &[u32], (sx, sy): (u32, u32), wide: bool) -> Option<(u32, u32, Vec<u32>, bool)> {
+    /// Match a decoded `w` x `h` texture against known pictures without doing
+    /// any file I/O or resampling, returning a job to run on a worker thread.
+    pub fn identify(&self, w: u32, h: u32, px: &[u32], scale: (u32, u32), wide: bool) -> Option<PictureJob> {
         for (&(pw, ph), by_hash) in &self.known {
             if pw > w || ph > h || (pw as usize) < PREFIX {
                 continue;
@@ -185,27 +236,28 @@ impl Pictures {
                 // Only here for its badges: the original, upscaled.
                 (false, false) => self.hd.parent().unwrap_or(Path::new(".")).join(&o.name),
             };
-            let t = std::time::Instant::now();
-            match load_png(&path) {
-                Ok((sw, sh, rgba)) => {
-                    let mut out = place(&rgba, sw, sh, pw * sx, ph * sy, w * sx, h * sy);
-                    if self.xbox {
-                        if let Some((_, badges)) = BADGES.iter().find(|b| b.0 == o.name) {
-                            paint_badges(&mut out, w * sx, pw * sx, ph * sy, badges, use_wide);
-                            if o.name == "LDCNTL.png" {
-                                paint_pad(&mut out, w * sx, pw * sx, ph * sy, use_wide);
-                            }
-                        }
-                    }
-                    if std::env::var_os("FREEK_GS_LOG").is_some() {
-                        eprintln!("[pictures] {} {sw}x{sh} -> {}x{} in {} ms", path.display(), pw * sx, ph * sy, t.elapsed().as_millis());
-                    }
-                    return Some((w * sx, h * sy, out, use_wide));
-                }
-                Err(e) => eprintln!("[pictures] {}: {e}", path.display()),
-            }
+            return Some(PictureJob {
+                path,
+                name: o.name.clone(),
+                pw,
+                ph,
+                w,
+                h,
+                scale,
+                use_wide,
+                xbox: self.xbox,
+            });
         }
         None
+    }
+
+    /// Replacement for a decoded `w` x `h` texture holding a known
+    /// picture, at `(sx, sy)` texels per GS pixel; the 16:9 version if
+    /// `wide` and there is one. The flag says which was used.
+    #[allow(dead_code)]
+    pub fn replace(&self, w: u32, h: u32, px: &[u32], scale: (u32, u32), wide: bool) -> Option<(u32, u32, Vec<u32>, bool)> {
+        let r = self.identify(w, h, px, scale, wide)?.build()?;
+        Some((r.w, r.h, r.px, r.wide_picture))
     }
 }
 
@@ -252,17 +304,9 @@ fn paint_pad(out: &mut [u32], stride: u32, pw: u32, ph: u32, wide: bool) {
         Err(e) => return eprintln!("[pictures] xbox-pad.png: {e}"),
     };
     let unstretch = |t: f32| {
-        // Where in the 4:3 picture a column of the wide one comes from.
-        let (mut lo, mut hi) = (0.0f32, 1.0f32);
-        for _ in 0..20 {
-            let f = (lo + hi) / 2.0;
-            if (wide_position(f * 2.0 - 1.0) + 1.0) / 2.0 < t {
-                lo = f;
-            } else {
-                hi = f;
-            }
-        }
-        lo
+        let u = t * 2.0 - 1.0;
+        let v = WIDE_CENTRE * u + (1.0 - WIDE_CENTRE) * u * u * u;
+        (v + 1.0) / 2.0
     };
     let texel = |x: i64, y: i64, c: usize| -> f32 {
         if x < 0 || y < 0 || x >= ow as i64 || y >= oh as i64 {

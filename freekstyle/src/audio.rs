@@ -47,7 +47,8 @@ impl Health {
 }
 
 fn supervise(ring: Arc<AudioRing>, mute: bool) {
-    if mute {
+    let quiet = ee_runtime::quiet();
+    if mute && !quiet {
         eprintln!("[audio] muted; running silent");
     }
     let mut silent = Silent::new();
@@ -152,7 +153,9 @@ fn open(ring: Arc<AudioRing>, health: Arc<Health>) -> Result<cpal::Stream, Strin
         )
         .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
-    eprintln!("[audio] {} at 48 kHz", device.name().unwrap_or_default());
+    if !ee_runtime::quiet() {
+        eprintln!("[audio] {} at 48 kHz", device.name().unwrap_or_default());
+    }
     Ok(stream)
 }
 
@@ -169,15 +172,24 @@ impl Silent {
     }
 
     fn step(&mut self, ring: &AudioRing) {
-        let due = self.start.elapsed().as_micros() as u64 * ps2_iop::spu2::RATE as u64 / 1_000_000;
-        let mut q = ring.buf.lock().unwrap();
-        let n = (due - self.taken).min(q.len() as u64);
-        q.drain(..n as usize);
-        self.taken += n;
-        // A movie's sound keeps its clock running at the same rate.
-        let mut movie = MOVIE_AUDIO.buf.lock().unwrap();
-        let m = n.min(movie.len() as u64);
-        movie.drain(..m as usize);
+        let due = (self.start.elapsed().as_micros() * ps2_iop::spu2::RATE as u128 / 1_000_000) as u64;
+        let step = due.saturating_sub(self.taken);
+        self.taken = due;
+        if step == 0 {
+            return;
+        }
+        {
+            let mut q = ring.buf.lock().unwrap();
+            let n = step.min(q.len() as u64) as usize;
+            q.drain(..n);
+        }
+        // Keep movie sound clock advancing independently of SPU2 ring contents.
+        let m = {
+            let mut movie = MOVIE_AUDIO.buf.lock().unwrap();
+            let m = step.min(movie.len() as u64);
+            movie.drain(..m as usize);
+            m
+        };
         MOVIE_AUDIO.played.fetch_add(m, Relaxed);
     }
 }
