@@ -483,6 +483,18 @@ fn window_icon() -> Option<winit::window::Icon> {
 }
 
 impl ApplicationHandler for App {
+    /// Free the renderer, then the window, while the event loop still holds
+    /// the Wayland connection: run_app consumes the loop, so destroying the
+    /// swapchain after it returned used a closed connection (SIGSEGV in
+    /// libwayland-client on Linux).
+    fn exiting(&mut self, _el: &ActiveEventLoop) {
+        if let Some(gate) = &self.frame_gate {
+            gate.close();
+        }
+        self.renderer = None;
+        self.window = None;
+    }
+
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
