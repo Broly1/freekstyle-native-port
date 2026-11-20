@@ -115,6 +115,11 @@ pub fn run(exe: &Path, model: &str, src: &Path, dst: &Path) -> Result<(), String
         .args(["-i".as_ref(), src.as_os_str(), "-o".as_ref(), dst.as_os_str(), "-n".as_ref(), model.as_ref(), "-s".as_ref(), "4".as_ref(), "-f".as_ref(), "png".as_ref()])
         .arg("-m")
         .arg(models(exe))
+        // One GPU thread, not the default two: on Windows two at once give
+        // black and smeared pictures with the Intel Arc driver (B580,
+        // 32.0.101.9175: 76 of 143 surfaces broken with two, 0 with one).
+        // Linux's Mesa drivers are fine with two.
+        .args(if cfg!(windows) { &["-j", "1:1:2"][..] } else { &[][..] })
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
