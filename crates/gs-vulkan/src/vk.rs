@@ -60,21 +60,22 @@ pub struct Vk {
     pub max_anisotropy: f32,
 }
 
-fn select_present_mode(modes: &[vk::PresentModeKHR], vsync: bool) -> vk::PresentModeKHR {
-    if vsync {
-        return vk::PresentModeKHR::FIFO;
-    }
-    // On Windows, prefer non-blocking modes (MAILBOX, or IMMEDIATE when MAILBOX
-    // is absent such as Intel on Windows, where DWM still composites windowed frames).
-    // On Linux/Unix, stick to MAILBOX -> FIFO to guarantee tear-free presentation.
-    #[cfg(target_os = "windows")]
-    let candidates: &[vk::PresentModeKHR] = &[
-        vk::PresentModeKHR::MAILBOX,
-        vk::PresentModeKHR::IMMEDIATE,
-        vk::PresentModeKHR::FIFO_RELAXED,
-    ];
-    #[cfg(not(target_os = "windows"))]
-    let candidates: &[vk::PresentModeKHR] = &[vk::PresentModeKHR::MAILBOX];
+/// The present mode for FREEK_VSYNC: unset is tear-free everywhere (MAILBOX,
+/// else FIFO), "1" is strict FIFO, "0" lets Windows trade tearing for latency.
+///
+/// Tear-free is the default because IMMEDIATE tears visibly on 60 Hz
+/// monitors (Intel Arc on Windows has no MAILBOX, so it would get IMMEDIATE).
+fn select_present_mode(modes: &[vk::PresentModeKHR], vsync: Option<bool>) -> vk::PresentModeKHR {
+    let candidates: &[vk::PresentModeKHR] = match vsync {
+        Some(true) => &[],
+        None => &[vk::PresentModeKHR::MAILBOX],
+        // Opted out of vsync: on Windows prefer non-blocking modes (MAILBOX,
+        // or IMMEDIATE when MAILBOX is absent). Elsewhere stay tear-free.
+        #[cfg(target_os = "windows")]
+        Some(false) => &[vk::PresentModeKHR::MAILBOX, vk::PresentModeKHR::IMMEDIATE, vk::PresentModeKHR::FIFO_RELAXED],
+        #[cfg(not(target_os = "windows"))]
+        Some(false) => &[vk::PresentModeKHR::MAILBOX],
+    };
     for &candidate in candidates {
         if modes.contains(&candidate) {
             return candidate;
@@ -202,7 +203,7 @@ impl Vk {
                 .find(|f| f.format == vk::Format::B8G8R8A8_UNORM || f.format == vk::Format::R8G8B8A8_UNORM)
                 .copied()
                 .unwrap_or(formats[0]);
-            let vsync = std::env::var_os("FREEK_VSYNC").is_some_and(|v| v != "0");
+            let vsync = std::env::var_os("FREEK_VSYNC").map(|v| v != "0");
             let mode = select_present_mode(&modes, vsync);
             let count = (caps.min_image_count + 1).min(if caps.max_image_count == 0 { u32::MAX } else { caps.max_image_count });
             let old = self.swapchain.swapchain;
@@ -456,5 +457,25 @@ impl Drop for Vk {
             self.surface_loader.destroy_surface(self.surface, None);
             self.instance.destroy_instance(None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_present_mode;
+    use ash::vk::PresentModeKHR as M;
+
+    #[test]
+    fn default_present_mode_never_tears() {
+        // Intel Arc on Windows: no MAILBOX.
+        let intel = [M::IMMEDIATE, M::FIFO, M::FIFO_RELAXED];
+        assert_eq!(select_present_mode(&intel, None), M::FIFO);
+        assert_eq!(select_present_mode(&intel, Some(true)), M::FIFO);
+        let all = [M::IMMEDIATE, M::MAILBOX, M::FIFO];
+        assert_eq!(select_present_mode(&all, None), M::MAILBOX);
+        assert_eq!(select_present_mode(&all, Some(true)), M::FIFO);
+        // Opting out only allows tearing on Windows.
+        let opt_out = select_present_mode(&intel, Some(false));
+        assert_eq!(opt_out, if cfg!(windows) { M::IMMEDIATE } else { M::FIFO });
     }
 }
