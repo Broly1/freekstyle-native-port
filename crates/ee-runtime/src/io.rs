@@ -139,6 +139,11 @@ impl FrameGate {
         self.cv.notify_all();
     }
 
+    /// Whether `close` was called (the window is going away).
+    pub fn closed(&self) -> bool {
+        self.state.lock().unwrap().1
+    }
+
     /// Close the gate so any waiting threads unblock immediately.
     pub fn close(&self) {
         let mut s = self.state.lock().unwrap();
@@ -248,6 +253,12 @@ impl Io {
     /// between polls and cannot afford skipping 15 wakeups.
     pub(crate) fn tick_now(&mut self) {
         let mut n = (self.start.elapsed().as_secs_f64() * VBLANK_HZ) as u64;
+        // The window is closing: nothing presents any more, so keep the clock
+        // moving without vblanks or stall reports until the process exits.
+        if self.frame_gate.as_ref().is_some_and(|g| g.closed()) {
+            self.vblanks = self.vblanks.max(n);
+            return;
+        }
         if n > self.vblanks + 6 && self.vblanks > 0 && !crate::quiet() {
             eprintln!(
                 "[stall] {} vblanks ({} ms) without a vblank check, at vblank {}; last guest fn {:#x}",
@@ -518,5 +529,27 @@ mod gif_tests {
         let finish = 0x61u128 << 64;
         assert!(writes_finish(&[tag, other, finish]));
         assert!(!writes_finish(&[tag, other, other]));
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::{FrameGate, Io, VBLANK_HZ};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn closed_gate_keeps_the_clock_moving_without_blocking() {
+        let mut io = Io::new();
+        let gate = Arc::new(FrameGate::new(1));
+        io.frame_gate = Some(gate.clone());
+        // Fill the only slot (no renderer releases it), then close.
+        assert!(gate.acquire());
+        gate.close();
+        io.start = Instant::now() - Duration::from_secs_f64(30.0 / VBLANK_HZ);
+        io.vblanks = 1;
+        io.tick_now();
+        assert!(io.vblanks >= 30, "vblanks stuck at {}", io.vblanks);
+        assert!(!io.new_vblank, "no vblank is raised after close");
     }
 }
