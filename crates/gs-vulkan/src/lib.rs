@@ -30,20 +30,41 @@ pub struct Renderer {
     last_flips: u64,
     since: std::time::Instant,
     last_flip: Option<std::time::Instant>,
+    displayed_frames: u64,
+    gs_log: bool,
+    frame_gaps: bool,
 }
 
 impl Renderer {
     pub fn new(window: &(impl HasDisplayHandle + HasWindowHandle), size: (u32, u32), cfg: Config) -> Result<Renderer, String> {
         let vk = vk::Vk::new(window, size)?;
         eprintln!(
-            "[gs] Vulkan on {} | {}x{} window | {}x internal resolution",
-            vk.device_name, vk.swapchain.extent.width, vk.swapchain.extent.height, cfg.scale
+            "[gs] Vulkan on {} | {}x{} window | {}x internal resolution | present {:?}",
+            vk.device_name, vk.swapchain.extent.width, vk.swapchain.extent.height, cfg.scale, vk.present_mode
         );
-        Ok(Renderer { gs: gs::Gs::new(), hw: hw::Hw::new(vk, cfg)?, timing: Default::default(), game_frames: 0, last_draws: 0, last_flips: 0, since: std::time::Instant::now(), last_flip: None })
+        Ok(Renderer {
+            gs: gs::Gs::new(),
+            hw: hw::Hw::new(vk, cfg)?,
+            timing: Default::default(),
+            game_frames: 0,
+            last_draws: 0,
+            last_flips: 0,
+            since: std::time::Instant::now(),
+            last_flip: None,
+            displayed_frames: 0,
+            gs_log: std::env::var_os("FREEK_GS_LOG").is_some(),
+            frame_gaps: std::env::var_os("FREEK_FRAME_GAPS").is_some(),
+        })
     }
 
     /// Process one message from the EE. Returns true after presenting.
     pub fn handle(&mut self, msg: gs::Msg) -> bool {
+        self.handle_frame(msg, true)
+    }
+
+    /// Process one message from the EE, skipping swapchain presentation when
+    /// `display` is false so queued stale frames do not add input lag.
+    pub fn handle_frame(&mut self, msg: gs::Msg, display: bool) -> bool {
         let t0 = std::time::Instant::now();
         match msg {
             gs::Msg::Gif(data) => {
@@ -51,10 +72,10 @@ impl Renderer {
                 self.timing.0 += t0.elapsed();
             }
             gs::Msg::Priv(reg, v) => {
-                if std::env::var_os("FREEK_GS_LOG").is_some() {
+                if self.gs_log {
                     eprintln!("[gs] priv {reg:#x} = {v:#x}");
                 }
-                if reg == 0x90 && std::env::var_os("FREEK_FRAME_GAPS").is_some() {
+                if reg == 0x90 && self.frame_gaps {
                     // Game frames are buffer flips (DISPFB2); report hitches.
                     let now = std::time::Instant::now();
                     if let Some(prev) = self.last_flip {
@@ -68,7 +89,7 @@ impl Renderer {
                 self.gs.write_priv(reg, v)
             }
             gs::Msg::Vsync(n) => {
-                if std::env::var_os("FREEK_FRAME_GAPS").is_some() && n > self.hw.vblank + 3 && self.hw.vblank > 0 {
+                if self.frame_gaps && n > self.hw.vblank + 3 && self.hw.vblank > 0 {
                     eprintln!("[hitch] renderer {} vblanks behind at vblank {n}", n - self.hw.vblank);
                 }
                 self.hw.vblank = n;
@@ -76,29 +97,36 @@ impl Renderer {
                     self.game_frames += 1;
                     self.last_draws = self.hw.stats.draws;
                 }
+                let show = display || self.hw.capturing();
                 let tp = std::time::Instant::now();
-                self.hw.present(&self.gs);
-                if std::env::var_os("FREEK_FRAME_GAPS").is_some() && tp.elapsed().as_millis() > 50 {
+                self.hw.present(&self.gs, show);
+                if show && self.frame_gaps && tp.elapsed().as_millis() > 50 {
                     eprintln!("[hitch] present took {} ms at vblank {n}", tp.elapsed().as_millis());
                 }
-                self.timing.1 += t0.elapsed();
-                self.timing.2 += 1;
-                if self.timing.2 == 120 && std::env::var_os("FREEK_GS_LOG").is_some() {
-                    let (g, p, n) = self.timing;
-                    let fps = n as f64 / self.since.elapsed().as_secs_f64();
-                    let secs = self.since.elapsed().as_secs_f64();
-                    let (game, flips) = (self.game_frames as f64 / secs, (self.hw.stats.flips - self.last_flips) as f64 / secs);
-                    self.last_flips = self.hw.stats.flips;
-                    eprintln!("[gs] {fps:.1} fps, drawn {game:.1}/s, shown {flips:.1}/s; per frame: GS {:.2} ms, present {:.2} ms; vblank {}", g.as_secs_f64() * 1e3 / n as f64, p.as_secs_f64() * 1e3 / n as f64, self.hw.vblank);
-                    self.timing = Default::default();
-                    self.game_frames = 0;
-                    self.since = std::time::Instant::now();
+                if show {
+                    self.displayed_frames += 1;
+                    self.timing.1 += t0.elapsed();
+                    self.timing.2 += 1;
+                    if self.timing.2 == 120 && self.gs_log {
+                        let (g, p, n) = self.timing;
+                        let fps = n as f64 / self.since.elapsed().as_secs_f64();
+                        let secs = self.since.elapsed().as_secs_f64();
+                        let (game, flips) = (self.game_frames as f64 / secs, (self.hw.stats.flips - self.last_flips) as f64 / secs);
+                        self.last_flips = self.hw.stats.flips;
+                        eprintln!("[gs] {fps:.1} fps, drawn {game:.1}/s, shown {flips:.1}/s; per frame: GS {:.2} ms, present {:.2} ms; vblank {}", g.as_secs_f64() * 1e3 / n as f64, p.as_secs_f64() * 1e3 / n as f64, self.hw.vblank);
+                        self.timing = Default::default();
+                        self.game_frames = 0;
+                        self.since = std::time::Instant::now();
+                    }
                 }
-                return true;
+                return show;
             }
             gs::Msg::Movie(Some(frame)) => {
-                self.hw.present_movie(&frame);
-                return true;
+                if display || self.hw.capturing() {
+                    self.hw.present_movie(&frame);
+                    self.displayed_frames += 1;
+                    return true;
+                }
             }
             gs::Msg::Movie(None) => self.hw.end_movie(),
         }
@@ -126,6 +154,6 @@ impl Renderer {
     }
 
     pub fn frame(&self) -> u64 {
-        self.hw.frame_no
+        self.displayed_frames
     }
 }

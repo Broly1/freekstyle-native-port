@@ -150,7 +150,9 @@ pub struct Tr {
     pub rs_click: &'static str,
 
     /// Desktop entry comments for the game and the launcher.
+    #[allow(dead_code)]
     pub game_comment: &'static str,
+    #[allow(dead_code)]
     pub launcher_comment: &'static str,
 }
 

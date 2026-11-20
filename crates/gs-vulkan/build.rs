@@ -19,11 +19,15 @@ fn main() {
         ..spv::Options::default()
     };
 
-    // gs.frag twice: with the second (dual-source) blend output, and
-    // without it for the pipelines that don't blend with it.
+    // Compile gs.frag into specialized variants so draws that don't need
+    // destination reads, alpha test, or dual-source blending avoid dead
+    // branches and texture fetches on fill-rate-limited GPUs.
     let targets = [
         ("gs.vert", "gs.vert", ShaderStage::Vertex, &[][..]),
+        ("gs_simple.frag", "gs.frag", ShaderStage::Fragment, &[("SIMPLE_PASS", "1"), ("NO_DST", "1")][..]),
+        ("gs_nodst.frag", "gs.frag", ShaderStage::Fragment, &[("NO_DST", "1")][..]),
         ("gs.frag", "gs.frag", ShaderStage::Fragment, &[][..]),
+        ("gs_dual_nodst.frag", "gs.frag", ShaderStage::Fragment, &[("DUAL_SOURCE", "1"), ("NO_DST", "1")][..]),
         ("gs_dual.frag", "gs.frag", ShaderStage::Fragment, &[("DUAL_SOURCE", "1")][..]),
     ];
 
