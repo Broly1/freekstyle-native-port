@@ -286,6 +286,7 @@ fn main() {
         rx: gs_rx,
         pending: VecDeque::new(),
         pending_frames: 0,
+        consecutive_skips: 0,
         rx_closed: false,
         window: None,
         renderer: None,
@@ -324,6 +325,9 @@ const MAX_PENDING_FRAMES: usize = 3;
 /// 3-5 frames behind (swapchain queue); smaller limits made the EE thread wait
 /// ~25 ms every ~6 s on Windows + Arc at 60 Hz, a visible skip.
 const MAX_FRAMES_IN_FLIGHT: usize = 30;
+/// Present at least every third frame message, so a steady burst (bike
+/// switch in the menu) cannot keep the loop skipping until the budget ends.
+const MAX_CONSECUTIVE_SKIPS: u32 = 2;
 
 fn is_frame_msg(m: &gs::Msg) -> bool {
     matches!(m, gs::Msg::Vsync(_) | gs::Msg::Movie(Some(_)))
@@ -360,6 +364,7 @@ struct App {
     rx: Receiver<gs::Msg>,
     pending: VecDeque<gs::Msg>,
     pending_frames: usize,
+    consecutive_skips: u32,
     rx_closed: bool,
     window: Option<Window>,
     renderer: Option<gs_vulkan::Renderer>,
@@ -644,13 +649,18 @@ impl ApplicationHandler for App {
                 if frame_msg && within_budget && !self.rx_closed && !drain_rx(&self.rx, &mut self.pending, &mut self.pending_frames) {
                     self.rx_closed = true;
                 }
-                let has_newer = frame_msg && within_budget && self.pending_frames > 0;
+                let can_skip = within_budget && self.consecutive_skips < MAX_CONSECUTIVE_SKIPS;
+                let has_newer = frame_msg && can_skip && self.pending_frames > 0;
                 let presented = r.handle_frame(msg, !has_newer);
                 if is_vsync {
                     consumed_vsyncs += 1;
                 }
                 if presented {
+                    self.consecutive_skips = 0;
                     break;
+                }
+                if frame_msg && has_newer {
+                    self.consecutive_skips += 1;
                 }
                 if Instant::now() >= budget {
                     break;
