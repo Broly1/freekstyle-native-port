@@ -55,8 +55,11 @@ fn in_gear(p: [(f32, f32); 3]) -> bool {
     let mid = |a: f32, b: f32, c: f32| (a.min(b).min(c) + a.max(b).max(c)) / 2.0;
     within(0.0, 0.0) && central((mid(a.0, b.0, c.0), mid(a.1, b.1, c.1)))
 }
-/// HD texture data brought to the GPU per frame; the rest waits its turn.
-const HD_UPLOAD_PER_FRAME: u64 = 64 << 20;
+/// Total asynchronous texture data (pictures, xBRZ sprites, HD pack
+/// replacements) uploaded to the GPU per frame; the rest waits its turn.
+/// Matches `STAGING_BYTES` (32 MB) so bursts stay inside the per-frame
+/// staging ring without slowing HD pack streaming.
+const UPLOAD_BUDGET_PER_FRAME: u64 = 32 << 20;
 /// Blurred side bars: the picture is halved down this chain (each blit
 /// averages 2x2 texels), then the smallest is stretched over the window.
 const BLUR_CHAIN: [(u32, u32); 6] = [(1024, 768), (512, 384), (256, 192), (128, 96), (64, 48), (32, 24)];
@@ -267,6 +270,23 @@ enum Garbage {
     Recorded(Buffer),
 }
 
+/// Completed off-thread texture work waiting for per-frame GPU upload budget.
+enum PendingUpload {
+    Picture(TexKey, crate::pictures::ReadyPicture),
+    Sharpened(Sharpened),
+    Hd(crate::retexture::Loaded),
+}
+
+impl PendingUpload {
+    fn bytes(&self) -> u64 {
+        match self {
+            PendingUpload::Picture(_, pic) => pic.w as u64 * pic.h as u64 * 4,
+            PendingUpload::Sharpened(d) => d.w as u64 * d.h as u64 * 4,
+            PendingUpload::Hd(l) => l.levels.iter().map(|m| m.px.len() as u64 * 4).sum(),
+        }
+    }
+}
+
 struct Frame {
     cmd: vk::CommandBuffer,
     fence: vk::Fence,
@@ -349,8 +369,10 @@ pub struct Hw {
     pack: Option<crate::retexture::Pack>,
     hd_images: FastMap<u64, HdImage>,
     hd_bytes: u64,
-    /// Loaded replacements waiting for upload budget.
-    hd_waiting: std::collections::VecDeque<crate::retexture::Loaded>,
+    /// Completed pictures, xBRZ textures, and HD replacements waiting for upload budget.
+    upload_waiting: VecDeque<PendingUpload>,
+    /// Number of `PendingUpload::Sharpened` entries currently queued in `upload_waiting`.
+    sharpen_queued: usize,
     dumper: Option<crate::retexture::Dumper>,
     /// Hash of the CLUT entries a texture uses: (GS CLUT generation,
     /// offset, entries, hash), recomputed only after a CLUT load.
@@ -532,7 +554,8 @@ impl Hw {
                 pack: crate::retexture::Pack::open(&cfg.texture_packs),
                 hd_images: FastMap::default(),
                 hd_bytes: 0,
-                hd_waiting: Default::default(),
+                upload_waiting: VecDeque::new(),
+                sharpen_queued: 0,
                 dumper: std::env::var_os("FREEK_DUMP_TEXTURES").map(Into::into).or_else(|| cfg.texture_dump.clone()).map(crate::retexture::Dumper::new),
                 clut_hash: (u64::MAX, 0, 0, 0),
                 palettes: HashMap::new(),
@@ -2101,9 +2124,7 @@ impl Hw {
         self.frame_no += 1;
         self.submit_no += 1;
         self.begin_frame();
-        self.apply_sharpened();
-        self.apply_hd();
-        self.apply_pictures();
+        self.apply_uploads();
     }
 
     pub fn resize(&mut self, size: (u32, u32)) {
@@ -2144,76 +2165,91 @@ impl Hw {
         self.rendered = rendered;
     }
 
-    /// Swap in textures the xBRZ worker has finished, at the start of a
-    /// frame (nothing drawn yet). Old images are freed once the GPU is done.
-    fn apply_sharpened(&mut self) {
-        let done: Vec<Sharpened> = match &mut self.sharpen {
-            Some(s) => s.finished(),
-            None => return,
+    /// Replace an existing cached texture's GPU image with an asynchronously decoded/upscaled one.
+    fn replace_texture_image(&mut self, key: TexKey, w: u32, h: u32, px: &[u32], bytes: u64, label: &str, wide_picture: Option<bool>) {
+        let Ok(image) = self.upload_image(w, h, px, vk::ImageUsageFlags::SAMPLED, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, label) else {
+            return;
         };
-        for d in done {
-            // Evicted or replaced meanwhile: nothing to update.
-            if !self.textures.contains_key(&d.key) {
-                continue;
-            }
-            let Ok(image) = self.upload_image(d.w, d.h, &d.px, vk::ImageUsageFlags::SAMPLED, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, "texture") else { continue };
-            let t = self.textures.get_mut(&d.key).unwrap();
-            let old = std::mem::replace(&mut t.image, image);
-            let bytes = d.w as u64 * d.h as u64 * 4;
-            self.texture_bytes = self.texture_bytes - t.bytes + bytes;
-            t.bytes = bytes;
-            self.retire_image(old);
+        let t = self.textures.get_mut(&key).unwrap();
+        let old = std::mem::replace(&mut t.image, image);
+        self.texture_bytes = self.texture_bytes.saturating_sub(t.bytes) + bytes;
+        t.bytes = bytes;
+        if let Some(wide) = wide_picture {
+            t.wide_picture = wide;
+            self.draw_gen += 1;
         }
+        self.retire_image(old);
     }
 
-    /// Swap in high-resolution title/loading pictures decoded on the worker
-    /// thread at the start of a frame.
-    fn apply_pictures(&mut self) {
-        let done: Vec<PictureDone> = match &mut self.picture_loader {
-            Some(l) => l.finished(),
-            None => return,
-        };
-        for d in done {
-            let Some(pic) = d.pic else { continue };
-            if !self.textures.contains_key(&d.key) {
+    /// Swap in completed off-thread pictures, xBRZ-sharpened textures, and HD
+    /// pack replacements at the start of a frame, sharing one per-frame upload
+    /// budget so large bursts do not stall a frame; anything beyond the budget
+    /// waits in `upload_waiting` for the next frame.
+    fn apply_uploads(&mut self) {
+        if let Some(pack) = &mut self.pack {
+            while let Some(l) = pack.next_loaded() {
+                self.upload_waiting.push_back(PendingUpload::Hd(l));
+            }
+        }
+        if self.sharpen_queued < 16 {
+            if let Some(s) = &mut self.sharpen {
+                for d in s.finished().into_iter().rev() {
+                    if self.textures.contains_key(&d.key) {
+                        self.upload_waiting.push_front(PendingUpload::Sharpened(d));
+                        self.sharpen_queued += 1;
+                    }
+                }
+            }
+        }
+        if let Some(l) = &mut self.picture_loader {
+            for d in l.finished().into_iter().rev() {
+                if let Some(pic) = d.pic {
+                    if self.textures.contains_key(&d.key) {
+                        self.upload_waiting.push_front(PendingUpload::Picture(d.key, pic));
+                    }
+                }
+            }
+        }
+        let mut budget = UPLOAD_BUDGET_PER_FRAME;
+        while let Some(item) = self.upload_waiting.front() {
+            let stale = match item {
+                PendingUpload::Picture(key, _) => !self.textures.contains_key(key),
+                PendingUpload::Sharpened(d) => !self.textures.contains_key(&d.key),
+                PendingUpload::Hd(_) => false,
+            };
+            if stale {
+                // Evicted or replaced meanwhile: discard without spending budget.
+                if matches!(self.upload_waiting.pop_front(), Some(PendingUpload::Sharpened(_))) {
+                    self.sharpen_queued = self.sharpen_queued.saturating_sub(1);
+                }
                 continue;
             }
-            let Ok(image) = self.upload_image(pic.w, pic.h, &pic.px, vk::ImageUsageFlags::SAMPLED, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, "picture") else { continue };
-            let t = self.textures.get_mut(&d.key).unwrap();
-            let old = std::mem::replace(&mut t.image, image);
-            let bytes = pic.w as u64 * pic.h as u64 * 4;
-            self.texture_bytes = self.texture_bytes - t.bytes + bytes;
-            t.bytes = bytes;
-            t.wide_picture = pic.wide_picture;
-            self.draw_gen += 1;
-            self.retire_image(old);
+            let bytes = item.bytes();
+            if !take_upload_budget(&mut budget, bytes) {
+                break;
+            }
+            match self.upload_waiting.pop_front().unwrap() {
+                PendingUpload::Picture(key, pic) => {
+                    self.replace_texture_image(key, pic.w, pic.h, &pic.px, bytes, "picture", Some(pic.wide_picture));
+                }
+                PendingUpload::Sharpened(d) => {
+                    self.sharpen_queued = self.sharpen_queued.saturating_sub(1);
+                    self.replace_texture_image(d.key, d.w, d.h, &d.px, bytes, "texture", None);
+                }
+                PendingUpload::Hd(l) => match self.upload_levels(&l.levels) {
+                    Ok(image) => {
+                        self.hd_bytes += bytes;
+                        if let Some(old) = self.hd_images.insert(l.hash, HdImage { image, last_used: self.submit_no, bytes }) {
+                            self.hd_bytes = self.hd_bytes.saturating_sub(old.bytes);
+                            self.retire_image(old.image);
+                        }
+                    }
+                    Err(e) => eprintln!("[textures] upload: {e}"),
+                },
+            }
         }
         if self.texture_bytes > TEXTURE_BUDGET {
             self.evict_lru();
-        }
-    }
-
-    /// Bring loaded replacements to the GPU, at the start of a frame like
-    /// `apply_sharpened`, a little at a time so that a whole pack arriving
-    /// at the start of a race does not stall a frame.
-    fn apply_hd(&mut self) {
-        let Some(pack) = &mut self.pack else { return };
-        self.hd_waiting.extend(std::iter::from_fn(|| pack.next_loaded()));
-        let mut budget = HD_UPLOAD_PER_FRAME;
-        while let Some(l) = self.hd_waiting.front() {
-            let bytes: u64 = l.levels.iter().map(|m| m.px.len() as u64 * 4).sum();
-            if bytes > budget && budget != HD_UPLOAD_PER_FRAME {
-                break;
-            }
-            budget = budget.saturating_sub(bytes);
-            let l = self.hd_waiting.pop_front().unwrap();
-            match self.upload_levels(&l.levels) {
-                Ok(image) => {
-                    self.hd_bytes += bytes;
-                    self.hd_images.insert(l.hash, HdImage { image, last_used: self.submit_no, bytes });
-                }
-                Err(e) => eprintln!("[textures] upload: {e}"),
-            }
         }
         if self.hd_bytes > HD_BUDGET {
             let mut by_age: Vec<(u64, u64)> = self
@@ -2228,7 +2264,7 @@ impl Hw {
                     break;
                 }
                 let i = self.hd_images.remove(&hash).unwrap();
-                self.hd_bytes -= i.bytes;
+                self.hd_bytes = self.hd_bytes.saturating_sub(i.bytes);
                 if let Some(p) = &mut self.pack {
                     p.forget(hash);
                 }
@@ -2561,5 +2597,65 @@ mod gear_tests {
         }
         assert!(!in_gear([(20.5, 197.5), (52.5, 197.5), (20.5, 213.5)]));
         assert!(!in_gear([(20.5, 150.0625), (220.125, 150.0625), (20.5, 199.9375)]));
+    }
+}
+
+/// Consume `bytes` from the remaining per-frame upload `budget`.
+/// Always permits the first item of a frame (when `*budget == UPLOAD_BUDGET_PER_FRAME`)
+/// so a single oversized picture or mipmapped HD texture never starves.
+fn take_upload_budget(budget: &mut u64, bytes: u64) -> bool {
+    if bytes > *budget && *budget != UPLOAD_BUDGET_PER_FRAME {
+        return false;
+    }
+    *budget = budget.saturating_sub(bytes);
+    true
+}
+
+#[cfg(test)]
+mod upload_budget_tests {
+    use super::{take_upload_budget, PendingUpload, Sharpened, TexKey, UPLOAD_BUDGET_PER_FRAME};
+    use crate::pictures::ReadyPicture;
+    use crate::retexture::{Level, Loaded};
+
+    #[test]
+    fn small_uploads_share_frame_budget() {
+        let mut budget = UPLOAD_BUDGET_PER_FRAME;
+        let chunk = UPLOAD_BUDGET_PER_FRAME / 2;
+        assert!(take_upload_budget(&mut budget, chunk));
+        assert!(take_upload_budget(&mut budget, chunk));
+        assert_eq!(budget, 0);
+        assert!(!take_upload_budget(&mut budget, 1));
+    }
+
+    #[test]
+    fn oversized_first_upload_does_not_starve_and_stops_rest() {
+        let mut budget = UPLOAD_BUDGET_PER_FRAME;
+        assert!(take_upload_budget(&mut budget, UPLOAD_BUDGET_PER_FRAME * 2));
+        assert_eq!(budget, 0);
+        assert!(!take_upload_budget(&mut budget, 4096));
+    }
+
+    #[test]
+    fn oversized_upload_defers_after_partial_spend_then_runs_next_frame() {
+        let mut budget = UPLOAD_BUDGET_PER_FRAME;
+        assert!(take_upload_budget(&mut budget, 1 << 20));
+        assert!(!take_upload_budget(&mut budget, UPLOAD_BUDGET_PER_FRAME));
+        let mut next_frame = UPLOAD_BUDGET_PER_FRAME;
+        assert!(take_upload_budget(&mut next_frame, UPLOAD_BUDGET_PER_FRAME * 2));
+        assert_eq!(next_frame, 0);
+    }
+
+    #[test]
+    fn pending_upload_bytes_accounts_for_all_variants() {
+        let key = TexKey { tex0: 1, texa: 2, clut: 3, gen: 4 };
+        let pic = PendingUpload::Picture(key, ReadyPicture { w: 10, h: 20, px: vec![0; 200], wide_picture: false });
+        let sharp = PendingUpload::Sharpened(Sharpened { key, w: 8, h: 4, px: vec![0; 32] });
+        let hd = PendingUpload::Hd(Loaded {
+            hash: 99,
+            levels: vec![Level { w: 4, h: 4, px: vec![0; 16] }, Level { w: 2, h: 2, px: vec![0; 4] }],
+        });
+        assert_eq!(pic.bytes(), 200 * 4);
+        assert_eq!(sharp.bytes(), 32 * 4);
+        assert_eq!(hd.bytes(), (16 + 4) * 4);
     }
 }
