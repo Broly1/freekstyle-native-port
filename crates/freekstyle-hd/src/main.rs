@@ -20,6 +20,7 @@
 //! anything else. Without a GPU (only a software Vulkan driver) nothing is
 //! made: on one the model takes minutes per picture.
 
+mod boost;
 mod esrgan;
 mod pack;
 mod pictures;

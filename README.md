@@ -325,9 +325,10 @@ download Real-ESRGAN, an AI upscaler (about 45 MB, into
   when nothing is new. It runs then, and only then, because the model
   takes the whole GPU: beside the game or the desktop it makes everything
   stutter. Menus, fonts and the HUD use the line-art model, 3D surfaces
-  the photo model; the chrome menu frames and the boost gear are redrawn
-  as clean steel instead, keeping their shapes. Its log is `hd.log` in the
-  data folder.
+  the photo model; the chrome menu frames are redrawn as clean steel
+  instead, keeping their shapes, and the boost HUD (gear, logo, ball face,
+  meter) is redrawn clean from your own recording. Its log is `hd.log`
+  in the data folder.
 
 A machine without a graphics card (only a software Vulkan driver) gets
 neither: the model would take minutes per picture. The game then looks as

@@ -4,7 +4,9 @@
 //! Their originals are too small for any upscaler to give clean edges, so
 //! only their shapes are kept: each outline is cleaned by the line-art
 //! model, smoothed at 8x and shaded from scratch as polished steel. The
-//! mascot's face keeps its art, sharpened toward ink.
+//! mascot's face keeps its art, sharpened toward ink. Once boost has been
+//! used (and the big logo recorded) the gear is drawn in `boost` instead,
+//! with the rest of the boost HUD.
 
 use std::path::{Path, PathBuf};
 
@@ -30,7 +32,7 @@ const STEEL: [[f32; 7]; 3] = [
 
 /// Whether this texture is redrawn here rather than upscaled.
 pub fn is_redrawn(hash: &str) -> bool {
-    hash == GEAR || FRAMES.contains(&hash)
+    hash == GEAR || FRAMES.contains(&hash) || crate::boost::is_boost(hash)
 }
 
 /// Run pictures through the line-art model.
@@ -56,7 +58,7 @@ fn outline(a: &Plane) -> Plane {
 
 /// Shade a mask as bevelled, polished steel, lit from the upper left:
 /// colour, and a thin dark rim around the metal.
-fn steel(mask: &Plane) -> (Vec<[f32; 3]>, Plane) {
+pub(crate) fn steel(mask: &Plane) -> (Vec<[f32; 3]>, Plane) {
     let s = SCALE as f32;
     let (b1, b2, b3) = (mask.blur(s * 0.5), mask.blur(s * 1.4), mask.blur(s * 3.5));
     let height = Plane::from_fn(mask.w, mask.h, |x, y| 0.5 * b1.at(x, y) + 0.3 * b2.at(x, y) + 0.2 * b3.at(x, y));
@@ -88,6 +90,10 @@ fn source(path: &Path, exe: &Path, tmp: &Path) -> Result<(Plane, RgbImage), Stri
     let out = model(exe, &[mask, black], tmp)?;
     let mask = Plane::from_gray(&resize_gray(&to_gray(&out[0]), w, h, FilterType::CatmullRom));
     Ok((mask, resize_rgb(&out[1], w, h, FilterType::Lanczos3)))
+}
+
+fn open_rgba(p: &Path) -> Result<RgbaImage, String> {
+    Ok(image::open(p).map_err(|e| format!("{}: {e}", p.display()))?.to_rgba8())
 }
 
 fn rgba(rgb: &[[f32; 3]], alpha: &Plane) -> RgbaImage {
@@ -162,7 +168,20 @@ pub fn build(exe: &Path, todo: &[PathBuf], out: &Path, tmp: &Path, progress: &mu
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     for (n, f) in todo.iter().enumerate() {
         let hash = crate::pack::hash_of(f).unwrap_or_default();
-        let art = if hash == GEAR { gear(f, exe, tmp)? } else { frame(f, exe, tmp)? };
+        let dump = f.parent().unwrap_or(Path::new("."));
+        let art = if crate::boost::is_boost(hash) {
+            crate::boost::draw(hash, f, dump)?
+        } else if hash == GEAR {
+            // Drawn from the gear's outline and the big logo's lines once
+            // boost has been used (the logo is recorded then); until then
+            // from the gear alone.
+            match crate::boost::find_logo(dump) {
+                Some(logo) => crate::boost::gear(&open_rgba(f)?, &open_rgba(&logo)?),
+                None => gear(f, exe, tmp)?,
+            }
+        } else {
+            frame(f, exe, tmp)?
+        };
         crate::pack::save(&image::DynamicImage::ImageRgba8(art), &out.join(f.file_name().unwrap()))?;
         progress(n + 1);
     }
