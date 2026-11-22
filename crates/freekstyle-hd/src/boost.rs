@@ -4,11 +4,14 @@
 //! The logo, ball face and meter are a few flat colours, so no upscaler is
 //! needed (it only smears them): each colour becomes its own smooth shape
 //! at 8x and the shapes are put back together with crisp, anti-aliased
-//! edges. The ball's face is too small to redraw from itself, so it takes
-//! its lines from the big logo, fitted to where the ball's face sits. The
-//! gear keeps its own outline (one tooth, repeated), gets steel, see-through
-//! holes with a soft shadow, two thin X bars, and the logo's face. Nothing
-//! of the game's art is kept in the source: it all comes from the recording.
+//! edges; the meter's bars run on under the gear, so no gap shows beside
+//! them. The ball's face is too small to redraw from itself, so it takes
+//! its horns and lines from the big logo, fitted to the original's. The
+//! gear keeps the original's design (its outline with one tooth repeated,
+//! the raised ring, the two solid wedges, the horned face fitted from the
+//! big logo) in polished steel, with see-through holes and a soft shadow.
+//! Nothing of the game's art is kept in the source: it all comes from the
+//! recording.
 
 use std::path::Path;
 
@@ -17,6 +20,7 @@ use image::RgbaImage;
 use crate::plane::Plane;
 
 const F: usize = 8;
+pub const GEAR: &str = "04f1ae1a30c0cc38";
 pub const LOGO: &str = "9606d5c1f9478577";
 pub const BALL: &str = "17941779c37d9812";
 pub const METER: &str = "72ec3c5f7b4eef11";
@@ -25,24 +29,41 @@ pub const METER: &str = "72ec3c5f7b4eef11";
 const LOGO_PAL: [[f32; 3]; 3] = [[248.0, 248.0, 248.0], [248.0, 40.0, 0.0], [96.0, 0.0, 0.0]];
 const METER_PAL: [[f32; 3]; 2] = [[188.0, 0.0, 16.0], [212.0, 180.0, 96.0]];
 const BALL_LINE: [f32; 3] = [125.0, 18.0, 22.0];
+/// How far the meter runs on under the gear, in original texels: the gear is
+/// drawn over it, and its holes are a little larger than the meter's bars.
+const METER_TUCK: f32 = 3.0;
+/// How far the original's light and shade carries into the ball's face.
+const BALL_SHADE: f32 = 0.5;
 
 pub fn is_boost(hash: &str) -> bool {
-    [LOGO, BALL, METER].contains(&hash)
+    version(hash).is_some()
 }
 
-/// Redraw one of the three; `dump` is the recording it came from.
+/// The version of each drawing. Raise one whenever what it draws changes:
+/// packs holding an older one then get it redrawn once (see `ledger`).
+pub fn version(hash: &str) -> Option<u32> {
+    match hash {
+        GEAR | LOGO | BALL | METER => Some(1),
+        _ => None,
+    }
+}
+
+/// Whether it takes its lines from the big logo, and so can't be drawn
+/// until that has been recorded.
+pub fn needs_logo(hash: &str) -> bool {
+    hash == GEAR || hash == BALL
+}
+
+/// Redraw one of the four; `dump` is the recording it came from.
 pub fn draw(hash: &str, path: &Path, dump: &Path) -> Result<RgbaImage, String> {
     let src = open(path)?;
     match hash {
         LOGO => Ok(logo(&src)),
         METER => Ok(meter(&src)),
         _ => {
-            match find_logo(dump) {
-                Some(l) => Ok(ball(&src, &open(&l)?)),
-                // The logo is recorded the first time boost is used, as the
-                // ball is; without it the ball is only scaled smoothly.
-                None => Ok(image::imageops::resize(&src, src.width() * F as u32, src.height() * F as u32, image::imageops::FilterType::CatmullRom)),
-            }
+            let logo = find_logo(dump).ok_or("the big logo isn't recorded yet")?;
+            let logo = open(&logo)?;
+            Ok(if hash == GEAR { gear(&src, &logo) } else { ball(&src, &logo) })
         }
     }
 }
@@ -351,11 +372,11 @@ fn shares(c: [f32; 3], pal: &[[f32; 3]; 3]) -> [f32; 3] {
     best.0.map(|v| v / s)
 }
 
-/// Each logo colour's share as a smooth 8x field.
-fn logo_fields(src: &RgbaImage) -> Vec<Plane> {
+/// Each logo colour's share of every texel.
+fn logo_shares(src: &RgbaImage) -> [Plane; 3] {
     let (w, h) = (src.width() as usize, src.height() as usize);
     let mut cache = std::collections::HashMap::new();
-    let mut planes = vec![Plane::new(w, h), Plane::new(w, h), Plane::new(w, h)];
+    let mut planes = [Plane::new(w, h), Plane::new(w, h), Plane::new(w, h)];
     for y in 0..h {
         for x in 0..w {
             let p = src.get_pixel(x as u32, y as u32).0;
@@ -365,7 +386,12 @@ fn logo_fields(src: &RgbaImage) -> Vec<Plane> {
             }
         }
     }
-    planes.iter().map(|p| up(p).blur(6.0)).collect()
+    planes
+}
+
+/// Each logo colour's share as a smooth 8x field.
+fn logo_fields(src: &RgbaImage) -> Vec<Plane> {
+    logo_shares(src).iter().map(|p| up(p).blur(6.0)).collect()
 }
 
 /// Flat colours from winner-takes-all shapes, anti-aliased.
@@ -413,18 +439,26 @@ fn meter(src: &RgbaImage) -> RgbaImage {
         })
         .collect();
     let (w, h) = (sw * F, sh * F);
+    // Each bar is grown to run under the gear, as far as halfway to the other.
+    let bars: Vec<Option<Vec<f32>>> = (0..METER_PAL.len())
+        .map(|k| {
+            let m = Mask::from_fn(w, h, |x, y| {
+                let i = y * w + x;
+                fields[k].v[i] > 0.5 && fields[k].v[i] >= fields[1 - k].v[i]
+            });
+            m.any().then(|| m.largest().dist())
+        })
+        .collect();
     let mut rgb = vec![[0f32; 3]; w * h];
     let mut alpha = Plane::new(w, h);
     for (k, c) in METER_PAL.iter().enumerate() {
-        let o = 1 - k;
+        let Some(near) = &bars[k] else { continue };
         let m = Mask::from_fn(w, h, |x, y| {
             let i = y * w + x;
-            fields[k].v[i] > 0.5 && fields[k].v[i] >= fields[o].v[i]
+            let mine = bars[1 - k].as_ref().is_none_or(|other| near[i] < other[i] || (near[i] == other[i] && k == 0));
+            mine && near[i] <= METER_TUCK * F as f32
         });
-        if !m.any() {
-            continue;
-        }
-        let a = m.largest().aa(1.5);
+        let a = m.aa(1.5);
         for i in 0..w * h {
             for ch in 0..3 {
                 rgb[i][ch] += a.v[i] * c[ch];
@@ -443,116 +477,199 @@ fn meter(src: &RgbaImage) -> RgbaImage {
 
 // ---------- the ball's face ----------
 
+/// The face on the full boost's ball: the gear's face in red and white, with
+/// the same horns, steel rim and crisp lines, rounded by the original's light.
 fn ball(src: &RgbaImage, logo_src: &RgbaImage) -> RgbaImage {
     let (sw, sh) = (src.width() as usize, src.height() as usize);
     let (w, h) = (sw * F, sh * F);
     let px = |x: usize, y: usize| src.get_pixel(x as u32, y as u32).0;
 
-    // The logo: its face (with outline) and where it sits.
-    let fields = logo_fields(logo_src);
-    let (lw, lh) = (fields[0].w, fields[0].h);
-    let lab_l = argmax(&fields);
-    let dark_l = Mask { w: lw, h: lh, v: lab_l.iter().map(|&l| l == 2).collect() };
-    let face_l = dark_l.close(4.5).fill_holes();
-    let lb = face_l.bbox();
-    let face_lp = face_l.plane();
-
     // The ball's face: its solid silhouette, without stray texels.
-    let sil = Mask::from_fn(sw, sh, |x, y| px(x, y)[3] >= 200);
-    let er = Mask::from_fn(sw, sh, |x, y| sil.v[y * sw + x] && x + 1 < sw && y + 1 < sh && sil.v[y * sw + x + 1] && sil.v[(y + 1) * sw + x] && sil.v[(y + 1) * sw + x + 1]);
-    let opened = Mask::from_fn(sw, sh, |x, y| {
-        let g = |dx: usize, dy: usize| x >= dx && y >= dy && er.v[(y - dy) * sw + x - dx];
-        g(0, 0) || g(1, 0) || g(0, 1) || g(1, 1)
-    });
-    if !opened.any() {
+    let solid = Mask::from_fn(sw, sh, |x, y| px(x, y)[3] >= 200);
+    let body = solid.erode(1.5);
+    if !body.any() {
         return image::imageops::resize(src, w as u32, h as u32, image::imageops::FilterType::CatmullRom);
     }
-    let b = opened.largest().bbox();
-    let bb = (b.0 + 0.5, b.1 + 0.5, b.2 + 0.5, b.3 + 0.5);
+    let body = body.largest().dilate(1.5).and(&solid);
+    let face = fit_face(src, &body, body.bbox(), logo_src);
 
-    // Logo coordinates of every output texel.
-    let to_logo = |x: usize, y: usize| {
-        let (bx, by) = (x as f32 / F as f32, y as f32 / F as f32);
-        let lx = lb.0 + (bx - bb.0) * (lb.1 - lb.0) / (bb.1 - bb.0);
-        let ly = lb.2 + (by - bb.2) * (lb.3 - lb.2) / (bb.3 - bb.2);
-        (lx, ly)
-    };
-    let mut lines = Mask::from_fn(w, h, |_, _| false);
-    let mut face = Mask::from_fn(w, h, |_, _| false);
-    for y in 0..h {
-        for x in 0..w {
-            let (lx, ly) = to_logo(x, y);
-            let s: Vec<f32> = (0..3).map(|c| sample(&fields[c], lx, ly, if c == 0 { 1.0 } else { 0.0 })).collect();
-            let i = y * w + x;
-            lines.v[i] = s[2] > s[0] && s[2] > s[1];
-            face.v[i] = sample(&face_lp, lx, ly, 0.0) > 0.5;
-        }
-    }
-    // A thin white rim round the outline, like the original.
-    let face = face.dilate(3.0);
-    // The logo's lines are drawn bolder than the ball's: thin them.
-    let lines = lines.and(&face).erode(4.0).drop_small(150).plane().blur(2.5);
-    let lines = Mask { w, h, v: lines.v.iter().map(|&v| v > 0.5).collect() };
-
-    // The ball's shading, from the white of the original.
-    let red = Mask::from_fn(sw, sh, |x, y| {
+    // The shading, from the white of the original.
+    let white = Mask::from_fn(sw, sh, |x, y| {
         let p = px(x, y);
-        p[3] > 0 && p[0] as i32 - p[1] as i32 > 45 && (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0 < 170.0
+        body.v[y * sw + x] && !(p[0] as i32 - p[1] as i32 > 45 && grey(src, x, y) < 170.0)
     });
-    let white = Mask::from_fn(sw, sh, |x, y| px(x, y)[3] > 0 && !red.v[y * sw + x]);
-    let mut lum: Vec<[f32; 3]> = (0..sw * sh)
-        .map(|i| {
-            let p = px(i % sw, i / sw);
-            [(p[0] as f32 + p[1] as f32 + p[2] as f32) / 765.0; 3]
-        })
-        .collect();
+    let mut lum: Vec<[f32; 3]> = (0..sw * sh).map(|i| [grey(src, i % sw, i / sw) / 255.0; 3]).collect();
     bleed(&mut lum, &white);
-    let lum = Plane { w: sw, h: sh, v: lum.iter().map(|c| c[0]).collect() }.blur(1.2);
-    let shade = up(&lum).blur(10.0);
-    let mut inner: Vec<f32> = (0..w * h).filter(|&i| face.v[i] && !lines.v[i]).map(|i| shade.v[i]).collect();
-    inner.sort_by(f32::total_cmp);
-    let top = inner.get(inner.len() * 97 / 100).copied().unwrap_or(1.0).max(1e-3);
-    let shade = shade.map(|v| (v / top).clamp(0.7, 1.0).powf(0.8));
+    let light = up(&Plane { w: sw, h: sh, v: lum.iter().map(|c| c[0]).collect() }.blur(3.0)).blur(10.0);
+    let light = light.map(|v| 1.0 - BALL_SHADE + BALL_SHADE * (v * 1.35).min(1.0));
 
-    let la = lines.aa(1.4);
-    let alpha = face.aa(1.5);
+    let (shape_a, ink_a) = (face.shape.aa(1.5), face.ink.aa(1.4));
+    let rim_rgb = polish(&shape_a);
+    let inside_a = face.ink.fill_holes().aa(1.5);
     let mut rgb: Vec<[f32; 3]> = (0..w * h)
         .map(|i| {
-            let wv = 250.0 * shade.v[i];
-            [0, 1, 2].map(|c| wv * (1.0 - la.v[i]) + BALL_LINE[c] * la.v[i])
+            [0, 1, 2].map(|c| {
+                let v = rim_rgb[i][c] * (1.0 - inside_a.v[i]) + 250.0 * light.v[i] * inside_a.v[i];
+                v * (1.0 - ink_a.v[i]) + BALL_LINE[c] * light.v[i] * ink_a.v[i]
+            })
         })
         .collect();
-    bleed(&mut rgb, &Mask { w, h, v: alpha.v.iter().map(|&a| a > 0.5).collect() });
-    image(&rgb, &alpha)
+    bleed(&mut rgb, &Mask { w, h, v: shape_a.v.iter().map(|&a| a > 0.02).collect() });
+    image(&rgb, &shape_a)
 }
 
 // ---------- the gear ----------
 
-/// The recorded big logo, if boost has been used yet.
+/// The recorded big logo, if the game has shown it yet.
 pub fn find_logo(dump: &Path) -> Option<std::path::PathBuf> {
     std::fs::read_dir(dump).ok()?.flatten().map(|e| e.path()).find(|p| crate::pack::hash_of(p) == Some(LOGO))
 }
 
 const TEETH: usize = 12;
-/// Width of the steel rim round the face, in original texels.
-const RIM_SRC: f32 = 1.5;
-/// How much the logo's ink lines are thinned for the gear (8x texels).
-const INK_THIN: f32 = 3.0;
+/// Width of a wedge's point, in original texels.
+const NECK_SRC: f32 = 2.6;
+/// How much the wedges' corners are rounded (8x texels).
+const WEDGE_ROUND: f32 = 5.0;
+/// The wedges' steel next to the ring's: at the ring, and at the point.
+const WEDGE_SHADE: (f32, f32) = (0.94, 0.70);
+/// The raised band round the holes: across and down, in original texels.
+const BAND_SRC: (f32, f32) = (4.3, 5.0);
+/// The black line inside the ring, along both holes, in original texels. The
+/// game dims the holes with an oval up to 1.5 texels short of the ring, which
+/// left a bright blotchy edge on the meter.
+const RING_LINE: f32 = 1.8;
+/// How far the original's light and shade carries into the silver face.
+const FACE_SHADE: f32 = 0.36;
 
-/// The boost gear: twelve identical smooth teeth and the ring from the
-/// gear's own outline, shaded as polished steel, a soft shadow in the
-/// holes, and the mascot's face with crisp ink lines taken from the big
-/// logo, set in a steel rim.
-pub fn gear(src: &RgbaImage, logo_src: &RgbaImage) -> RgbaImage {
+/// Least-squares line x = a + b*y through (y, x) points, as (a, b).
+fn line_fit(points: impl Iterator<Item = (f32, f32)> + Clone) -> (f32, f32) {
+    let n = points.clone().count().max(1) as f32;
+    let my = points.clone().map(|p| p.0).sum::<f32>() / n;
+    let mx = points.clone().map(|p| p.1).sum::<f32>() / n;
+    let cov: f32 = points.clone().map(|(y, x)| (y - my) * (x - mx)).sum();
+    let var: f32 = points.map(|(y, _)| (y - my) * (y - my)).sum();
+    let b = cov / var.max(1e-6);
+    (mx - b * my, b)
+}
+
+fn correlation(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().max(1) as f32;
+    let (ma, mb) = (a.iter().sum::<f32>() / n, b.iter().sum::<f32>() / n);
+    let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
+    for (&x, &y) in a.iter().zip(b) {
+        ab += (x - ma) * (y - mb);
+        aa += (x - ma) * (x - ma);
+        bb += (y - mb) * (y - mb);
+    }
+    ab / (aa * bb).sqrt().max(1e-6)
+}
+
+/// Where the big logo sits on the gear or the ball, and its two shapes.
+struct Face {
+    /// The face with its horns and rim.
+    shape: Mask,
+    /// The dark lines.
+    ink: Mask,
+}
+
+/// Lay the big logo over the little face of the gear or the ball: stretched and moved until
+/// its silhouette and its dark lines both match the original's, so horns,
+/// eyes, teeth and tongue are where the game has them.
+fn fit_face(src: &RgbaImage, solid: &Mask, at: (f32, f32, f32, f32), logo_src: &RgbaImage) -> Face {
+    let (sw, sh) = (solid.w, solid.h);
+    let [_, red, dark] = logo_shares(logo_src);
+    let inside = Mask { w: red.w, h: red.h, v: red.v.iter().map(|&r| r >= 0.5).collect() }.fill_holes();
+    // within the logo's orange outline
+    let shape = Plane::from_fn(red.w, red.h, |x, y| if inside.v[y * red.w + x] { 1.0 - red.at(x, y) } else { 0.0 });
+    let lb = Mask { w: red.w, h: red.h, v: shape.v.iter().map(|&v| v > 0.5).collect() }.bbox();
+
+    // What to match: the silhouette, and what is darker than round about it.
+    let cover = solid.plane();
+    let lum = Plane::from_fn(sw, sh, |x, y| if solid.v[y * sw + x] { grey(src, x, y) } else { 0.0 });
+    let around = lum.blur(2.0).zip(&cover.blur(2.0), |v, n| v / n.max(1e-4));
+    let dark_lines = dark.zip(&dark.blur(4.0), |v, b| v - b);
+    let (mut spots, mut want_shape, mut want_lines) = (Vec::new(), Vec::new(), Vec::new());
+    for y in (at.2 as usize).saturating_sub(2)..(at.3 as usize + 3).min(sh) {
+        for x in (at.0 as usize).saturating_sub(2)..(at.1 as usize + 3).min(sw) {
+            let i = y * sw + x;
+            spots.push((x as f32, y as f32));
+            want_shape.push(cover.v[i]);
+            want_lines.push((around.v[i] - lum.v[i]) * cover.v[i]);
+        }
+    }
+    let (mx, my) = ((at.0 + at.1) / 2.0, (at.2 + at.3) / 2.0);
+    // logo position = scale * (gear position - middle) + offset
+    let to_logo = |p: &[f32; 4], x: f32, y: f32| (p[0] * (x - mx) + p[2], p[1] * (y - my) + p[3]);
+    let score = |p: &[f32; 4]| {
+        let (mut s, mut d) = (Vec::with_capacity(spots.len()), Vec::with_capacity(spots.len()));
+        for &(x, y) in &spots {
+            let (lx, ly) = to_logo(p, x, y);
+            s.push(sample(&shape, lx, ly, 0.0));
+            d.push(sample(&dark_lines, lx, ly, 0.0));
+        }
+        correlation(&s, &want_shape) + 1.6 * correlation(&d, &want_lines)
+    };
+    let mut p = [(lb.1 - lb.0) / (at.1 - at.0).max(1.0), (lb.3 - lb.2) / (at.3 - at.2).max(1.0), (lb.0 + lb.1) / 2.0, (lb.2 + lb.3) / 2.0];
+    let mut step = [0.1f32, 0.1, 2.0, 2.0];
+    let mut best = score(&p);
+    for _ in 0..10 {
+        for _ in 0..40 {
+            let mut moved = false;
+            for i in 0..4 {
+                for sign in [1.0, -1.0] {
+                    let mut t = p;
+                    t[i] += sign * step[i];
+                    let s = score(&t);
+                    if s > best {
+                        (p, best, moved) = (t, s, true);
+                    }
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        step = step.map(|s| s * 0.6);
+    }
+
+    let drawn = |field: &Plane| {
+        let big = up(field).blur(2.8);
+        Mask::from_fn(sw * F, sh * F, |x, y| {
+            let f = F as f32;
+            let (lx, ly) = to_logo(&p, (x as f32 + 0.5) / f - 0.5, (y as f32 + 0.5) / f - 0.5);
+            sample(&big, (lx + 0.5) * f - 0.5, (ly + 0.5) * f - 0.5, 0.0) > 0.5
+        })
+    };
+    let shape = drawn(&shape);
+    let ink = drawn(&dark).and(&shape);
+    Face { shape, ink }
+}
+
+/// The frames' steel, a little softer: highlights brought down, shadows up.
+fn polish(shape: &Plane) -> Vec<[f32; 3]> {
+    crate::redraw::steel(shape).0.into_iter().map(|c| c.map(|v| 38.0 + v * 0.78)).collect()
+}
+
+fn grey(src: &RgbaImage, x: usize, y: usize) -> f32 {
+    let p = src.get_pixel(x as u32, y as u32).0;
+    (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0
+}
+
+/// The boost gear, as the original is built but clean: twelve identical
+/// smooth teeth, the raised ring with its two wedges, and the mascot with
+/// horns, rim and the big logo's crisp lines, all in polished steel with a
+/// soft shadow in the holes.
+fn gear(src: &RgbaImage, logo_src: &RgbaImage) -> RgbaImage {
     let (sw, sh) = (src.width() as usize, src.height() as usize);
     let (w, h) = (sw * F, sh * F);
+    let fs = F as f32;
     let peak = src.pixels().map(|p| p[3]).max().unwrap_or(255).max(1) as f32;
     let alpha_src = Plane::from_fn(sw, sh, |x, y| src.get_pixel(x as u32, y as u32)[3] as f32 / peak);
     let solid_src = Mask::from_fn(sw, sh, |x, y| alpha_src.at(x, y) > 0.75);
 
     // ---- outline: one tooth profile, repeated
-    let ah = up(&alpha_src).blur(12.0);
-    let filled = Mask { w, h, v: ah.v.iter().map(|&a| a > 0.42).collect() }.fill_holes().largest();
+    let ah = up(&alpha_src).blur(6.5);
+    let filled = Mask { w, h, v: ah.v.iter().map(|&a| a > 0.48).collect() }.fill_holes().largest();
     let (mut sx, mut sy, mut n) = (0f64, 0f64, 0f64);
     for y in 0..h {
         for x in 0..w {
@@ -593,147 +710,139 @@ pub fn gear(src: &RgbaImage, logo_src: &RgbaImage) -> RgbaImage {
         })
         .collect();
     for _ in 0..3 {
-        let r = 5usize;
+        let r = 3usize;
         fold = (0..per).map(|j| (0..=2 * r).map(|d| fold[(j + per * 2 + d - r) % per]).sum::<f32>() / (2 * r + 1) as f32).collect();
     }
-    let outer = Plane::from_fn(w, h, |x, y| {
+    let outline = Mask::from_fn(w, h, |x, y| {
         let (u, v) = (x as f32 - cx, (y as f32 - cy) / k);
         let fi = (v.atan2(u) + std::f32::consts::PI) / std::f32::consts::TAU * A as f32;
         let j0 = fi.floor() as usize % A;
         let f = fi - fi.floor();
         let r = fold[j0 % per] * (1.0 - f) + fold[(j0 + 1) % per] * f;
-        r - (u * u + v * v).sqrt()
+        r > (u * u + v * v).sqrt()
     });
-    let inside_outline = Mask { w, h, v: outer.v.iter().map(|&d| d > 0.0).collect() };
 
-    // ---- the face: where it sits in the gear, drawn from the logo
+    // ---- the ring: an ellipse through the holes' outer edges
     let holes_src = solid_src.fill_holes().and(&solid_src.not()).drop_small(40);
-    let face_box = if holes_src.any() {
-        let hb = holes_src.bbox();
-        let (ex, ey, rx, ry) = ((hb.0 + hb.1) / 2.0, (hb.2 + hb.3) / 2.0, (hb.1 - hb.0) / 2.0, (hb.3 - hb.2) / 2.0);
-        let inner = Mask::from_fn(sw, sh, |x, y| {
-            let (dx, dy) = ((x as f32 - ex) / rx.max(1.0), (y as f32 - ey) / ry.max(1.0));
-            solid_src.v[y * sw + x] && dx * dx + dy * dy < 0.95
-        });
-        let blob = inner.erode(2.5);
-        if blob.any() { Some(blob.largest().dilate(2.5).bbox()) } else { None }
-    } else {
-        None
-    };
-    // ---- inside the ring: an ellipse, see-through but for two small X's
-    // (one above the face, one below) and the face
     let hb = if holes_src.any() { holes_src.bbox() } else { (sw as f32 * 0.25, sw as f32 * 0.75, sh as f32 * 0.25, sh as f32 * 0.75) };
-    let (ex, ey, rx, ry) = ((hb.0 + hb.1) / 2.0 + 0.5, (hb.2 + hb.3) / 2.0 + 0.5, (hb.1 - hb.0) / 2.0 + 0.5, (hb.3 - hb.2) / 2.0 + 0.5);
-    let inner = Plane::from_fn(w, h, |x, y| {
-        let (dx, dy) = (((x as f32 + 0.5) / F as f32 - ex) / rx, ((y as f32 + 0.5) / F as f32 - ey) / ry);
-        dx * dx + dy * dy
-    });
-    let inner = Mask { w, h, v: inner.v.iter().map(|&d| d < 1.0).collect() };
-    // width of the solid run through the middle of a row of the original
-    let run = |y: usize| -> f32 {
+    let (ex, ey, rx) = ((hb.0 + hb.1) / 2.0 + 0.5, (hb.2 + hb.3) / 2.0 + 0.5, (hb.1 - hb.0) / 2.0 + 0.5);
+    // the holes end at the wedges' corners, short of the ellipse's top
+    let corner: Vec<f32> = (0..sw).filter(|&x| holes_src.v[hb.2 as usize * sw + x]).map(|x| ((x as f32 + 0.5 - ex) / rx).abs()).collect();
+    let corner = (corner.iter().sum::<f32>() / corner.len().max(1) as f32).min(0.6);
+    let ry = ((hb.3 - hb.2) / 2.0 + 0.5) / (1.0 - corner * corner).sqrt();
+    let ellipse = |rx: f32, ry: f32| {
+        Mask::from_fn(w, h, |x, y| {
+            let (dx, dy) = (((x as f32 + 0.5) / fs - ex) / rx, ((y as f32 + 0.5) / fs - ey) / ry);
+            dx * dx + dy * dy < 1.0
+        })
+    };
+    let inner = ellipse(rx, ry);
+
+    // ---- where the face is
+    let middle = Mask::from_fn(sw, sh, |x, y| {
+        let (dx, dy) = ((x as f32 + 0.5 - ex) / rx, (y as f32 + 0.5 - ey) / ry);
+        solid_src.v[y * sw + x] && dx * dx + dy * dy < 0.85
+    })
+    .erode(2.5);
+    let face_box = middle.any().then(|| middle.largest().dilate(2.5).bbox());
+    let (ft, fbm) = face_box.map(|b| (b.2, b.3)).unwrap_or((ey - ry * 0.4, ey + ry * 0.4));
+
+    // ---- the two wedges, one above the face and one below
+    // the solid run through the middle of a row of the original: its edges
+    let run = |y: usize| -> Option<(f32, f32)> {
         let c = ex as usize;
         if !solid_src.v[y * sw + c] {
-            return 0.0;
+            return None;
         }
         let (mut l, mut r) = (c, c);
         while l > 0 && solid_src.v[y * sw + l - 1] { l -= 1 }
         while r + 1 < sw && solid_src.v[y * sw + r + 1] { r += 1 }
-        (r - l + 1) as f32
+        // half a texel out on each side, into the half-covered edge
+        Some((l as f32 - 0.5, r as f32 + 1.5))
     };
-    let (ft, fbm) = face_box.map(|b| (b.2, b.3)).unwrap_or((ey - ry * 0.4, ey + ry * 0.4));
-    let top_rows = (hb.2 as usize + 2)..(ft as usize).max(hb.2 as usize + 3);
-    let bot_rows = (fbm as usize + 1)..(hb.3 as usize).saturating_sub(1).max(fbm as usize + 2);
-    let narrowest = |rows: std::ops::Range<usize>| rows.filter(|&y| y < sh && run(y) > 0.0).min_by(|&a, &b| run(a).total_cmp(&run(b)));
-    let mut bars = Mask::from_fn(w, h, |_, _| false);
-    // each X runs from the ring to just behind the face, no further
-    let (stop_top, stop_bot) = ((ft + (fbm - ft) * 0.25) * F as f32, (fbm - (fbm - ft) * 0.25) * F as f32);
-    for (rows, edge_row, upper) in [(top_rows, hb.2 as usize + 2, true), (bot_rows, (hb.3 as usize).saturating_sub(2), false)] {
-        let Some(yc) = narrowest(rows) else { continue };
-        let wc = run(yc);
-        let we = run(edge_row).max(wc + 2.0);
-        let spread = ((we - wc) / 2.0 / (yc as f32 - edge_row as f32).abs().max(1.0)).clamp(0.2, 1.2);
-        let bw = (wc * 0.4).clamp(1.2, 2.5) * F as f32 / 2.0;
-        let (px, py) = (ex * F as f32, (yc as f32 + 0.5) * F as f32);
-        for sgn in [-1.0f32, 1.0] {
-            let (dx, dy) = (sgn * spread, 1.0);
-            let len = (dx * dx + dy * dy).sqrt();
-            let (nx, ny) = (-dy / len, dx / len);
-            for y in 0..h {
-                for x in 0..w {
-                    let d = ((x as f32 + 0.5 - px) * nx + (y as f32 + 0.5 - py) * ny).abs();
-                    if d < bw && if upper { (y as f32) < stop_top } else { (y as f32) > stop_bot } {
-                        bars.v[y * w + x] = true;
-                    }
+    let top_rows = (hb.2 as usize + 1)..(ft as usize).max(hb.2 as usize + 3);
+    let bot_rows = (fbm as usize + 1)..(hb.3 as usize).max(fbm as usize + 2);
+    let mut wedges = Mask::from_fn(w, h, |_, _| false);
+    // each runs from the ring, narrowing, to just behind the face
+    let (stop_top, stop_bot) = (ft + (fbm - ft) * 0.25, fbm - (fbm - ft) * 0.25);
+    for (rows, upper) in [(top_rows, true), (bot_rows, false)] {
+        let runs: Vec<(usize, (f32, f32))> = rows.filter(|&y| y < sh).filter_map(|y| Some((y, run(y)?))).collect();
+        let Some(&(tip, _)) = runs.iter().min_by(|a, b| (a.1 .1 - a.1 .0).total_cmp(&(b.1 .1 - b.1 .0))) else { continue };
+        let side: Vec<_> = runs.into_iter().filter(|&(y, _)| if upper { y <= tip } else { y >= tip }).collect();
+        if side.len() < 2 {
+            continue;
+        }
+        let left = line_fit(side.iter().map(|&(y, (l, _))| (y as f32 + 0.5, l)));
+        let right = line_fit(side.iter().map(|&(y, (_, r))| (y as f32 + 0.5, r)));
+        for y in 0..h {
+            let sy = (y as f32 + 0.5) / fs;
+            if (upper && sy >= stop_top) || (!upper && sy <= stop_bot) {
+                continue;
+            }
+            // straight sides down to a narrow neck, which carries on to the face
+            let (mut l, mut r) = (left.0 + left.1 * sy, right.0 + right.1 * sy);
+            if r - l < NECK_SRC {
+                (l, r) = (ex - NECK_SRC / 2.0, ex + NECK_SRC / 2.0);
+            }
+            for x in 0..w {
+                let sx = (x as f32 + 0.5) / fs;
+                if sx >= l && sx <= r {
+                    wedges.v[y * w + x] = true;
                 }
             }
         }
     }
-    let bars = bars.and(&inner);
+    // rounded where they meet the ring, as the original's are
+    let holes = inner.and(&wedges.not()).plane().blur(WEDGE_ROUND);
+    let open = Mask { w, h, v: holes.v.iter().map(|&v| v > 0.5).collect() };
+    let body = outline.and(&open.not());
+    let line_a = ellipse(rx - RING_LINE, ry - RING_LINE).not().aa(1.5);
+    let band = body.and(&ellipse(rx + BAND_SRC.0, ry + BAND_SRC.1));
 
-    let fields = logo_fields(logo_src);
-    let (lw, lh) = (fields[0].w, fields[0].h);
-    let lab_l = argmax(&fields);
-    let dark_l = Mask { w: lw, h: lh, v: lab_l.iter().map(|&l| l == 2).collect() };
-    let face_l = dark_l.close(4.5).fill_holes();
-    let lb = face_l.bbox();
-    let face_lp = face_l.plane();
-    let mut face = Mask::from_fn(w, h, |_, _| false);
-    let mut ink = Mask::from_fn(w, h, |_, _| false);
-    if let Some(b) = face_box {
-        let m = RIM_SRC;
-        let bb = (b.0 + 0.5 + m, b.1 + 0.5 - m, b.2 + 0.5 + m, b.3 + 0.5 - m);
-        for y in 0..h {
-            for x in 0..w {
-                let (bx, by) = (x as f32 / F as f32, y as f32 / F as f32);
-                let lx = lb.0 + (bx - bb.0) * (lb.1 - lb.0) / (bb.1 - bb.0);
-                let ly = lb.2 + (by - bb.2) * (lb.3 - lb.2) / (bb.3 - bb.2);
-                let s: Vec<f32> = (0..3).map(|c| sample(&fields[c], lx, ly, if c == 0 { 1.0 } else { 0.0 })).collect();
-                let i = y * w + x;
-                ink.v[i] = s[2] > s[0] && s[2] > s[1];
-                face.v[i] = sample(&face_lp, lx, ly, 0.0) > 0.5;
-            }
-        }
-    }
-    let ink = ink.and(&face).erode(INK_THIN).drop_small(150);
-    let ink = Mask { w, h, v: ink.plane().blur(2.0).v.iter().map(|&v| v > 0.5).collect() };
-    let rim = face.dilate(RIM_SRC * F as f32);
+    let face = match face_box {
+        Some(at) => fit_face(src, &solid_src, at, logo_src),
+        None => Face { shape: Mask::from_fn(w, h, |_, _| false), ink: Mask::from_fn(w, h, |_, _| false) },
+    };
 
-    // ---- steel: ring, teeth, X bars and the rim round the face
-    let gear_shape = Mask { w, h, v: inside_outline.v.iter().zip(&inner.v).zip(&bars.v).map(|((&o, &i), &x)| o && (!i || x)).collect() };
-    let metal = Mask { w, h, v: gear_shape.v.iter().zip(&rim.v).zip(&face.v).map(|((&g, &r), &f)| (g || r) && !f).collect() };
-    let metal_a = metal.aa(1.5);
-    // the frames' steel, a little softer: highlights brought down, shadows up
-    let steel_rgb: Vec<[f32; 3]> = crate::redraw::steel(&metal_a).0.into_iter().map(|c| c.map(|v| 38.0 + v * 0.78)).collect();
-    let face_a = face.aa(1.5);
-    let ink_a = ink.aa(1.4);
-    let fbx = face.bbox();
-    let (fcx, fcy) = (fbx.0 * 0.62 + fbx.1 * 0.38, fbx.2 * 0.7 + fbx.3 * 0.3);
-    let fr = (fbx.1 - fbx.0).max(fbx.3 - fbx.2).max(1.0);
+    // ---- polished steel, a piece at a time so each gets its own bevel:
+    // teeth, then the band with the wedges, then the face's rim
+    let (body_a, band_a, shape_a, ink_a) = (body.aa(1.5), band.aa(3.0), face.shape.aa(1.5), face.ink.aa(1.4));
+    let (body_rgb, band_rgb, rim_rgb) = (polish(&body_a), polish(&band_a), polish(&shape_a));
+    let in_ring = inner.aa(10.0);
+    let (top, bottom) = ((ey - ry) * fs, (ey + ry) * fs);
+
+    // the silver inside the face's dark outline, shaded a little as the original is
+    let silver_a = face.ink.fill_holes().aa(1.5);
+    let weight = solid_src.plane().blur(2.5);
+    let lit = Plane::from_fn(sw, sh, |x, y| if solid_src.v[y * sw + x] { grey(src, x, y) / 255.0 } else { 0.0 });
+    let lit = up(&lit.blur(2.5).zip(&weight, |v, n| v / n.max(1e-4))).blur(8.0);
+
     let mut rgb = vec![[0f32; 3]; w * h];
     let mut alpha = Plane::new(w, h);
     for y in 0..h {
         for x in 0..w {
             let i = y * w + x;
-            // brushed silver face: a broad soft highlight up and to the left
-            let d = (((x as f32 - fcx).powi(2) + (y as f32 - fcy).powi(2)).sqrt() / fr).min(1.0);
-            let l = 0.66 + 0.30 * (1.0 - d * d);
-            let silver = [222.0 * l, 225.0 * l, 232.0 * l];
-            let fc: [f32; 3] = [0, 1, 2].map(|c| silver[c] * (1.0 - ink_a.v[i]) + 12.0 * ink_a.v[i]);
-            let m = metal_a.v[i];
-            let f = face_a.v[i] * (1.0 - m);
-            let cover = (m + f).min(1.0);
-            let a = cover;
-            if a > 0.0 {
-                rgb[i] = [0, 1, 2].map(|c| (steel_rgb[i][c] * m + fc[c] * f) / a);
-            }
-            alpha.v[i] = a;
+            let fy = y as f32;
+            let depth = if fy < ey * fs { (fy - top) / (ft * fs - top).max(1.0) } else { (bottom - fy) / (bottom - fbm * fs).max(1.0) };
+            let shade = WEDGE_SHADE.0 + (WEDGE_SHADE.1 - WEDGE_SHADE.0) * depth.clamp(0.0, 1.0);
+            let shade = 1.0 - (1.0 - shade) * in_ring.v[i];
+            let light = 1.0 - FACE_SHADE + FACE_SHADE * (lit.v[i] * 1.5).min(1.0);
+            let silver = [236.0 * light, 239.0 * light, 246.0 * light];
+            rgb[i] = [0, 1, 2].map(|c| {
+                let mix = |under: f32, over: f32, a: f32| under * (1.0 - a) + over * a;
+                let v = mix(body_rgb[i][c], band_rgb[i][c] * shade, band_a.v[i]);
+                let v = mix(v, rim_rgb[i][c], shape_a.v[i]);
+                let v = mix(v, silver[c], silver_a.v[i]);
+                mix(v, 12.0, ink_a.v[i])
+            });
+            alpha.v[i] = body_a.v[i].max(shape_a.v[i]);
         }
     }
     // ---- soft shadow in the holes, cast down and to the right
     let solid_now = Mask { w, h, v: alpha.v.iter().map(|&a| a > 0.5).collect() };
     let (ox, oy) = (9usize, 12usize);
     let cast = Plane::from_fn(w, h, |x, y| if x >= ox && y >= oy && solid_now.v[(y - oy) * w + x - ox] { 1.0 } else { 0.0 }).blur(6.0);
-    let in_holes = filled.and(&solid_now.not());
+    let in_holes = outline.and(&solid_now.not());
     for i in 0..w * h {
         if in_holes.v[i] {
             let a = alpha.v[i];
@@ -742,6 +851,17 @@ pub fn gear(src: &RgbaImage, logo_src: &RgbaImage) -> RgbaImage {
                 rgb[i] = rgb[i].map(|c| c * a / a2);
             }
             alpha.v[i] = a2;
+        }
+    }
+    // ---- the black line inside the ring, under the steel and the face
+    let hole_a = open.dilate(2.0).aa(1.5);
+    for i in 0..w * h {
+        let metal = body_a.v[i].max(shape_a.v[i]);
+        let l = line_a.v[i] * hole_a.v[i] * (1.0 - metal);
+        let a = alpha.v[i] + (1.0 - alpha.v[i]) * l;
+        if a > 0.0 && l > 0.0 {
+            rgb[i] = rgb[i].map(|c| (c * alpha.v[i] * (1.0 - l) + 8.0 * l) / a);
+            alpha.v[i] = a;
         }
     }
     bleed(&mut rgb, &Mask { w, h, v: alpha.v.iter().map(|&a| a > 0.02).collect() });

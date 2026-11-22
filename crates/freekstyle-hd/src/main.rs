@@ -22,6 +22,7 @@
 
 mod boost;
 mod esrgan;
+mod ledger;
 mod pack;
 mod pictures;
 mod plane;

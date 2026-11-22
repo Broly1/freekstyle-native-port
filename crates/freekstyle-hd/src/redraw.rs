@@ -1,18 +1,16 @@
-//! The chrome menu frames and the boost gear, redrawn (was
-//! tools/redraw_art.py).
-//!
-//! Their originals are too small for any upscaler to give clean edges, so
-//! only their shapes are kept: each outline is cleaned by the line-art
-//! model, smoothed at 8x and shaded from scratch as polished steel. The
-//! mascot's face keeps its art, sharpened toward ink. Once boost has been
-//! used (and the big logo recorded) the gear is drawn in `boost` instead,
-//! with the rest of the boost HUD.
+//! Menu art redrawn rather than upscaled (was tools/redraw_art.py): the
+//! chrome frames. Their originals are too small for any upscaler to give
+//! clean edges, so only their shapes are kept: each outline is cleaned by
+//! the line-art model, smoothed at 8x and shaded from scratch as polished
+//! steel. The boost HUD is drawn in `boost`; its gear and ball wait until
+//! the big logo is recorded.
 
 use std::path::{Path, PathBuf};
 
 use image::{imageops::FilterType, GrayImage, Rgb, RgbImage, RgbaImage};
 
 use crate::esrgan;
+use crate::ledger::Ledger;
 use crate::plane::{interp, resize_gray, resize_rgb, to_gray, Plane};
 
 const SCALE: u32 = 8;
@@ -21,7 +19,6 @@ const FRAMES: [&str; 9] = [
     "2110315c89bbc353", "30bc28b9de8ef28d", "878e4a1e10974735", "a1d39d8de8a026bc", "a65dd65071a7a664", "d20c188c5378f1f0",
     "d5991324da5372a2", "dde07492c37a030f", "fef14d34934841d0",
 ];
-const GEAR: &str = "04f1ae1a30c0cc38";
 /// Steel from shadow to highlight: position, then colour.
 const STEEL_AT: [f32; 7] = [0.00, 0.28, 0.48, 0.62, 0.70, 0.80, 1.00];
 const STEEL: [[f32; 7]; 3] = [
@@ -32,7 +29,7 @@ const STEEL: [[f32; 7]; 3] = [
 
 /// Whether this texture is redrawn here rather than upscaled.
 pub fn is_redrawn(hash: &str) -> bool {
-    hash == GEAR || FRAMES.contains(&hash) || crate::boost::is_boost(hash)
+    FRAMES.contains(&hash) || crate::boost::is_boost(hash)
 }
 
 /// Run pictures through the line-art model.
@@ -92,10 +89,6 @@ fn source(path: &Path, exe: &Path, tmp: &Path) -> Result<(Plane, RgbImage), Stri
     Ok((mask, resize_rgb(&out[1], w, h, FilterType::Lanczos3)))
 }
 
-fn open_rgba(p: &Path) -> Result<RgbaImage, String> {
-    Ok(image::open(p).map_err(|e| format!("{}: {e}", p.display()))?.to_rgba8())
-}
-
 fn rgba(rgb: &[[f32; 3]], alpha: &Plane) -> RgbaImage {
     RgbaImage::from_fn(alpha.w as u32, alpha.h as u32, |x, y| {
         let i = y as usize * alpha.w + x as usize;
@@ -117,73 +110,170 @@ fn frame(path: &Path, exe: &Path, tmp: &Path) -> Result<RgbaImage, String> {
     Ok(rgba(&rgb, &a))
 }
 
-/// Line art sharpened toward ink, keeping the shading in the face.
-fn inked(p: [u8; 3]) -> [f32; 3] {
-    let a = p.map(|v| v as f32 / 255.0);
-    let ink = (((a[0] + a[1] + a[2]) / 3.0 - 0.40) * 3.2 + 0.5).clamp(0.0, 1.0);
-    let ink = ink * ink * (3.0 - 2.0 * ink);
-    a.map(|v| (v * 0.45 + ink * 0.55) * 255.0)
-}
-
-fn gear(path: &Path, exe: &Path, tmp: &Path) -> Result<RgbaImage, String> {
-    let (mask, colour) = source(path, exe, tmp)?;
-    let solid = outline(&mask);
-    let (mut sx, mut sy, mut total) = (0.0f64, 0.0f64, 0.0f64);
-    for y in 0..solid.h {
-        for x in 0..solid.w {
-            let v = solid.at(x, y) as f64;
-            sx += x as f64 * v;
-            sy += y as f64 * v;
-            total += v;
-        }
-    }
-    let (cx, cy) = ((sx / total.max(1e-9)) as f32, (sy / total.max(1e-9)) as f32);
-    let (steel_rgb, _) = steel(&solid);
-    let h = solid.h as f32;
-    let rgb: Vec<[f32; 3]> = (0..solid.v.len())
-        .map(|i| {
-            let (x, y) = ((i % solid.w) as f32, (i / solid.w) as f32);
-            let r = (x - cx).hypot(y - cy);
-            // The mascot sits inside the ring: fade from steel to its art there.
-            let keep = ((0.30 * h - r) / (SCALE as f32 * 1.5)).clamp(0.0, 1.0);
-            let ink = inked(colour.get_pixel(x as u32, y as u32).0);
-            [0, 1, 2].map(|c| steel_rgb[i][c] * (1.0 - keep) + ink[c] * keep)
-        })
-        .collect();
-    Ok(rgba(&rgb, &solid))
-}
-
-/// The frames and the gear the dump holds and neither `out` nor `skip` has.
+/// What in the dump is to be redrawn now: what neither `out` nor `skip`
+/// has, and what `out` has from an older drawing of this tool. The gear and
+/// the ball wait for the logo; until then the game shows its own.
 pub fn todo(dump: &Path, out: &Path, skip: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
-    let mut have = crate::pack::hashes(&[out.to_path_buf()]);
-    have.extend(crate::pack::hashes(skip));
     let mut files: Vec<PathBuf> = std::fs::read_dir(dump).map_err(|e| e.to_string())?.flatten().map(|e| e.path()).collect();
     files.sort();
-    files.retain(|f| crate::pack::hash_of(f).is_some_and(|h| is_redrawn(h) && have.insert(h.to_string())));
+    let has_logo = crate::boost::find_logo(dump).is_some();
+    let ledger = Ledger::read(out);
+    let packed: Vec<PathBuf> = std::fs::read_dir(out).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    let mut seen = crate::pack::hashes(skip);
+    files.retain(|f| {
+        let Some(hash) = crate::pack::hash_of(f) else { return false };
+        if !is_redrawn(hash) || !seen.insert(hash.to_string()) || (crate::boost::needs_logo(hash) && !has_logo) {
+            return false;
+        }
+        let there: Vec<&PathBuf> = packed.iter().filter(|p| crate::pack::hash_of(p) == Some(hash)).collect();
+        match (there.as_slice(), crate::boost::version(hash)) {
+            ([], _) => true,
+            ([file], Some(version)) => ledger.outdated(hash, version, file, f),
+            _ => false,
+        }
+    });
     Ok(files)
 }
 
 /// Redraw `todo` into `out`, calling `progress` after each one.
 pub fn build(exe: &Path, todo: &[PathBuf], out: &Path, tmp: &Path, progress: &mut dyn FnMut(usize)) -> Result<usize, String> {
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let mut ledger = Ledger::read(out);
     for (n, f) in todo.iter().enumerate() {
         let hash = crate::pack::hash_of(f).unwrap_or_default();
         let dump = f.parent().unwrap_or(Path::new("."));
-        let art = if crate::boost::is_boost(hash) {
-            crate::boost::draw(hash, f, dump)?
-        } else if hash == GEAR {
-            // Drawn from the gear's outline and the big logo's lines once
-            // boost has been used (the logo is recorded then); until then
-            // from the gear alone.
-            match crate::boost::find_logo(dump) {
-                Some(logo) => crate::boost::gear(&open_rgba(f)?, &open_rgba(&logo)?),
-                None => gear(f, exe, tmp)?,
-            }
-        } else {
-            frame(f, exe, tmp)?
-        };
-        crate::pack::save(&image::DynamicImage::ImageRgba8(art), &out.join(f.file_name().unwrap()))?;
+        let version = crate::boost::version(hash);
+        let art = if version.is_some() { crate::boost::draw(hash, f, dump)? } else { frame(f, exe, tmp)? };
+        let target = out.join(f.file_name().unwrap());
+        if version.is_some() {
+            ledger.keep(hash, &target)?;
+        }
+        crate::pack::save(&image::DynamicImage::ImageRgba8(art), &target)?;
+        if let Some(version) = version {
+            ledger.note(hash, version, &target)?;
+        }
         progress(n + 1);
     }
     Ok(todo.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::boost::{BALL, GEAR, LOGO, METER};
+    use crate::ledger::REPLACED;
+
+    struct Dirs {
+        root: PathBuf,
+        dump: PathBuf,
+        out: PathBuf,
+        hand: PathBuf,
+    }
+
+    impl Dirs {
+        fn new(test: &str) -> Dirs {
+            let root = std::env::temp_dir().join(format!("freekstyle-redraw-{test}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let (dump, out, hand) = (root.join("dump"), root.join("out"), root.join("hand"));
+            for d in [&dump, &out, &hand] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            Dirs { root, dump, out, hand }
+        }
+        fn name(hash: &str) -> String {
+            format!("{hash}_T8_16x16_surface.png")
+        }
+        fn put(dir: &Path, hash: &str, side: u32, shade: u8) -> PathBuf {
+            let path = dir.join(Dirs::name(hash));
+            let im = RgbaImage::from_fn(side, side, |x, y| image::Rgba([shade, (x * 7) as u8, (y * 5) as u8, 255]));
+            crate::pack::save(&image::DynamicImage::ImageRgba8(im), &path).unwrap();
+            path
+        }
+        fn record(&self, hash: &str) {
+            Dirs::put(&self.dump, hash, 16, 1);
+        }
+        fn todo(&self) -> Vec<String> {
+            let found = todo(&self.dump, &self.out, std::slice::from_ref(&self.hand)).unwrap();
+            found.iter().map(|f| crate::pack::hash_of(f).unwrap().to_string()).collect()
+        }
+    }
+
+    impl Drop for Dirs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn gear_and_ball_wait_for_the_logo() {
+        let d = Dirs::new("wait");
+        for h in [GEAR, BALL, METER] {
+            d.record(h);
+        }
+        assert_eq!(d.todo(), [METER]);
+        d.record(LOGO);
+        assert_eq!(d.todo(), [GEAR, BALL, METER, LOGO]);
+    }
+
+    #[test]
+    fn packs_from_before_the_list_are_redrawn_once() {
+        let d = Dirs::new("once");
+        for (h, side) in [(LOGO, 64), (METER, 128)] {
+            d.record(h);
+            Dirs::put(&d.out, h, side, 2);
+        }
+        assert_eq!(d.todo(), [METER, LOGO]);
+        let mut ledger = Ledger::read(&d.out);
+        for h in [METER, LOGO] {
+            let file = d.out.join(Dirs::name(h));
+            ledger.keep(h, &file).unwrap();
+            ledger.note(h, 1, &file).unwrap();
+            assert!(d.out.join(REPLACED).join(Dirs::name(h)).is_file());
+        }
+        assert!(d.todo().is_empty());
+    }
+
+    #[test]
+    fn an_old_gear_stays_until_the_logo_is_recorded() {
+        let d = Dirs::new("old-gear");
+        d.record(GEAR);
+        Dirs::put(&d.out, GEAR, 128, 2);
+        assert!(d.todo().is_empty());
+        d.record(LOGO);
+        assert_eq!(d.todo(), [GEAR, LOGO]);
+    }
+
+    #[test]
+    fn a_newer_drawing_replaces_only_its_own_file() {
+        let d = Dirs::new("newer");
+        d.record(METER);
+        let file = Dirs::put(&d.out, METER, 128, 2);
+        Ledger::read(&d.out).note(METER, 1, &file).unwrap();
+        let source = d.dump.join(Dirs::name(METER));
+        assert!(Ledger::read(&d.out).outdated(METER, 2, &file, &source));
+        assert!(!Ledger::read(&d.out).outdated(METER, 1, &file, &source));
+        Dirs::put(&d.out, METER, 128, 3); // changed by hand
+        assert!(!Ledger::read(&d.out).outdated(METER, 2, &file, &source));
+    }
+
+    #[test]
+    fn hand_made_files_are_left_alone() {
+        use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+        let d = Dirs::new("hand");
+        for h in [METER, LOGO, GEAR, BALL] {
+            d.record(h);
+        }
+        // in the hand-made pack
+        Dirs::put(&d.hand, METER, 128, 2);
+        // saved by another program
+        let file = std::fs::File::create(d.out.join(Dirs::name(LOGO))).unwrap();
+        let encoder = PngEncoder::new_with_quality(file, CompressionType::Best, FilterType::Adaptive);
+        RgbaImage::new(128, 128).write_with_encoder(encoder).unwrap();
+        // at a size this tool never makes
+        Dirs::put(&d.out, GEAR, 96, 2);
+        // under a name it never gives
+        let odd = Dirs::put(&d.out, BALL, 128, 2);
+        std::fs::rename(&odd, d.out.join(format!("{BALL}.png"))).unwrap();
+        assert!(d.todo().is_empty());
+    }
 }
