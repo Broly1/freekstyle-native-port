@@ -35,8 +35,26 @@ const HD_BUDGET: u64 = 3 << 30;
 /// behind it, the ring and the mascot, which must all move together.
 const GEAR: [f32; 4] = [6.0, 144.5, 134.25, 209.0];
 const GEAR_SCALE: f32 = 0.8;
-/// How near the gear's centre the hub of the fill's fan is.
+/// How near the gear's centre its parts are centred.
 const GEAR_HUB: f32 = 2.0;
+
+/// Whether a triangle (its corners) is part of the boost gear. Being in the
+/// gear's box isn't enough, as text crosses it too: every part is either a
+/// quad centred on the gear, or a slice of the fill's fan round that centre.
+/// The fan's moving corner can land outside the box, as far as its diagonal.
+fn in_gear(p: [(f32, f32); 3]) -> bool {
+    let [x0, y0, x1, y1] = GEAR;
+    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let central = |(x, y): (f32, f32)| (x - cx).abs() <= GEAR_HUB && (y - cy).abs() <= GEAR_HUB;
+    let within = |mx: f32, my: f32| p.iter().all(|&(x, y)| (x0 - mx..=x1 + mx).contains(&x) && (y0 - my..=y1 + my).contains(&y));
+    if p.iter().any(|&c| central(c)) {
+        return within(cx - x0, cy - y0);
+    }
+    // half of a quad spans all of it, so its middle is the quad's
+    let [a, b, c] = p;
+    let mid = |a: f32, b: f32, c: f32| (a.min(b).min(c) + a.max(b).max(c)) / 2.0;
+    within(0.0, 0.0) && central((mid(a.0, b.0, c.0), mid(a.1, b.1, c.1)))
+}
 /// HD texture data brought to the GPU per frame; the rest waits its turn.
 const HD_UPLOAD_PER_FRAME: u64 = 64 << 20;
 /// Blurred side bars: the picture is halved down this chain (each blit
@@ -1518,15 +1536,10 @@ impl Hw {
         let overlay = self.overlay(&ctx, v, tex);
         let [gx0, gy0, gx1, gy1] = GEAR;
         let (gx, gy) = ((gx0 + gx1) / 2.0, (gy0 + gy1) / 2.0);
-        let gear_part = shape == Shape::Triangle && attrs.textured() && matches!(overlay, Overlay::Squeeze(_));
-        let within = |v: &Vertex, mx: f32, my: f32| (gx0 - mx..=gx1 + mx).contains(&v.x) && (gy0 - my..=gy1 + my).contains(&v.y);
-        // The fill is a fan round the centre, and the corner that moves with
-        // it can land outside the box. Left unshrunk, that slice would show
-        // past the teeth. The fan reaches no further than the box's diagonal.
-        let gear = gear_part
-            && (v.iter().all(|v| within(v, 0.0, 0.0))
-                || (v.iter().any(|v| (v.x - gx).abs() <= GEAR_HUB && (v.y - gy).abs() <= GEAR_HUB)
-                    && v.iter().all(|v| within(v, gx - gx0, gy - gy0))));
+        let gear = shape == Shape::Triangle
+            && attrs.textured()
+            && matches!(overlay, Overlay::Squeeze(_))
+            && in_gear([(v[0].x, v[0].y), (v[1].x, v[1].y), (v[2].x, v[2].y)]);
         let conv = |v: &Vertex| GpuVertex {
             x: {
                 let x = if gear { gx + (v.x - gx) * GEAR_SCALE } else { v.x };
@@ -2514,5 +2527,39 @@ impl gs::Backend for Hw {
                 eprintln!("[gs] upload: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod gear_tests {
+    use super::in_gear;
+
+    // Corners as logged from a race and from the start-up screens.
+    #[test]
+    fn the_gears_quads_shrink() {
+        assert!(in_gear([(6.125, 144.6875), (134.125, 144.6875), (6.125, 208.6875)]));
+        assert!(in_gear([(134.125, 144.6875), (6.125, 208.6875), (134.125, 208.6875)]));
+    }
+
+    #[test]
+    fn every_slice_of_the_fill_shrinks() {
+        let hub = (70.125, 176.6875);
+        assert!(in_gear([hub, (70.125, 208.6875), (67.8125, 208.6875)]));
+        assert!(in_gear([hub, (134.125, 208.6875), (134.125, 202.9375)]));
+        // the moving one, past each corner of the box
+        assert!(in_gear([hub, (70.125, 208.6875), (3.5625, 208.6875)]));
+        assert!(in_gear([hub, (70.125, 208.6875), (141.8125, 208.6875)]));
+        assert!(in_gear([hub, (6.125, 144.6875), (2.5, 144.6875)]));
+        assert!(in_gear([hub, (134.125, 144.6875), (142.625, 144.6875)]));
+    }
+
+    #[test]
+    fn text_over_the_gears_place_keeps_its_size() {
+        for x in [34.5, 66.5, 98.5, 130.5] {
+            assert!(!in_gear([(x, 174.0), (x + 32.0, 174.0), (x, 190.0)]));
+            assert!(!in_gear([(x + 32.0, 174.0), (x, 190.0), (x + 32.0, 190.0)]));
+        }
+        assert!(!in_gear([(20.5, 197.5), (52.5, 197.5), (20.5, 213.5)]));
+        assert!(!in_gear([(20.5, 150.0625), (220.125, 150.0625), (20.5, 199.9375)]));
     }
 }
