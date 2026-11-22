@@ -35,6 +35,8 @@ const HD_BUDGET: u64 = 3 << 30;
 /// behind it, the ring and the mascot, which must all move together.
 const GEAR: [f32; 4] = [6.0, 144.5, 134.25, 209.0];
 const GEAR_SCALE: f32 = 0.8;
+/// How near the gear's centre the hub of the fill's fan is.
+const GEAR_HUB: f32 = 2.0;
 /// HD texture data brought to the GPU per frame; the rest waits its turn.
 const HD_UPLOAD_PER_FRAME: u64 = 64 << 20;
 /// Blurred side bars: the picture is halved down this chain (each blit
@@ -1516,10 +1518,15 @@ impl Hw {
         let overlay = self.overlay(&ctx, v, tex);
         let [gx0, gy0, gx1, gy1] = GEAR;
         let (gx, gy) = ((gx0 + gx1) / 2.0, (gy0 + gy1) / 2.0);
-        let gear = shape == Shape::Triangle
-            && attrs.textured()
-            && matches!(overlay, Overlay::Squeeze(_))
-            && v.iter().all(|v| (gx0..=gx1).contains(&v.x) && (gy0..=gy1).contains(&v.y));
+        let gear_part = shape == Shape::Triangle && attrs.textured() && matches!(overlay, Overlay::Squeeze(_));
+        let within = |v: &Vertex, mx: f32, my: f32| (gx0 - mx..=gx1 + mx).contains(&v.x) && (gy0 - my..=gy1 + my).contains(&v.y);
+        // The fill is a fan round the centre, and the corner that moves with
+        // it can land outside the box. Left unshrunk, that slice would show
+        // past the teeth. The fan reaches no further than the box's diagonal.
+        let gear = gear_part
+            && (v.iter().all(|v| within(v, 0.0, 0.0))
+                || (v.iter().any(|v| (v.x - gx).abs() <= GEAR_HUB && (v.y - gy).abs() <= GEAR_HUB)
+                    && v.iter().all(|v| within(v, gx - gx0, gy - gy0))));
         let conv = |v: &Vertex| GpuVertex {
             x: {
                 let x = if gear { gx + (v.x - gx) * GEAR_SCALE } else { v.x };
